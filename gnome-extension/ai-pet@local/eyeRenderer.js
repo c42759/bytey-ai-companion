@@ -29,6 +29,10 @@ const POINTER_POLL_MS = 120;
 const BLINK_DURATION_MS = 175;
 const BLINK_MIN_MS = 3500;
 const BLINK_MAX_MS = 6000;
+const CURSOR_IDLE_WANDER_US = 10 * 1_000_000;
+const WANDER_MIN_HOLD_US = 1_100_000;
+const WANDER_MAX_HOLD_US = 2_800_000;
+const CURSOR_MOVE_THRESHOLD_PX = 3;
 
 /**
  * Procedural Cairo vector eye renderer attached to an `St.DrawingArea`.
@@ -57,6 +61,11 @@ export class EyeRenderer {
         this._gazeY = 0;
         this._targetGazeX = 0;
         this._targetGazeY = 0;
+        this._lastPtrX = null;
+        this._lastPtrY = null;
+        this._lastCursorMoveUs = GLib.get_monotonic_time();
+        this._nextWanderPickUs = 0;
+        this._wandering = false;
 
         this._blinking = false;
         this._blinkStartUs = 0;
@@ -322,6 +331,26 @@ export class EyeRenderer {
             return;
         try {
             const [ptrX, ptrY] = global.get_pointer();
+            const nowUs = GLib.get_monotonic_time();
+            const moved = this._lastPtrX === null ||
+                this._lastPtrY === null ||
+                Math.hypot(ptrX - this._lastPtrX, ptrY - this._lastPtrY) >= CURSOR_MOVE_THRESHOLD_PX;
+
+            if (moved) {
+                this._lastPtrX = ptrX;
+                this._lastPtrY = ptrY;
+                this._lastCursorMoveUs = nowUs;
+                this._wandering = false;
+            }
+
+            if ((nowUs - this._lastCursorMoveUs) >= CURSOR_IDLE_WANDER_US) {
+                if (!this._wandering || nowUs >= this._nextWanderPickUs) {
+                    this._wandering = true;
+                    this._pickWanderTarget(nowUs);
+                }
+                return;
+            }
+
             const [ax, ay] = this._drawingArea.get_transformed_position();
             const [aw, ah] = this._drawingArea.get_transformed_size();
             const cx = ax + aw / 2;
@@ -336,6 +365,28 @@ export class EyeRenderer {
             this._targetGazeX = 0;
             this._targetGazeY = 0;
         }
+    }
+
+    _pickWanderTarget(nowUs) {
+        let nextX = 0;
+        let nextY = 0;
+        if (Math.random() < 0.2) {
+            nextX = (Math.random() * 2 - 1) * 0.22;
+            nextY = (Math.random() * 2 - 1) * 0.18;
+        } else {
+            for (let attempt = 0; attempt < 5; attempt++) {
+                nextX = (Math.random() * 2 - 1) * 0.95;
+                nextY = (Math.random() * 2 - 1) * 0.85;
+                if (Math.hypot(nextX - this._targetGazeX, nextY - this._targetGazeY) >= 0.4)
+                    break;
+            }
+        }
+        this._targetGazeX = nextX;
+        this._targetGazeY = nextY;
+        const holdUs = Math.round(
+            WANDER_MIN_HOLD_US + Math.random() * (WANDER_MAX_HOLD_US - WANDER_MIN_HOLD_US)
+        );
+        this._nextWanderPickUs = nowUs + holdUs;
     }
 
     _needsGazeEase() {
