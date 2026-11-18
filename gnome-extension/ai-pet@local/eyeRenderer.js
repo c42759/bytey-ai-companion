@@ -40,7 +40,7 @@ export class EyeRenderer {
      * @param {number} [options.height=30] Logical height of the drawing area
      */
     constructor(options = {}) {
-        this._width = options.width ?? 78;
+        this._width = options.width ?? 96;
         this._height = options.height ?? 30;
 
         this._state = 'IDLE';
@@ -71,8 +71,10 @@ export class EyeRenderer {
         this._drawingArea = new St.DrawingArea({
             width: this._width,
             height: this._height,
-            x_align: Clutter.ActorAlign.CENTER,
-            y_align: Clutter.ActorAlign.CENTER,
+            x_expand: true,
+            y_expand: true,
+            x_align: Clutter.ActorAlign.FILL,
+            y_align: Clutter.ActorAlign.FILL,
         });
 
         this._repaintId = this._drawingArea.connect('repaint', area => {
@@ -326,9 +328,10 @@ export class EyeRenderer {
             const cy = ay + ah / 2;
             const dx = ptrX - cx;
             const dy = ptrY - cy;
-            const maxDist = 420;
-            this._targetGazeX = Math.max(-1, Math.min(1, dx / maxDist));
-            this._targetGazeY = Math.max(-1, Math.min(1, dy / maxDist));
+            const maxDistX = 320;
+            const maxDistY = 240;
+            this._targetGazeX = Math.max(-1, Math.min(1, dx / maxDistX));
+            this._targetGazeY = Math.max(-1, Math.min(1, dy / maxDistY));
         } catch (_e) {
             this._targetGazeX = 0;
             this._targetGazeY = 0;
@@ -434,9 +437,9 @@ export class EyeRenderer {
     _drawStaticDefaultEyes(cr, width, height) {
         const cx = width / 2;
         const cy = height / 2;
-        const sep = width * 0.21;
-        const eyeW = Math.max(6, width * 0.165);
-        const eyeH = Math.max(10, height * 0.56);
+        const eyeW = Math.max(8, Math.min(width * 0.14, height * 0.46));
+        const eyeH = Math.max(10, height * 0.58);
+        const sep = Math.max(eyeW * 1.05, Math.min(width * 0.16, height * 0.68));
 
         cr.setSourceRGBA(0.95, 0.96, 0.98, 0.95);
         this._fillCapsule(cr, cx - sep, cy, eyeW, eyeH);
@@ -451,9 +454,12 @@ export class EyeRenderer {
 
         const cx = width / 2;
         const cy = height / 2;
-        const sep = width * 0.21;
-        const baseW = Math.max(6, width * 0.165);
-        const baseH = Math.max(10, height * 0.56);
+        const baseW = Math.max(8, Math.min(width * 0.14, height * 0.46));
+        const baseH = Math.max(10, height * 0.58);
+        const sep = Math.max(baseW * 1.05, Math.min(width * 0.16, height * 0.68));
+        const edgePadX = Math.max(4, width * 0.04);
+        const maxTravelX = Math.max(6, (width / 2) - sep - (baseW * 0.55) - edgePadX);
+        const maxTravelY = Math.max(3, (height / 2) - (baseH * 0.52) - 2);
 
         let offsetX = 0;
         let offsetY = 0;
@@ -487,8 +493,8 @@ export class EyeRenderer {
             break;
         }
         case 'THINKING': {
-            const orbX = isFull ? Math.sin(this._phase * 2.8) * (width * 0.075) : width * 0.04;
-            const orbY = isFull ? (-height * 0.08 + Math.cos(this._phase * 5.6) * (height * 0.045)) : -height * 0.07;
+            const orbX = isFull ? Math.sin(this._phase * 2.8) * (maxTravelX * 0.75) : maxTravelX * 0.35;
+            const orbY = isFull ? (-maxTravelY * 0.55 + Math.cos(this._phase * 5.6) * (maxTravelY * 0.35)) : -maxTravelY * 0.45;
             offsetX = orbX;
             offsetY = orbY;
             leftScaleY = 0.92;
@@ -504,7 +510,7 @@ export class EyeRenderer {
             rightScaleY = 0.72;
             color = [1.0, 0.94, 0.78];
             if (isFull)
-                offsetX = Math.sin(this._phase * 4.2) * (width * 0.035);
+                offsetX = Math.sin(this._phase * 4.2) * (maxTravelX * 0.45);
             break;
         }
         case 'SPEAKING': {
@@ -539,8 +545,8 @@ export class EyeRenderer {
         case 'IDLE':
         default: {
             if (isFull && this._cursorTracking) {
-                offsetX = this._gazeX * (width * 0.075);
-                offsetY = this._gazeY * (height * 0.09);
+                offsetX = this._gazeX * maxTravelX;
+                offsetY = this._gazeY * maxTravelY;
             }
             leftScaleY = blink;
             rightScaleY = blink;

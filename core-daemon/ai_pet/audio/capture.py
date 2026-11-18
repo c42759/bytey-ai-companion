@@ -388,6 +388,7 @@ class VoiceInputService:
     async def _run_pw_record_stream(self) -> None:
         proc = await asyncio.create_subprocess_exec(
             PW_RECORD_BIN,
+            "--container=raw",
             "--format=s16",
             "--rate=16000",
             "--channels=1",
@@ -488,14 +489,32 @@ class VoiceInputService:
             utterance_audio = event["utterance_audio"] or b""
             await self._handle_utterance_end(utterance_audio, settings)
 
+    async def _transcribe_wake_clip(self, pcm_bytes: bytes, settings: dict[str, Any]) -> str:
+        backend = "local_whisper"
+        model = settings["wake_model"]
+        api_url = ""
+        api_key = None
+        if not self._stt.has_local_whisper and settings["stt_backend"] in (
+            "openai_whisper",
+            "custom_whisper",
+        ):
+            backend = settings["stt_backend"]
+            model = settings["stt_model"]
+            api_url = settings["stt_api_url"]
+            api_key = await self._resolve_stt_secret(backend)
+        return await self._stt.transcribe_wake_window(
+            pcm_bytes,
+            backend=backend,
+            model=model,
+            api_url=api_url,
+            api_key=api_key,
+            language=settings["stt_language"],
+            sample_rate=self._vad.sample_rate,
+        )
+
     async def _check_wake_onset(self, onset_audio: bytes, settings: dict[str, Any]) -> bool:
         try:
-            text = await self._stt.transcribe_wake_window(
-                onset_audio,
-                backend="local_whisper",
-                model=settings["wake_model"],
-                sample_rate=self._vad.sample_rate,
-            )
+            text = await self._transcribe_wake_clip(onset_audio, settings)
             matched, remainder = self._wake_matcher.match_wake_phrase(
                 text, settings["wake_phrase"], settings["wake_sensitivity"]
             )
@@ -565,12 +584,7 @@ class VoiceInputService:
         if not self._awake and not wake_checked_at_onset:
             if not settings["wake_enabled"]:
                 return
-            wake_text = await self._stt.transcribe_wake_window(
-                utterance_audio,
-                backend="local_whisper",
-                model=settings["wake_model"],
-                sample_rate=self._vad.sample_rate,
-            )
+            wake_text = await self._transcribe_wake_clip(utterance_audio, settings)
             matched, remainder = self._wake_matcher.match_wake_phrase(
                 wake_text, settings["wake_phrase"], settings["wake_sensitivity"]
             )
@@ -603,7 +617,6 @@ class VoiceInputService:
             return
 
         # Wake matched at onset during this utterance: transcribe full audio and strip wake phrase.
-        await _invoke(self._on_state_change, "THINKING")
         full_text = await self._transcribe_prompt(utterance_audio, settings)
         matched, remainder = self._wake_matcher.match_wake_phrase(
             full_text, settings["wake_phrase"], settings["wake_sensitivity"]
@@ -613,6 +626,7 @@ class VoiceInputService:
         self._onset_remainder = ""
 
         if prompt_text:
+            await _invoke(self._on_state_change, "THINKING")
             await _invoke(self._on_prompt_transcribed, prompt_text)
         else:
             # Wake-only utterance ("Hey Nova"): stay in LISTENING for follow-up prompt.

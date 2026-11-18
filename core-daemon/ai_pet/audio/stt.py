@@ -42,6 +42,11 @@ class STTEngine:
         self._model_lock = asyncio.Lock()
         self._warned_missing_whisper = False
 
+    @property
+    def has_local_whisper(self) -> bool:
+        """Return True if local faster-whisper package is available."""
+        return _WhisperModel is not None
+
     def _get_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(timeout=30.0)

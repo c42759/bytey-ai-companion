@@ -36,12 +36,15 @@ export class TranscriptDrawer {
         this._messages = [];
         this._messageWidgets = new Map();
         this._toolWidgets = new Map();
+        this._emptyStateActor = null;
         this._scrollIdleId = 0;
+        this._focusIdleId = 0;
         this._signalIds = [];
 
         this._container = new St.BoxLayout({
             style_class: 'ai-pet-drawer',
             orientation: Clutter.Orientation.VERTICAL,
+            width: DRAWER_WIDTH_FALLBACK,
             reactive: true,
             visible: false,
             x_expand: false,
@@ -88,6 +91,7 @@ export class TranscriptDrawer {
         const header = new St.BoxLayout({
             style_class: 'ai-pet-drawer-header',
             x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
         });
 
         this._providerLabel = new St.Label({
@@ -95,6 +99,7 @@ export class TranscriptDrawer {
             text: 'ollama',
             y_align: Clutter.ActorAlign.CENTER,
         });
+        this._providerLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
         header.add_child(this._providerLabel);
 
         this._statusLabel = new St.Label({
@@ -119,9 +124,12 @@ export class TranscriptDrawer {
 
         const closeBtn = new St.Button({
             style_class: 'ai-pet-close-btn',
-            icon_name: 'window-close-symbolic',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
+            child: new St.Icon({
+                icon_name: 'window-close-symbolic',
+                icon_size: 14,
+            }),
         });
         this._connect(closeBtn, 'clicked', () => this.close());
         header.add_child(closeBtn);
@@ -141,21 +149,11 @@ export class TranscriptDrawer {
             hscrollbar_policy: St.PolicyType.NEVER,
             vscrollbar_policy: St.PolicyType.AUTOMATIC,
             enable_mouse_scrolling: true,
-            overlay_scrollbars: true,
+            overlay_scrollbars: false,
             x_expand: true,
             y_expand: true,
-            child: this._messagesBox,
         });
-
-        this._emptyLabel = new St.Label({
-            style_class: 'ai-pet-empty-state',
-            text: 'No messages yet. Speak your wake phrase or type below.',
-            x_expand: true,
-            x_align: Clutter.ActorAlign.CENTER,
-        });
-        this._emptyLabel.clutter_text.line_wrap = true;
-        this._emptyLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-        this._emptyLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+        this._scrollView.set_child(this._messagesBox);
 
         this._container.add_child(this._scrollView);
     }
@@ -205,9 +203,12 @@ export class TranscriptDrawer {
 
         this._micBtn = new St.Button({
             style_class: 'ai-pet-mic-btn',
-            icon_name: 'audio-input-microphone-symbolic',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
+            child: new St.Icon({
+                icon_name: 'audio-input-microphone-symbolic',
+                icon_size: 15,
+            }),
         });
         this._connect(this._micBtn, 'clicked', () => {
             this._callbacks.onManualMic?.();
@@ -296,6 +297,7 @@ export class TranscriptDrawer {
         this._messages = [];
         this._messageWidgets.clear();
         this._toolWidgets.clear();
+        this._emptyStateActor = null;
         this._messagesBox.destroy_all_children();
 
         const list = Array.isArray(messages) ? messages : [];
@@ -341,8 +343,7 @@ export class TranscriptDrawer {
 
         let record = this._messageWidgets.get(messageId);
         if (!record) {
-            if (this._messages.length === 0 && this._emptyLabel.get_parent() === this._messagesBox)
-                this._messagesBox.remove_child(this._emptyLabel);
+            this._clearEmptyState();
 
             const initialText = incomingDelta !== null ? incomingDelta : incomingText;
             const msg = this._normalizeMessage({
@@ -445,14 +446,23 @@ export class TranscriptDrawer {
      * @param {number} [monitorIndex]
      */
     updatePosition(islandX, islandY, islandW, islandH, monitorIndex = this._monitorIndex) {
-        if (this._destroyed)
+        if (this._destroyed || !this._container)
             return;
 
         this._monitorIndex = monitorIndex;
-        const [, natW] = this._container.get_preferred_width(-1);
-        const [, natH] = this._container.get_preferred_height(-1);
-        const drawerW = Math.max(DRAWER_WIDTH_FALLBACK, natW || DRAWER_WIDTH_FALLBACK);
-        const drawerH = Math.min(440, Math.max(160, natH || DRAWER_HEIGHT_FALLBACK));
+        let drawerW = DRAWER_WIDTH_FALLBACK;
+        let drawerH = DRAWER_HEIGHT_FALLBACK;
+        try {
+            const [, natW] = this._container.get_preferred_width(-1);
+            if (Number.isFinite(natW) && natW > 0)
+                drawerW = Math.max(DRAWER_WIDTH_FALLBACK, Math.round(natW));
+            const [, natH] = this._container.get_preferred_height(drawerW);
+            if (Number.isFinite(natH) && natH > 0)
+                drawerH = Math.min(440, Math.max(160, Math.round(natH)));
+        } catch (_e) {
+            drawerW = DRAWER_WIDTH_FALLBACK;
+            drawerH = DRAWER_HEIGHT_FALLBACK;
+        }
 
         const inLowerHalf = this._positionManager.isInLowerHalf(islandY, islandH, monitorIndex);
         const targetX = Math.round(islandX + islandW / 2 - drawerW / 2);
@@ -480,19 +490,24 @@ export class TranscriptDrawer {
      * @param {number} [monitorIndex]
      */
     open(islandX, islandY, islandW, islandH, monitorIndex = this._monitorIndex) {
-        if (this._destroyed)
+        if (this._destroyed || !this._container)
             return;
 
         this._isOpen = true;
         this._container.visible = true;
         this.updatePosition(islandX, islandY, islandW, islandH, monitorIndex);
 
-        const parent = this._container.get_parent();
-        if (parent)
-            parent.set_child_above_sibling(this._container, null);
-
         this._scheduleScrollToBottom();
-        this._entry.clutter_text.grab_key_focus();
+        if (this._focusIdleId) {
+            GLib.source_remove(this._focusIdleId);
+            this._focusIdleId = 0;
+        }
+        this._focusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._focusIdleId = 0;
+            if (!this._destroyed && this._isOpen && this._entry)
+                this._entry.clutter_text.grab_key_focus();
+            return GLib.SOURCE_REMOVE;
+        });
         this._callbacks.onOpenChanged?.(true);
     }
 
@@ -503,7 +518,12 @@ export class TranscriptDrawer {
         if (this._destroyed || !this._isOpen)
             return;
         this._isOpen = false;
-        this._container.visible = false;
+        if (this._focusIdleId) {
+            GLib.source_remove(this._focusIdleId);
+            this._focusIdleId = 0;
+        }
+        if (this._container)
+            this._container.visible = false;
         this._callbacks.onOpenChanged?.(false);
     }
 
@@ -536,6 +556,10 @@ export class TranscriptDrawer {
             GLib.source_remove(this._scrollIdleId);
             this._scrollIdleId = 0;
         }
+        if (this._focusIdleId) {
+            GLib.source_remove(this._focusIdleId);
+            this._focusIdleId = 0;
+        }
 
         for (const [obj, id] of this._signalIds) {
             try {
@@ -547,6 +571,7 @@ export class TranscriptDrawer {
         this._signalIds = [];
         this._messageWidgets.clear();
         this._toolWidgets.clear();
+        this._emptyStateActor = null;
 
         if (this._container) {
             Main.layoutManager.removeChrome(this._container);
@@ -555,9 +580,33 @@ export class TranscriptDrawer {
         }
     }
 
+    _clearEmptyState() {
+        if (this._emptyStateActor) {
+            try {
+                if (this._emptyStateActor.get_parent() === this._messagesBox)
+                    this._messagesBox.remove_child(this._emptyStateActor);
+                this._emptyStateActor.destroy();
+            } catch (_e) {
+                // Ignore if already disposed.
+            }
+            this._emptyStateActor = null;
+        }
+    }
+
     _renderEmptyState() {
-        if (this._emptyLabel.get_parent() !== this._messagesBox)
-            this._messagesBox.add_child(this._emptyLabel);
+        if (this._destroyed || !this._messagesBox || this._emptyStateActor)
+            return;
+        const emptyLabel = new St.Label({
+            style_class: 'ai-pet-empty-state',
+            text: 'No messages yet. Speak your wake phrase or type below.',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.CENTER,
+        });
+        emptyLabel.clutter_text.line_wrap = true;
+        emptyLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+        emptyLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+        this._emptyStateActor = emptyLabel;
+        this._messagesBox.add_child(emptyLabel);
     }
 
     _normalizeMessage(raw) {
@@ -594,8 +643,7 @@ export class TranscriptDrawer {
     }
 
     _appendMessageWidget(msg) {
-        if (this._emptyLabel.get_parent() === this._messagesBox)
-            this._messagesBox.remove_child(this._emptyLabel);
+        this._clearEmptyState();
 
         const isUser = msg.role === 'user';
         const bubble = new St.BoxLayout({
@@ -641,10 +689,13 @@ export class TranscriptDrawer {
         if (!isUser) {
             replayBtn = new St.Button({
                 style_class: 'ai-pet-replay-btn',
-                icon_name: 'audio-volume-high-symbolic',
                 can_focus: true,
                 visible: msg.content.trim().length > 0,
                 y_align: Clutter.ActorAlign.CENTER,
+                child: new St.Icon({
+                    icon_name: 'audio-volume-high-symbolic',
+                    icon_size: 13,
+                }),
             });
             replayBtn.connect('clicked', () => {
                 const text = (msg.content ?? '').trim();

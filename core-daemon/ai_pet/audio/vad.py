@@ -187,9 +187,9 @@ class VADProcessor:
 
         if pcm_bytes:
             self._utterance_frames.append(pcm_bytes)
-        self._post_onset_ms += frame_dur_ms
         self._utterance_ms += frame_dur_ms
         if is_speech:
+            self._post_onset_ms += frame_dur_ms
             self._silence_ms = 0.0
         else:
             self._silence_ms += frame_dur_ms

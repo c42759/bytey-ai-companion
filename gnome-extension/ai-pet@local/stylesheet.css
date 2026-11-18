@@ -5,10 +5,10 @@
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
-  padding: 4px 14px;
+  padding: 4px 8px;
   min-width: 112px;
   min-height: 38px;
-  spacing: 8px;
+  spacing: 6px;
   transition: 180ms ease;
 }
 
@@ -18,7 +18,7 @@
 }
 
 .ai-pet-island-expanded {
-  padding: 4px 16px;
+  padding: 4px 10px;
   min-width: 164px;
   min-height: 42px;
 }
@@ -80,23 +80,26 @@
 }
 
 .ai-pet-drawer-header {
-  spacing: 8px;
-  padding-bottom: 6px;
+  spacing: 6px;
+  padding-bottom: 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .ai-pet-provider-pill {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 999px;
+  border-radius: 8px;
+  height: 26px;
   padding: 3px 10px;
-  font-size: 9pt;
+  max-width: 155px;
+  font-size: 8.5pt;
   font-weight: 600;
   color: #e4e4ec;
 }
 
 .ai-pet-status-dot {
   font-size: 8.5pt;
+  padding-left: 2px;
   color: rgba(148, 163, 184, 0.9);
 }
 
@@ -107,9 +110,11 @@
 .ai-pet-clear-btn,
 .ai-pet-close-btn {
   background-color: rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 9pt;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 8.5pt;
   font-weight: 600;
   color: #f4f4f7;
   transition: 120ms ease;
@@ -121,7 +126,8 @@
 }
 
 .ai-pet-close-btn {
-  padding: 4px 6px;
+  width: 26px;
+  padding: 0;
 }
 
 .ai-pet-scroll {
@@ -131,7 +137,7 @@
 
 .ai-pet-messages {
   spacing: 8px;
-  padding-right: 4px;
+  padding: 4px 6px 4px 2px;
 }
 
 .ai-pet-empty-state {
@@ -145,7 +151,7 @@
 
 .ai-pet-msg-user,
 .ai-pet-msg-assistant {
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 8px 10px;
   spacing: 5px;
 }
@@ -153,17 +159,20 @@
 .ai-pet-msg-user {
   background-color: rgba(56, 189, 248, 0.14);
   border: 1px solid rgba(56, 189, 248, 0.25);
-  margin-left: 22px;
+  margin-left: 16px;
+  margin-right: 4px;
 }
 
 .ai-pet-msg-assistant {
   background-color: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.09);
-  margin-right: 16px;
+  margin-left: 2px;
+  margin-right: 12px;
 }
 
 .ai-pet-msg-meta {
   spacing: 6px;
+  min-height: 24px;
 }
 
 .ai-pet-msg-role {
@@ -173,8 +182,8 @@
 }
 
 .ai-pet-source-badge {
-  border-radius: 999px;
-  padding: 1px 7px;
+  border-radius: 6px;
+  padding: 2px 7px;
   font-size: 7.5pt;
   font-weight: 600;
   background-color: rgba(255, 255, 255, 0.1);
@@ -192,8 +201,8 @@
 }
 
 .ai-pet-emotion-tag {
-  border-radius: 999px;
-  padding: 1px 7px;
+  border-radius: 6px;
+  padding: 2px 7px;
   font-size: 7.5pt;
   font-weight: 600;
   background-color: rgba(168, 85, 247, 0.22);
@@ -201,14 +210,17 @@
 }
 
 .ai-pet-msg-text {
-  font-size: 10pt;
+  font-size: 9.5pt;
   color: #f8fafc;
 }
 
 .ai-pet-replay-btn {
   background-color: rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
-  padding: 3px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   color: #e2e8f0;
   transition: 120ms ease;
 }
@@ -283,7 +295,8 @@
 .ai-pet-btn-allow,
 .ai-pet-btn-deny {
   border-radius: 8px;
-  padding: 4px 12px;
+  height: 28px;
+  padding: 0 12px;
   font-size: 8.5pt;
   font-weight: 700;
   transition: 120ms ease;
@@ -311,22 +324,23 @@
 
 .ai-pet-drawer-footer {
   spacing: 6px;
-  padding-top: 6px;
+  padding-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .ai-pet-entry {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 12px;
-  padding: 6px 10px;
+  border-radius: 10px;
+  height: 34px;
+  padding: 0 10px;
   color: #ffffff;
   caret-color: #38bdf8;
-  font-size: 10pt;
+  font-size: 9.5pt;
 }
 
 .ai-pet-entry:focus {
-  border-color: rgba(56, 189, 248, 0.72);
+  border-color: rgba(56, 189, 248, 0.65);
   background-color: rgba(255, 255, 255, 0.11);
 }
 
@@ -334,8 +348,9 @@
 .ai-pet-mic-btn {
   background-color: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 12px;
-  padding: 6px 12px;
+  border-radius: 10px;
+  height: 34px;
+  padding: 0 12px;
   color: #f8fafc;
   font-size: 9.5pt;
   font-weight: 600;
@@ -348,7 +363,8 @@
 }
 
 .ai-pet-mic-btn {
-  padding: 6px 9px;
+  width: 34px;
+  padding: 0;
 }
 
 .ai-pet-mic-btn-active {

@@ -1135,6 +1135,15 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
         )
         kokoro_group.add(self.kokoro_url_row)
 
+        self.kokoro_api_key_row, self.kokoro_api_key_badge = _make_secret_row("Kokoro API Key")
+        self.kokoro_api_key_row.connect(
+            "apply",
+            lambda *_: self._save_secret(
+                "KOKORO_API_KEY", self.kokoro_api_key_row, self.kokoro_api_key_badge
+            ),
+        )
+        kokoro_group.add(self.kokoro_api_key_row)
+
         self.kokoro_voice_combo = _make_string_combo("Kokoro Voices", "", [""])
         kokoro_refresh_btn = Gtk.Button(label="Refresh Voices", valign=Gtk.Align.CENTER)
         kokoro_refresh_btn.connect("clicked", lambda *_: self._refresh_tts_voices("kokoro"))
@@ -1207,9 +1216,35 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
 
     def _refresh_tts_voices(self, provider: str) -> None:
         base_url = self.kokoro_url_row.get_text().strip() if provider == "kokoro" else ""
+        pending_secret_key = ""
+        pending_secret_val = ""
+        if provider == "kokoro":
+            pending_secret_val = self.kokoro_api_key_row.get_text().strip()
+            if pending_secret_val:
+                pending_secret_key = "KOKORO_API_KEY"
+            if base_url and base_url != str(self._read_field("kokoro_base_url", "")):
+                self._patch_fields({"kokoro_base_url": base_url})
+        elif provider == "elevenlabs":
+            pending_secret_val = self.el_api_key_row.get_text().strip()
+            if pending_secret_val:
+                pending_secret_key = "ELEVENLABS_API_KEY"
         self._toast(f"Fetching {provider} voices...")
 
+        def fetch_task() -> ApiResult:
+            if pending_secret_key and pending_secret_val:
+                sec_res = self.client.put_secrets({pending_secret_key: pending_secret_val})
+                if sec_res.ok:
+                    self._secrets_configured[pending_secret_key] = True
+            return self.client.list_tts_voices(provider, base_url)
+
         def on_done(res: ApiResult) -> None:
+            if pending_secret_key and self._secrets_configured.get(pending_secret_key):
+                if pending_secret_key == "KOKORO_API_KEY":
+                    _set_secret_badge(self.kokoro_api_key_badge, True)
+                    self.kokoro_api_key_row.set_text("")
+                elif pending_secret_key == "ELEVENLABS_API_KEY":
+                    _set_secret_badge(self.el_api_key_badge, True)
+                    self.el_api_key_row.set_text("")
             self._set_offline(res.offline)
             if not res.ok:
                 self._toast(f"Voice fetch failed: {res.error}")
@@ -1260,7 +1295,7 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
                 self._loading = False
                 self._toast(f"Loaded {len(pairs)} ElevenLabs voice(s)")
 
-        self._run_async(lambda: self.client.list_tts_voices(provider, base_url), on_done)
+        self._run_async(fetch_task, on_done)
 
     def _on_kokoro_combo_selected(self, *_: object) -> None:
         if self._loading:
@@ -1483,6 +1518,9 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
             self.tts_muted_row.set_active(bool(self._read_field("tts_muted", False)))
             _set_combo_text(self.tts_provider_row, str(self._read_field("tts_provider", "kokoro")))
             self.kokoro_url_row.set_text(str(self._read_field("kokoro_base_url", "http://localhost:8880/v1")))
+            _set_secret_badge(
+                self.kokoro_api_key_badge, bool(self._secrets_configured.get("KOKORO_API_KEY", False))
+            )
             k_voice = str(self._read_field("kokoro_voice", "af_heart"))
             self.kokoro_voice_row.set_text(k_voice)
             if k_voice:

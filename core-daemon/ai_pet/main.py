@@ -151,6 +151,8 @@ class AiPetDaemon:
 
         self.state: str = "IDLE"
         self.emotion: str = "neutral"
+        self.emotion_reset_delay_s: float = 3.0
+        self._emotion_reset_task: asyncio.Task[None] | None = None
         self._active_session_id: str | None = None
         self._detected_tools_support: bool = False
         self._pending_confirmations: dict[str, asyncio.Future[bool]] = {}
@@ -208,10 +210,16 @@ class AiPetDaemon:
                 fut.set_result(False)
             self._pending_confirmations.pop(call_id, None)
 
-        for task in list(self._background_tasks):
+        current_task = asyncio.current_task()
+        other_tasks = [
+            task
+            for task in list(self._background_tasks)
+            if task is not current_task and not task.done()
+        ]
+        for task in other_tasks:
             task.cancel()
-        if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        if other_tasks:
+            await asyncio.gather(*other_tasks, return_exceptions=True)
 
         await self.voice_input.stop()
         await self.tts_player.stop()
@@ -394,6 +402,8 @@ class AiPetDaemon:
         self.state = state
         if emotion is not None:
             self.emotion = emotion
+        if state in ("LISTENING", "THINKING", "TOOL_CALLING", "SPEAKING"):
+            self._cancel_emotion_reset()
         payload: dict[str, Any] = {
             "type": "state_changed",
             "state": self.state,
@@ -403,10 +413,45 @@ class AiPetDaemon:
             payload["label"] = label
         await self.ipc.connection_manager.broadcast(payload)
 
+    def _cancel_emotion_reset(self) -> None:
+        if self._emotion_reset_task is not None and not self._emotion_reset_task.done():
+            self._emotion_reset_task.cancel()
+        self._emotion_reset_task = None
+
+    def _schedule_emotion_reset(
+        self,
+        delay_s: float | None = None,
+        *,
+        reset_error_state: bool = False,
+    ) -> None:
+        self._cancel_emotion_reset()
+        wait_s = self.emotion_reset_delay_s if delay_s is None else max(0.0, float(delay_s))
+
+        async def _reset_worker() -> None:
+            try:
+                await asyncio.sleep(wait_s)
+                await self.tts_player.wait_idle()
+                if self.state in ("IDLE", "MUTED") or (reset_error_state and self.state == "ERROR"):
+                    target_state = (
+                        "MUTED"
+                        if self.config_manager.config.voice_in.mic_muted
+                        else "IDLE"
+                    )
+                    if self.emotion != "neutral" or self.state != target_state:
+                        await self._set_state(target_state, emotion="neutral")
+            except asyncio.CancelledError:
+                pass
+
+        self._emotion_reset_task = self._track_task(_reset_worker())
+
     async def _on_subsystem_state_change(self, state: str) -> None:
+        prev_state = self.state
         norm = str(state or "IDLE").upper()
         if norm == "IDLE" and self.config_manager.config.voice_in.mic_muted:
             norm = "MUTED"
+        if prev_state == "SPEAKING" and norm in ("IDLE", "MUTED") and not self._chat_lock.locked():
+            await self._set_state(norm, emotion="neutral")
+            return
         await self._set_state(norm)
 
     async def _on_audio_level(self, source: str, rms: float) -> None:
@@ -728,18 +773,34 @@ class AiPetDaemon:
                         "is_final": True,
                     }
                 )
+                target_idle_state = "MUTED" if cfg.voice_in.mic_muted else "IDLE"
                 if cfg.voice_out.tts_muted or cfg.voice_out.tts_provider == "disabled":
                     await self._set_state(
-                        "MUTED" if cfg.voice_in.mic_muted else "IDLE",
+                        target_idle_state,
                         emotion=final_emotion,
                     )
+                    if final_emotion != "neutral":
+                        self._schedule_emotion_reset(self.emotion_reset_delay_s)
                 else:
+                    t0 = asyncio.get_running_loop().time()
                     await self.tts_player.wait_idle()
-                    if self.state not in ("IDLE", "MUTED"):
+                    tts_elapsed = asyncio.get_running_loop().time() - t0
+                    if tts_elapsed >= 0.35:
+                        # Audio reproduction completed: return mood back to neutral immediately.
                         await self._set_state(
-                            "MUTED" if cfg.voice_in.mic_muted else "IDLE",
+                            target_idle_state,
+                            emotion="neutral",
+                        )
+                    else:
+                        # No audio played (or instant failure): keep mood briefly, then reset.
+                        await self._set_state(
+                            target_idle_state,
                             emotion=final_emotion,
                         )
+                        if final_emotion != "neutral":
+                            self._schedule_emotion_reset(
+                                max(0.5, self.emotion_reset_delay_s - tts_elapsed)
+                            )
 
                 return {
                     "session_id": sid,
@@ -752,6 +813,7 @@ class AiPetDaemon:
                 err_text = f"Sorry, I hit an error: {exc}"
                 await self.storage.update_message(assistant_id, content=err_text, emotion="error")
                 await self._set_state("ERROR", emotion="error", label=str(exc)[:60])
+                self._schedule_emotion_reset(self.emotion_reset_delay_s, reset_error_state=True)
                 await self.ipc.connection_manager.broadcast(
                     {
                         "type": "transcript_delta",
@@ -974,15 +1036,20 @@ class AiPetDaemon:
         body = req.json()
         text = str(body.get("text") or "").strip()
         msg_id = req.path_params.get("message_id") or body.get("message_id")
-        if not text and msg_id:
+        replay_emotion: str | None = None
+        if msg_id:
             sid = await self._ensure_active_session(req.path_params.get("session_id"))
             for msg in await self.storage.list_messages(sid, limit=200):
                 if msg["id"] == msg_id:
-                    _, text = parse_emotion_prefix(str(msg.get("content") or ""))
+                    replay_emotion = str(msg.get("emotion") or "neutral")
+                    if not text:
+                        _, text = parse_emotion_prefix(str(msg.get("content") or ""))
                     break
         if not text:
             raise ValueError("No text available to replay")
         await self.tts_player.barge_in()
+        if replay_emotion and replay_emotion != "neutral":
+            await self._set_state(self.state, emotion=replay_emotion)
         await self.tts_player.speak_text(text)
         return {"ok": True}
 

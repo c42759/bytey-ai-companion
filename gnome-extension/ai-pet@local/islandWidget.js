@@ -56,7 +56,7 @@ export class IslandWidget {
             y_align: Clutter.ActorAlign.CENTER,
         });
 
-        this._eyeRenderer = new EyeRenderer({width: 78, height: 30});
+        this._eyeRenderer = new EyeRenderer({width: 96, height: 30});
         this._island.add_child(this._eyeRenderer.actor);
 
         this._statusLabel = new St.Label({

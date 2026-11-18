@@ -484,6 +484,8 @@ class _DualIPCProtocol(asyncio.Protocol):
             if self._transport is not None and not self._transport.is_closing():
                 self._transport.close()
         finally:
+            if self._transport is not None and not self._transport.is_closing():
+                self._transport.close()
             self._ipc._untrack_protocol(self)
 
 
