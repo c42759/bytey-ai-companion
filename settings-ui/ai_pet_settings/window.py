@@ -34,6 +34,7 @@ STT_BACKENDS = ("local_whisper", "openai_whisper", "custom_whisper")
 TTS_PROVIDERS = ("kokoro", "elevenlabs", "disabled")
 ANIMATION_MODES = ("full", "state_only", "disabled")
 POSITION_MODES = ("fixed", "floating")
+CHAT_DENSITIES = ("compact", "comfortable", "spacious")
 FIXED_ALIGNMENTS = (
     "top-left",
     "top-center",
@@ -82,6 +83,9 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "offset_y": (("visuals", "offset_y"), ("offset_y",)),
     "float_x": (("visuals", "float_x"), ("float_x",)),
     "float_y": (("visuals", "float_y"), ("float_y",)),
+    "chat_width": (("visuals", "chat_width"), ("chat_width",)),
+    "chat_height": (("visuals", "chat_height"), ("chat_height",)),
+    "chat_density": (("visuals", "chat_density"), ("chat_density",)),
 }
 
 
@@ -140,6 +144,14 @@ def _make_secret_row(title: str, subtitle: str = "") -> tuple[Adw.PasswordEntryR
     return row, badge
 
 
+SECRET_MASK_PLACEHOLDER = "••••••••••••••••"
+
+
+def _is_masked_placeholder(value: str) -> bool:
+    cleaned = value.strip()
+    return bool(cleaned) and (cleaned == SECRET_MASK_PLACEHOLDER or set(cleaned) == {"•"})
+
+
 def _set_secret_badge(badge: Gtk.Label, configured: bool) -> None:
     if configured:
         badge.set_label("Configured")
@@ -149,6 +161,13 @@ def _set_secret_badge(badge: Gtk.Label, configured: bool) -> None:
         badge.set_label("Not set")
         badge.remove_css_class("success")
         badge.add_css_class("dim-label")
+
+
+def _set_secret_row_state(
+    row: Adw.PasswordEntryRow, badge: Gtk.Label, configured: bool
+) -> None:
+    _set_secret_badge(badge, configured)
+    row.set_text(SECRET_MASK_PLACEHOLDER if configured else "")
 
 
 class MCPServerDialog(Adw.Dialog):
@@ -393,7 +412,34 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
         for source_id in list(self._debounce_timers.values()):
             GLib.source_remove(source_id)
         self._debounce_timers.clear()
+        self._flush_pending_entry_fields()
         return False
+
+    def _flush_pending_entry_fields(self) -> None:
+        if self._loading:
+            return
+        candidates = {
+            "pet_name": self.pet_name_row.get_text().strip(),
+            "wake_phrase": self.wake_phrase_row.get_text().strip(),
+            "llm_base_url": self.llm_base_url_row.get_text().strip(),
+            "llm_model": self.model_entry_row.get_text().strip(),
+            "whisper_model": self.whisper_model_row.get_text().strip(),
+            "stt_api_url": self.stt_api_url_row.get_text().strip(),
+            "kokoro_base_url": self.kokoro_url_row.get_text().strip(),
+            "kokoro_voice": self.kokoro_voice_row.get_text().strip(),
+            "elevenlabs_voice_id": self.el_voice_id_row.get_text().strip(),
+            "elevenlabs_model_id": self.el_model_row.get_text().strip(),
+        }
+        dirty: dict[str, Any] = {}
+        for field, val in candidates.items():
+            if val and val != str(self._read_field(field, "")):
+                dirty[field] = val
+        if dirty:
+            patch = self._build_patch(dirty)
+            try:
+                self.client.patch_config(patch)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Async & Config Helpers
@@ -490,9 +536,13 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
 
     def _save_secret(self, secret_name: str, entry: Adw.PasswordEntryRow, badge: Gtk.Label) -> None:
         value = entry.get_text().strip()
-        if not value:
-            self._toast("Enter a secret value before applying")
+        if not value or _is_masked_placeholder(value):
+            if _is_masked_placeholder(value):
+                self._toast(f"{secret_name} already configured (type a new key to replace)")
+            else:
+                self._toast("Enter a secret value before applying")
             return
+        self._flush_pending_entry_fields()
 
         def on_done(res: ApiResult) -> None:
             self._set_offline(res.offline)
@@ -500,8 +550,9 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
                 self._toast(f"Secret save failed: {res.error}")
                 return
             self._secrets_configured[secret_name] = True
-            _set_secret_badge(badge, True)
-            entry.set_text("")
+            self._loading = True
+            _set_secret_row_state(entry, badge, True)
+            self._loading = False
             self._toast(f"Updated {secret_name}")
 
         self._run_async(lambda: self.client.put_secrets({secret_name: value}), on_done)
@@ -710,13 +761,18 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
         provider = _combo_selected_text(self.provider_row)
         secret_key = PROVIDER_SECRET_MAP.get(provider)
         if not secret_key:
+            self.llm_api_key_row.set_text("")
             self.llm_api_key_row.set_sensitive(False)
             self.llm_api_key_badge.set_label("Not needed")
             self.llm_api_key_badge.remove_css_class("success")
             self.llm_api_key_badge.add_css_class("dim-label")
             return
         self.llm_api_key_row.set_sensitive(True)
-        _set_secret_badge(self.llm_api_key_badge, bool(self._secrets_configured.get(secret_key, False)))
+        _set_secret_row_state(
+            self.llm_api_key_row,
+            self.llm_api_key_badge,
+            bool(self._secrets_configured.get(secret_key, False)),
+        )
 
     def _on_apply_llm_api_key(self, *_: object) -> None:
         provider = _combo_selected_text(self.provider_row)
@@ -1133,6 +1189,14 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
                 {"kokoro_base_url": self.kokoro_url_row.get_text().strip()}, "Saved Kokoro URL"
             ),
         )
+        self.kokoro_url_row.connect(
+            "changed",
+            lambda *_: self._patch_debounced(
+                "kokoro_base_url",
+                lambda: {"kokoro_base_url": self.kokoro_url_row.get_text().strip()},
+                600,
+            ),
+        )
         kokoro_group.add(self.kokoro_url_row)
 
         self.kokoro_api_key_row, self.kokoro_api_key_badge = _make_secret_row("Kokoro API Key")
@@ -1220,14 +1284,18 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
         pending_secret_val = ""
         if provider == "kokoro":
             pending_secret_val = self.kokoro_api_key_row.get_text().strip()
-            if pending_secret_val:
+            if pending_secret_val and not _is_masked_placeholder(pending_secret_val):
                 pending_secret_key = "KOKORO_API_KEY"
+            else:
+                pending_secret_val = ""
             if base_url and base_url != str(self._read_field("kokoro_base_url", "")):
                 self._patch_fields({"kokoro_base_url": base_url})
         elif provider == "elevenlabs":
             pending_secret_val = self.el_api_key_row.get_text().strip()
-            if pending_secret_val:
+            if pending_secret_val and not _is_masked_placeholder(pending_secret_val):
                 pending_secret_key = "ELEVENLABS_API_KEY"
+            else:
+                pending_secret_val = ""
         self._toast(f"Fetching {provider} voices...")
 
         def fetch_task() -> ApiResult:
@@ -1239,12 +1307,12 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
 
         def on_done(res: ApiResult) -> None:
             if pending_secret_key and self._secrets_configured.get(pending_secret_key):
+                self._loading = True
                 if pending_secret_key == "KOKORO_API_KEY":
-                    _set_secret_badge(self.kokoro_api_key_badge, True)
-                    self.kokoro_api_key_row.set_text("")
+                    _set_secret_row_state(self.kokoro_api_key_row, self.kokoro_api_key_badge, True)
                 elif pending_secret_key == "ELEVENLABS_API_KEY":
-                    _set_secret_badge(self.el_api_key_badge, True)
-                    self.el_api_key_row.set_text("")
+                    _set_secret_row_state(self.el_api_key_row, self.el_api_key_badge, True)
+                self._loading = False
             self._set_offline(res.offline)
             if not res.ok:
                 self._toast(f"Voice fetch failed: {res.error}")
@@ -1351,6 +1419,40 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
         )
         eye_group.add(self.cursor_tracking_row)
         page.add(eye_group)
+
+        chat_group = Adw.PreferencesGroup(
+            title="Chat Window & Density",
+            description="Resize the transcript drawer or adapt its UI density to your desktop.",
+        )
+        self.chat_density_row = _make_string_combo("Chat Density", "", CHAT_DENSITIES)
+        self.chat_density_row.connect(
+            "notify::selected",
+            lambda *_: self._patch_fields(
+                {"chat_density": _combo_selected_text(self.chat_density_row)}, "Saved chat density"
+            ),
+        )
+        chat_group.add(self.chat_density_row)
+
+        self.chat_width_row = Adw.SpinRow.new_with_range(260, 900, 10)
+        self.chat_width_row.set_title("Chat Width (px)")
+        self.chat_width_row.connect(
+            "notify::value",
+            lambda *_: self._patch_debounced(
+                "chat_width", lambda: {"chat_width": int(self.chat_width_row.get_value())}
+            ),
+        )
+        chat_group.add(self.chat_width_row)
+
+        self.chat_height_row = Adw.SpinRow.new_with_range(220, 900, 10)
+        self.chat_height_row.set_title("Chat Height (px)")
+        self.chat_height_row.connect(
+            "notify::value",
+            lambda *_: self._patch_debounced(
+                "chat_height", lambda: {"chat_height": int(self.chat_height_row.get_value())}
+            ),
+        )
+        chat_group.add(self.chat_height_row)
+        page.add(chat_group)
 
         pos_group = Adw.PreferencesGroup(title="Island Placement")
         self.position_mode_row = _make_string_combo("Position Mode", "", POSITION_MODES)
@@ -1512,14 +1614,20 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
             _set_combo_text(self.stt_backend_row, str(self._read_field("stt_backend", "local_whisper")))
             self.whisper_model_row.set_text(str(self._read_field("whisper_model", "base")))
             self.stt_api_url_row.set_text(str(self._read_field("stt_api_url", "")))
-            _set_secret_badge(self.stt_api_key_badge, bool(self._secrets_configured.get("STT_API_KEY", False)))
+            _set_secret_row_state(
+                self.stt_api_key_row,
+                self.stt_api_key_badge,
+                bool(self._secrets_configured.get("STT_API_KEY", False)),
+            )
 
             # Voice Output
             self.tts_muted_row.set_active(bool(self._read_field("tts_muted", False)))
             _set_combo_text(self.tts_provider_row, str(self._read_field("tts_provider", "kokoro")))
             self.kokoro_url_row.set_text(str(self._read_field("kokoro_base_url", "http://localhost:8880/v1")))
-            _set_secret_badge(
-                self.kokoro_api_key_badge, bool(self._secrets_configured.get("KOKORO_API_KEY", False))
+            _set_secret_row_state(
+                self.kokoro_api_key_row,
+                self.kokoro_api_key_badge,
+                bool(self._secrets_configured.get("KOKORO_API_KEY", False)),
             )
             k_voice = str(self._read_field("kokoro_voice", "af_heart"))
             self.kokoro_voice_row.set_text(k_voice)
@@ -1527,8 +1635,10 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
                 self.kokoro_voice_combo.set_model(Gtk.StringList.new([k_voice]))
                 self.kokoro_voice_combo.set_selected(0)
             self.kokoro_speed_scale.set_value(float(self._read_field("kokoro_speed", 1.0)))
-            _set_secret_badge(
-                self.el_api_key_badge, bool(self._secrets_configured.get("ELEVENLABS_API_KEY", False))
+            _set_secret_row_state(
+                self.el_api_key_row,
+                self.el_api_key_badge,
+                bool(self._secrets_configured.get("ELEVENLABS_API_KEY", False)),
             )
             self.el_voice_id_row.set_text(str(self._read_field("elevenlabs_voice_id", "")))
             self.el_model_row.set_text(str(self._read_field("elevenlabs_model_id", "eleven_flash_v2_5")))
@@ -1536,6 +1646,9 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
             # Visuals & Position
             _set_combo_text(self.anim_mode_row, str(self._read_field("animation_mode", "full")))
             self.cursor_tracking_row.set_active(bool(self._read_field("cursor_tracking", True)))
+            _set_combo_text(self.chat_density_row, str(self._read_field("chat_density", "comfortable")))
+            self.chat_width_row.set_value(float(self._read_field("chat_width", 380)))
+            self.chat_height_row.set_value(float(self._read_field("chat_height", 420)))
             pos_mode = str(self._read_field("position_mode", "fixed"))
             _set_combo_text(self.position_mode_row, pos_mode)
             self._sync_position_groups(pos_mode)

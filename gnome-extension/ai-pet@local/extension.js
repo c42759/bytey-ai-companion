@@ -40,6 +40,9 @@ export default class AiPetExtension extends Extension {
                 offset_y: 12,
                 float_x: 500,
                 float_y: 40,
+                chat_width: 380,
+                chat_height: 420,
+                chat_density: 'comfortable',
             },
         };
 
@@ -60,6 +63,21 @@ export default class AiPetExtension extends Extension {
             onReplayTts: (messageId, text) => this._handleReplayTts(messageId, text),
             onManualMic: () => this._handleManualMic(),
             onConfirmTool: (callId, approved) => this._handleConfirmTool(callId, approved),
+            onResizeCommit: (width, height) => {
+                this._patchConfig({
+                    visuals: {
+                        chat_width: Math.round(width),
+                        chat_height: Math.round(height),
+                    },
+                }).catch(() => {});
+            },
+            onDensityChange: density => {
+                this._patchConfig({
+                    visuals: {
+                        chat_density: String(density),
+                    },
+                }).catch(() => {});
+            },
             onOpenChanged: isOpen => {
                 if (isOpen)
                     this._refreshActiveSession().catch(() => {});

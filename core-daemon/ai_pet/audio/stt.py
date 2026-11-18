@@ -86,7 +86,12 @@ class STTEngine:
                 return None
 
     def _run_local_transcribe(
-        self, whisper_model: Any, pcm_bytes: bytes, language: str | None
+        self,
+        whisper_model: Any,
+        pcm_bytes: bytes,
+        language: str | None,
+        prompt_hint: str | None = None,
+        hotwords: str | None = None,
     ) -> str:
         usable_len = len(pcm_bytes) - (len(pcm_bytes) % 2)
         if usable_len < 2:
@@ -94,11 +99,39 @@ class STTEngine:
         audio = (
             np.frombuffer(pcm_bytes[:usable_len], dtype=np.int16).astype(np.float32) / 32768.0
         )
+        peak = float(np.max(np.abs(audio))) if audio.size > 0 else 0.0
+        if peak < 0.015:
+            return ""
+        if 0.035 <= peak < 0.35:
+            gain = min(3.0, 0.65 / peak)
+            audio = np.clip(audio * gain, -1.0, 1.0)
         lang_arg = None if not language or language.lower() == "auto" else language
-        segments, _info = whisper_model.transcribe(
-            audio, language=lang_arg, beam_size=1, vad_filter=False
-        )
-        return " ".join(seg.text.strip() for seg in segments if getattr(seg, "text", "")).strip()
+        kwargs: dict[str, Any] = {
+            "language": lang_arg,
+            "beam_size": 2,
+            "vad_filter": False,
+            "condition_on_previous_text": False,
+            "no_speech_threshold": 0.55,
+        }
+        if prompt_hint:
+            kwargs["initial_prompt"] = prompt_hint
+        if hotwords:
+            kwargs["hotwords"] = hotwords
+        try:
+            segments, _info = whisper_model.transcribe(audio, **kwargs)
+        except TypeError:
+            segments, _info = whisper_model.transcribe(
+                audio, language=lang_arg, beam_size=1, vad_filter=False
+            )
+        valid_texts: list[str] = []
+        for seg in segments:
+            txt = getattr(seg, "text", "").strip()
+            if not txt:
+                continue
+            if getattr(seg, "no_speech_prob", 0.0) > 0.62:
+                continue
+            valid_texts.append(txt)
+        return " ".join(valid_texts).strip()
 
     async def transcribe(
         self,
@@ -109,6 +142,8 @@ class STTEngine:
         api_key: str | None = None,
         language: str | None = None,
         sample_rate: int = 16000,
+        prompt_hint: str | None = None,
+        hotwords: str | None = None,
     ) -> str:
         """Transcribe signed 16-bit mono PCM bytes using configured STT backend."""
         if not pcm_bytes:
@@ -120,7 +155,12 @@ class STTEngine:
                 return ""
             try:
                 return await asyncio.to_thread(
-                    self._run_local_transcribe, whisper_model, pcm_bytes, language
+                    self._run_local_transcribe,
+                    whisper_model,
+                    pcm_bytes,
+                    language,
+                    prompt_hint,
+                    hotwords,
                 )
             except Exception as exc:
                 logger.warning("Local Whisper transcription failed: %s", exc)
@@ -142,6 +182,8 @@ class STTEngine:
             data: dict[str, str] = {"model": model or "whisper-1"}
             if language and language.lower() != "auto":
                 data["language"] = language
+            if prompt_hint:
+                data["prompt"] = prompt_hint
 
             files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
             client = self._get_client()
@@ -168,6 +210,8 @@ class STTEngine:
         api_key: str | None = None,
         language: str | None = None,
         sample_rate: int = 16000,
+        prompt_hint: str | None = None,
+        hotwords: str | None = None,
     ) -> str:
         """Transcribe short wake-word onset audio window."""
         return await self.transcribe(
@@ -178,4 +222,6 @@ class STTEngine:
             api_key=api_key,
             language=language,
             sample_rate=sample_rate,
+            prompt_hint=prompt_hint,
+            hotwords=hotwords,
         )

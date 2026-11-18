@@ -88,6 +88,7 @@ class VoiceInputService:
         on_state_change: Callable[..., Any] | None = None,
         on_prompt_transcribed: Callable[..., Any] | None = None,
         on_barge_in: Callable[..., Any] | None = None,
+        is_busy: Callable[[], bool] | None = None,
         stt_engine: STTEngine | None = None,
         vad: VADProcessor | None = None,
         wake_matcher: WakeWordMatcher | None = None,
@@ -98,6 +99,7 @@ class VoiceInputService:
         self._on_state_change = on_state_change
         self._on_prompt_transcribed = on_prompt_transcribed
         self._on_barge_in = on_barge_in
+        self._is_busy = is_busy
 
         self._stt = stt_engine or STTEngine()
         self._owns_stt = stt_engine is None
@@ -146,6 +148,16 @@ class VoiceInputService:
                         ("wake_enabled",),
                     ),
                     True,
+                )
+            ),
+            "pet_name": str(
+                _cfg_get(
+                    cfg,
+                    (
+                        ("general", "pet_name"),
+                        ("pet_name",),
+                    ),
+                    "Nova",
                 )
             ),
             "wake_phrase": str(
@@ -331,7 +343,18 @@ class VoiceInputService:
             await _invoke(self._on_state_change, "IDLE")
 
     async def trigger_manual_listen(self) -> None:
-        """Force active listening immediately and barge in on any active TTS playback."""
+        """Force active listening immediately (or stop and submit if already speaking in manual mode)."""
+        if (
+            self._awake
+            and (self._manual_triggered or self._awaiting_followup)
+            and getattr(self._vad, "_active", False)
+            and getattr(self._vad, "_speech_detected", False)
+        ):
+            audio = self._vad.force_stop_listening()
+            if audio:
+                await self._handle_utterance_end(audio, self._read_settings())
+                return
+
         self._muted = False
         self._awake = True
         self._awaiting_followup = True
@@ -342,6 +365,23 @@ class VoiceInputService:
             self._wake_task.cancel()
             self._wake_task = None
         await _invoke(self._on_barge_in)
+        self._vad.force_start_listening()
+        await _invoke(self._on_state_change, "LISTENING")
+
+    async def start_followup_listen(self) -> None:
+        """Enter conversational follow-up listening after an assistant voice reply finishes."""
+        settings = self._read_settings()
+        if settings["muted"] or self._muted:
+            return
+        self._awake = True
+        self._awaiting_followup = True
+        self._manual_triggered = False
+        self._onset_remainder = ""
+        self._followup_idle_ms = 0.0
+        if self._wake_task and not self._wake_task.done():
+            self._wake_task.cancel()
+            self._wake_task = None
+        self._vad.reset()
         self._vad.force_start_listening()
         await _invoke(self._on_state_change, "LISTENING")
 
@@ -457,6 +497,15 @@ class VoiceInputService:
         if self._muted:
             return
 
+        # Ignore ambient mic frames while the assistant is THINKING, TOOL_CALLING, or SPEAKING
+        # so headset bleed or desk clicks never queue phantom wake-word triggers.
+        if self._is_busy is not None and not self._manual_triggered and self._is_busy():
+            if self._wake_task and not self._wake_task.done():
+                self._wake_task.cancel()
+                self._wake_task = None
+            self._vad.reset()
+            return
+
         self._vad.vad_threshold = settings["vad_threshold"]
         self._vad.silence_timeout_ms = settings["silence_timeout_ms"]
         self._vad.max_utterance_s = settings["max_utterance_s"]
@@ -489,6 +538,14 @@ class VoiceInputService:
             utterance_audio = event["utterance_audio"] or b""
             await self._handle_utterance_end(utterance_audio, settings)
 
+    @staticmethod
+    def _build_whisper_hints(settings: dict[str, Any]) -> tuple[str, str]:
+        wake = str(settings.get("wake_phrase") or "Hey Nova").strip()
+        pet = str(settings.get("pet_name") or "Nova").strip()
+        prompt_hint = f"{wake}. {pet}." if pet and pet.lower() not in wake.lower() else f"{wake}."
+        hotwords = f"{wake}, {pet}" if pet and pet.lower() not in wake.lower() else wake
+        return prompt_hint, hotwords
+
     async def _transcribe_wake_clip(self, pcm_bytes: bytes, settings: dict[str, Any]) -> str:
         backend = "local_whisper"
         model = settings["wake_model"]
@@ -502,6 +559,7 @@ class VoiceInputService:
             model = settings["stt_model"]
             api_url = settings["stt_api_url"]
             api_key = await self._resolve_stt_secret(backend)
+        _prompt_hint, hotwords = self._build_whisper_hints(settings)
         return await self._stt.transcribe_wake_window(
             pcm_bytes,
             backend=backend,
@@ -510,6 +568,8 @@ class VoiceInputService:
             api_key=api_key,
             language=settings["stt_language"],
             sample_rate=self._vad.sample_rate,
+            prompt_hint=None,
+            hotwords=hotwords,
         )
 
     async def _check_wake_onset(self, onset_audio: bytes, settings: dict[str, Any]) -> bool:
@@ -517,6 +577,13 @@ class VoiceInputService:
             text = await self._transcribe_wake_clip(onset_audio, settings)
             matched, remainder = self._wake_matcher.match_wake_phrase(
                 text, settings["wake_phrase"], settings["wake_sensitivity"]
+            )
+            logger.info(
+                "Wake onset transcript=%r (wake_phrase=%r, matched=%s, remainder=%r)",
+                text,
+                settings["wake_phrase"],
+                matched,
+                remainder,
             )
             if matched:
                 self._awake = True
@@ -538,7 +605,7 @@ class VoiceInputService:
             if backend in ("openai_whisper", "custom_whisper")
             else None
         )
-        return await self._stt.transcribe(
+        text = await self._stt.transcribe(
             pcm_bytes,
             backend=backend,
             model=settings["stt_model"],
@@ -546,7 +613,11 @@ class VoiceInputService:
             api_key=api_key,
             language=settings["stt_language"],
             sample_rate=self._vad.sample_rate,
+            prompt_hint=None,
+            hotwords=None,
         )
+        logger.info("Prompt STT transcript=%r (backend=%s, model=%s)", text, backend, settings["stt_model"])
+        return text
 
     async def _handle_utterance_end(
         self, utterance_audio: bytes, settings: dict[str, Any]
@@ -569,7 +640,11 @@ class VoiceInputService:
         # Direct prompt capture when already awake via manual trigger or wake-only follow-up.
         if self._awake and (self._awaiting_followup or self._manual_triggered):
             await _invoke(self._on_state_change, "THINKING")
-            prompt_text = await self._transcribe_prompt(utterance_audio, settings)
+            raw_prompt = await self._transcribe_prompt(utterance_audio, settings)
+            matched_w, rem_w = self._wake_matcher.match_wake_phrase(
+                raw_prompt, settings["wake_phrase"], settings["wake_sensitivity"]
+            )
+            prompt_text = rem_w if matched_w else raw_prompt
             self._awake = False
             self._awaiting_followup = False
             self._manual_triggered = False
@@ -587,6 +662,13 @@ class VoiceInputService:
             wake_text = await self._transcribe_wake_clip(utterance_audio, settings)
             matched, remainder = self._wake_matcher.match_wake_phrase(
                 wake_text, settings["wake_phrase"], settings["wake_sensitivity"]
+            )
+            logger.info(
+                "Short utterance wake check transcript=%r (wake_phrase=%r, matched=%s, remainder=%r)",
+                wake_text,
+                settings["wake_phrase"],
+                matched,
+                remainder,
             )
             if not matched:
                 return

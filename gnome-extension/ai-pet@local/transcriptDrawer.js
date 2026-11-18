@@ -6,7 +6,23 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const DRAWER_GAP_PX = 8;
 const DRAWER_WIDTH_FALLBACK = 380;
-const DRAWER_HEIGHT_FALLBACK = 400;
+const DRAWER_HEIGHT_FALLBACK = 420;
+const DRAWER_MIN_WIDTH = 260;
+const DRAWER_MAX_WIDTH = 900;
+const DRAWER_MIN_HEIGHT = 220;
+const DRAWER_MAX_HEIGHT = 900;
+
+const DENSITY_ORDER = ['compact', 'comfortable', 'spacious'];
+const DENSITY_LABELS = {
+    compact: 'Compact',
+    comfortable: 'Comfort',
+    spacious: 'Spacious',
+};
+const DENSITY_ICON_SIZES = {
+    compact: {close: 12, mic: 13, replay: 11},
+    comfortable: {close: 14, mic: 15, replay: 13},
+    spacious: {close: 16, mic: 17, replay: 15},
+};
 
 /**
  * Anchored expandable conversation transcript and tool-confirmation drawer.
@@ -20,6 +36,8 @@ export class TranscriptDrawer {
      * @param {(messageId: string, text: string) => void} [callbacks.onReplayTts]
      * @param {() => void} [callbacks.onManualMic]
      * @param {(callId: string, approved: boolean) => void} [callbacks.onConfirmTool]
+     * @param {(width: number, height: number) => void} [callbacks.onResizeCommit]
+     * @param {(density: string) => void} [callbacks.onDensityChange]
      * @param {(isOpen: boolean) => void} [callbacks.onOpenChanged]
      */
     constructor(positionManager, callbacks = {}) {
@@ -33,6 +51,16 @@ export class TranscriptDrawer {
         this._petName = 'AI Pet';
         this._monitorIndex = 0;
 
+        this._drawerWidth = DRAWER_WIDTH_FALLBACK;
+        this._drawerHeight = DRAWER_HEIGHT_FALLBACK;
+        this._density = 'comfortable';
+        this._lastIslandBounds = {x: 500, y: 12, width: 112, height: 38};
+
+        this._resizing = false;
+        this._resizeGrab = null;
+        this._resizeStartCoords = [0, 0];
+        this._resizeStartSize = [DRAWER_WIDTH_FALLBACK, DRAWER_HEIGHT_FALLBACK];
+
         this._messages = [];
         this._messageWidgets = new Map();
         this._toolWidgets = new Map();
@@ -42,9 +70,10 @@ export class TranscriptDrawer {
         this._signalIds = [];
 
         this._container = new St.BoxLayout({
-            style_class: 'ai-pet-drawer',
+            style_class: 'ai-pet-drawer ai-pet-density-comfortable',
             orientation: Clutter.Orientation.VERTICAL,
-            width: DRAWER_WIDTH_FALLBACK,
+            width: this._drawerWidth,
+            height: this._drawerHeight,
             reactive: true,
             visible: false,
             x_expand: false,
@@ -111,6 +140,17 @@ export class TranscriptDrawer {
         });
         header.add_child(this._statusLabel);
 
+        this._densityBtn = new St.Button({
+            style_class: 'ai-pet-density-btn',
+            label: DENSITY_LABELS[this._density] ?? 'Comfort',
+            can_focus: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._connect(this._densityBtn, 'clicked', () => {
+            this._cycleDensity();
+        });
+        header.add_child(this._densityBtn);
+
         const clearBtn = new St.Button({
             style_class: 'ai-pet-clear-btn',
             label: 'New Chat',
@@ -122,14 +162,15 @@ export class TranscriptDrawer {
         });
         header.add_child(clearBtn);
 
+        this._closeIcon = new St.Icon({
+            icon_name: 'window-close-symbolic',
+            icon_size: DENSITY_ICON_SIZES[this._density].close,
+        });
         const closeBtn = new St.Button({
             style_class: 'ai-pet-close-btn',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
-            child: new St.Icon({
-                icon_name: 'window-close-symbolic',
-                icon_size: 14,
-            }),
+            child: this._closeIcon,
         });
         this._connect(closeBtn, 'clicked', () => this.close());
         header.add_child(closeBtn);
@@ -201,19 +242,39 @@ export class TranscriptDrawer {
         this._connect(sendBtn, 'clicked', () => this._submitEntry());
         footer.add_child(sendBtn);
 
+        this._micIcon = new St.Icon({
+            icon_name: 'audio-input-microphone-symbolic',
+            icon_size: DENSITY_ICON_SIZES[this._density].mic,
+        });
         this._micBtn = new St.Button({
             style_class: 'ai-pet-mic-btn',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
-            child: new St.Icon({
-                icon_name: 'audio-input-microphone-symbolic',
-                icon_size: 15,
-            }),
+            child: this._micIcon,
         });
         this._connect(this._micBtn, 'clicked', () => {
             this._callbacks.onManualMic?.();
         });
         footer.add_child(this._micBtn);
+
+        const gripLabel = new St.Label({
+            style_class: 'ai-pet-resize-grip-label',
+            text: '◢',
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.END,
+        });
+        this._resizeHandle = new St.Bin({
+            style_class: 'ai-pet-resize-grip',
+            reactive: true,
+            track_hover: true,
+            can_focus: false,
+            y_align: Clutter.ActorAlign.END,
+            child: gripLabel,
+        });
+        this._connect(this._resizeHandle, 'button-press-event', (_a, ev) => this._onResizePress(ev));
+        this._connect(this._resizeHandle, 'motion-event', (_a, ev) => this._onResizeMotion(ev));
+        this._connect(this._resizeHandle, 'button-release-event', (_a, ev) => this._onResizeRelease(ev));
+        footer.add_child(this._resizeHandle);
 
         this._container.add_child(footer);
     }
@@ -283,6 +344,135 @@ export class TranscriptDrawer {
             this._monitorIndex = monIdx;
 
         this._providerLabel.text = model ? `${provider} · ${model}` : String(provider);
+
+        const rawWidth = Number(config.visuals?.chat_width ?? config.chat_width);
+        const rawHeight = Number(config.visuals?.chat_height ?? config.chat_height);
+        let sizeChanged = false;
+        if (Number.isFinite(rawWidth) && rawWidth >= DRAWER_MIN_WIDTH && !this._resizing) {
+            const clampedW = Math.max(DRAWER_MIN_WIDTH, Math.min(DRAWER_MAX_WIDTH, Math.round(rawWidth)));
+            if (clampedW !== this._drawerWidth) {
+                this._drawerWidth = clampedW;
+                sizeChanged = true;
+            }
+        }
+        if (Number.isFinite(rawHeight) && rawHeight >= DRAWER_MIN_HEIGHT && !this._resizing) {
+            const clampedH = Math.max(DRAWER_MIN_HEIGHT, Math.min(DRAWER_MAX_HEIGHT, Math.round(rawHeight)));
+            if (clampedH !== this._drawerHeight) {
+                this._drawerHeight = clampedH;
+                sizeChanged = true;
+            }
+        }
+        if (sizeChanged && this._container) {
+            this._container.set_size(this._drawerWidth, this._drawerHeight);
+            if (this._isOpen) {
+                const b = this._lastIslandBounds;
+                this.updatePosition(b.x, b.y, b.width, b.height, this._monitorIndex);
+            }
+        }
+
+        const rawDensity = String(config.visuals?.chat_density ?? config.chat_density ?? '').toLowerCase().trim();
+        if (DENSITY_ORDER.includes(rawDensity))
+            this._applyDensity(rawDensity, false);
+    }
+
+    _cycleDensity() {
+        const idx = DENSITY_ORDER.indexOf(this._density);
+        const nextDensity = DENSITY_ORDER[(idx + 1) % DENSITY_ORDER.length];
+        this._applyDensity(nextDensity, true);
+    }
+
+    _applyDensity(density, notifyCallback = false) {
+        if (this._destroyed || !this._container || !DENSITY_ORDER.includes(density))
+            return;
+        this._density = density;
+        for (const mode of DENSITY_ORDER)
+            this._container.remove_style_class_name(`ai-pet-density-${mode}`);
+        this._container.add_style_class_name(`ai-pet-density-${density}`);
+
+        if (this._densityBtn)
+            this._densityBtn.label = DENSITY_LABELS[density] ?? 'Comfort';
+
+        const sizes = DENSITY_ICON_SIZES[density] ?? DENSITY_ICON_SIZES.comfortable;
+        if (this._closeIcon)
+            this._closeIcon.icon_size = sizes.close;
+        if (this._micIcon)
+            this._micIcon.icon_size = sizes.mic;
+        for (const rec of this._messageWidgets.values()) {
+            if (rec.replayIcon)
+                rec.replayIcon.icon_size = sizes.replay;
+        }
+
+        if (notifyCallback)
+            this._callbacks.onDensityChange?.(density);
+    }
+
+    _onResizePress(event) {
+        if (event.get_button() !== Clutter.BUTTON_PRIMARY || this._destroyed || !this._container)
+            return Clutter.EVENT_PROPAGATE;
+
+        this._resizing = true;
+        this._resizeStartCoords = event.get_coords();
+        this._resizeStartSize = [this._drawerWidth, this._drawerHeight];
+        this._releaseResizeGrab();
+        try {
+            this._resizeGrab = global.stage.grab(this._resizeHandle);
+        } catch (_e) {
+            this._resizeGrab = null;
+        }
+        this._container.add_style_class_name('ai-pet-drawer-resizing');
+        return Clutter.EVENT_STOP;
+    }
+
+    _onResizeMotion(event) {
+        if (!this._resizing || this._destroyed || !this._container)
+            return Clutter.EVENT_PROPAGATE;
+
+        const [curX, curY] = event.get_coords();
+        const dx = curX - this._resizeStartCoords[0];
+        const dy = curY - this._resizeStartCoords[1];
+
+        const b = this._lastIslandBounds;
+        const inLowerHalf = this._positionManager.isInLowerHalf(b.y, b.height, this._monitorIndex);
+        const heightDelta = inLowerHalf ? -dy : dy;
+
+        const nextW = Math.max(
+            DRAWER_MIN_WIDTH,
+            Math.min(DRAWER_MAX_WIDTH, Math.round(this._resizeStartSize[0] + dx * 1.5))
+        );
+        const nextH = Math.max(
+            DRAWER_MIN_HEIGHT,
+            Math.min(DRAWER_MAX_HEIGHT, Math.round(this._resizeStartSize[1] + heightDelta))
+        );
+
+        if (nextW !== this._drawerWidth || nextH !== this._drawerHeight) {
+            this._drawerWidth = nextW;
+            this._drawerHeight = nextH;
+            this._container.set_size(nextW, nextH);
+            this.updatePosition(b.x, b.y, b.width, b.height, this._monitorIndex);
+        }
+        return Clutter.EVENT_STOP;
+    }
+
+    _onResizeRelease(event) {
+        if (!this._resizing || event.get_button() !== Clutter.BUTTON_PRIMARY)
+            return Clutter.EVENT_PROPAGATE;
+
+        this._resizing = false;
+        this._releaseResizeGrab();
+        this._container?.remove_style_class_name('ai-pet-drawer-resizing');
+        this._callbacks.onResizeCommit?.(this._drawerWidth, this._drawerHeight);
+        return Clutter.EVENT_STOP;
+    }
+
+    _releaseResizeGrab() {
+        if (this._resizeGrab) {
+            try {
+                this._resizeGrab.dismiss();
+            } catch (_e) {
+                // Ignore if grab was already dismissed.
+            }
+            this._resizeGrab = null;
+        }
     }
 
     /**
@@ -450,19 +640,10 @@ export class TranscriptDrawer {
             return;
 
         this._monitorIndex = monitorIndex;
-        let drawerW = DRAWER_WIDTH_FALLBACK;
-        let drawerH = DRAWER_HEIGHT_FALLBACK;
-        try {
-            const [, natW] = this._container.get_preferred_width(-1);
-            if (Number.isFinite(natW) && natW > 0)
-                drawerW = Math.max(DRAWER_WIDTH_FALLBACK, Math.round(natW));
-            const [, natH] = this._container.get_preferred_height(drawerW);
-            if (Number.isFinite(natH) && natH > 0)
-                drawerH = Math.min(440, Math.max(160, Math.round(natH)));
-        } catch (_e) {
-            drawerW = DRAWER_WIDTH_FALLBACK;
-            drawerH = DRAWER_HEIGHT_FALLBACK;
-        }
+        this._lastIslandBounds = {x: islandX, y: islandY, width: islandW, height: islandH};
+        const drawerW = this._drawerWidth;
+        const drawerH = this._drawerHeight;
+        this._container.set_size(drawerW, drawerH);
 
         const inLowerHalf = this._positionManager.isInLowerHalf(islandY, islandH, monitorIndex);
         const targetX = Math.round(islandX + islandW / 2 - drawerW / 2);
@@ -551,6 +732,8 @@ export class TranscriptDrawer {
             return;
         this._destroyed = true;
         this._isOpen = false;
+        this._resizing = false;
+        this._releaseResizeGrab();
 
         if (this._scrollIdleId) {
             GLib.source_remove(this._scrollIdleId);
@@ -686,16 +869,19 @@ export class TranscriptDrawer {
         metaRow.add_child(spacer);
 
         let replayBtn = null;
+        let replayIcon = null;
         if (!isUser) {
+            const iconSizes = DENSITY_ICON_SIZES[this._density] ?? DENSITY_ICON_SIZES.comfortable;
+            replayIcon = new St.Icon({
+                icon_name: 'audio-volume-high-symbolic',
+                icon_size: iconSizes.replay,
+            });
             replayBtn = new St.Button({
                 style_class: 'ai-pet-replay-btn',
                 can_focus: true,
                 visible: msg.content.trim().length > 0,
                 y_align: Clutter.ActorAlign.CENTER,
-                child: new St.Icon({
-                    icon_name: 'audio-volume-high-symbolic',
-                    icon_size: 13,
-                }),
+                child: replayIcon,
             });
             replayBtn.connect('clicked', () => {
                 const text = (msg.content ?? '').trim();
@@ -730,7 +916,7 @@ export class TranscriptDrawer {
 
         this._messagesBox.add_child(bubble);
 
-        const record = {msg, box: bubble, bodyLabel, emotionLabel, toolBox, replayBtn};
+        const record = {msg, box: bubble, bodyLabel, emotionLabel, toolBox, replayBtn, replayIcon};
         this._messageWidgets.set(msg.id, record);
         return record;
     }

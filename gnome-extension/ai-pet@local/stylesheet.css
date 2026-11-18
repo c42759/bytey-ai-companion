@@ -69,14 +69,16 @@
 
 .ai-pet-drawer {
   background-color: rgba(14, 14, 18, 0.96);
-  border-radius: 18px;
+  border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.68);
   padding: 12px;
-  width: 380px;
-  max-height: 440px;
-  spacing: 10px;
+  spacing: 8px;
   color: #f4f4f7;
+}
+
+.ai-pet-drawer-resizing {
+  border-color: rgba(56, 189, 248, 0.55);
 }
 
 .ai-pet-drawer-header {
@@ -91,7 +93,7 @@
   border-radius: 8px;
   height: 26px;
   padding: 3px 10px;
-  max-width: 155px;
+  max-width: 145px;
   font-size: 8.5pt;
   font-weight: 600;
   color: #e4e4ec;
@@ -107,19 +109,21 @@
   color: #4ade80;
 }
 
+.ai-pet-density-btn,
 .ai-pet-clear-btn,
 .ai-pet-close-btn {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   height: 26px;
-  padding: 0 10px;
+  padding: 0 8px;
   font-size: 8.5pt;
   font-weight: 600;
   color: #f4f4f7;
   transition: 120ms ease;
 }
 
+.ai-pet-density-btn:hover,
 .ai-pet-clear-btn:hover,
 .ai-pet-close-btn:hover {
   background-color: rgba(255, 255, 255, 0.16);
@@ -131,8 +135,7 @@
 }
 
 .ai-pet-scroll {
-  min-height: 140px;
-  max-height: 290px;
+  min-height: 100px;
 }
 
 .ai-pet-messages {
@@ -371,6 +374,193 @@
   background-color: rgba(56, 189, 248, 0.3);
   border-color: rgba(56, 189, 248, 0.75);
   color: #ffffff;
+}
+
+.ai-pet-resize-grip {
+  width: 16px;
+  height: 24px;
+  padding: 0 0 1px 2px;
+}
+
+.ai-pet-resize-grip-label {
+  font-size: 9pt;
+  color: rgba(255, 255, 255, 0.32);
+}
+
+.ai-pet-resize-grip:hover .ai-pet-resize-grip-label {
+  color: rgba(56, 189, 248, 0.85);
+}
+
+/* Desktop Density Presets: Compact & Spacious */
+
+.ai-pet-density-compact {
+  padding: 8px;
+  spacing: 6px;
+  border-radius: 14px;
+}
+
+.ai-pet-density-compact .ai-pet-drawer-header {
+  spacing: 4px;
+  padding-bottom: 5px;
+}
+
+.ai-pet-density-compact .ai-pet-provider-pill,
+.ai-pet-density-compact .ai-pet-density-btn,
+.ai-pet-density-compact .ai-pet-clear-btn,
+.ai-pet-density-compact .ai-pet-close-btn {
+  height: 22px;
+  border-radius: 6px;
+  font-size: 7.5pt;
+  padding: 0 6px;
+}
+
+.ai-pet-density-compact .ai-pet-close-btn {
+  width: 22px;
+  padding: 0;
+}
+
+.ai-pet-density-compact .ai-pet-status-dot {
+  font-size: 7.5pt;
+}
+
+.ai-pet-density-compact .ai-pet-messages {
+  spacing: 5px;
+}
+
+.ai-pet-density-compact .ai-pet-msg-user,
+.ai-pet-density-compact .ai-pet-msg-assistant {
+  padding: 5px 8px;
+  spacing: 3px;
+  border-radius: 9px;
+}
+
+.ai-pet-density-compact .ai-pet-msg-meta {
+  min-height: 20px;
+  spacing: 4px;
+}
+
+.ai-pet-density-compact .ai-pet-msg-role {
+  font-size: 7.5pt;
+}
+
+.ai-pet-density-compact .ai-pet-source-badge,
+.ai-pet-density-compact .ai-pet-emotion-tag {
+  font-size: 6.8pt;
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
+.ai-pet-density-compact .ai-pet-msg-text {
+  font-size: 8.5pt;
+}
+
+.ai-pet-density-compact .ai-pet-replay-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+}
+
+.ai-pet-density-compact .ai-pet-drawer-footer {
+  spacing: 4px;
+  padding-top: 5px;
+}
+
+.ai-pet-density-compact .ai-pet-entry,
+.ai-pet-density-compact .ai-pet-send-btn,
+.ai-pet-density-compact .ai-pet-mic-btn {
+  height: 28px;
+  border-radius: 8px;
+  font-size: 8.5pt;
+}
+
+.ai-pet-density-compact .ai-pet-mic-btn {
+  width: 28px;
+  padding: 0;
+}
+
+.ai-pet-density-spacious {
+  padding: 16px;
+  spacing: 12px;
+  border-radius: 20px;
+}
+
+.ai-pet-density-spacious .ai-pet-drawer-header {
+  spacing: 8px;
+  padding-bottom: 10px;
+}
+
+.ai-pet-density-spacious .ai-pet-provider-pill,
+.ai-pet-density-spacious .ai-pet-density-btn,
+.ai-pet-density-spacious .ai-pet-clear-btn,
+.ai-pet-density-spacious .ai-pet-close-btn {
+  height: 30px;
+  border-radius: 10px;
+  font-size: 9.5pt;
+  padding: 0 11px;
+}
+
+.ai-pet-density-spacious .ai-pet-close-btn {
+  width: 30px;
+  padding: 0;
+}
+
+.ai-pet-density-spacious .ai-pet-status-dot {
+  font-size: 9.5pt;
+}
+
+.ai-pet-density-spacious .ai-pet-messages {
+  spacing: 10px;
+}
+
+.ai-pet-density-spacious .ai-pet-msg-user,
+.ai-pet-density-spacious .ai-pet-msg-assistant {
+  padding: 10px 14px;
+  spacing: 7px;
+  border-radius: 14px;
+}
+
+.ai-pet-density-spacious .ai-pet-msg-meta {
+  min-height: 28px;
+  spacing: 8px;
+}
+
+.ai-pet-density-spacious .ai-pet-msg-role {
+  font-size: 9.5pt;
+}
+
+.ai-pet-density-spacious .ai-pet-source-badge,
+.ai-pet-density-spacious .ai-pet-emotion-tag {
+  font-size: 8.2pt;
+  padding: 2px 9px;
+  border-radius: 7px;
+}
+
+.ai-pet-density-spacious .ai-pet-msg-text {
+  font-size: 10.5pt;
+}
+
+.ai-pet-density-spacious .ai-pet-replay-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.ai-pet-density-spacious .ai-pet-drawer-footer {
+  spacing: 8px;
+  padding-top: 10px;
+}
+
+.ai-pet-density-spacious .ai-pet-entry,
+.ai-pet-density-spacious .ai-pet-send-btn,
+.ai-pet-density-spacious .ai-pet-mic-btn {
+  height: 40px;
+  border-radius: 12px;
+  font-size: 10.5pt;
+}
+
+.ai-pet-density-spacious .ai-pet-mic-btn {
+  width: 40px;
+  padding: 0;
 }
 
 /* Right-Click Context Menu */

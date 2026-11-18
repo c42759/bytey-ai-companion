@@ -64,6 +64,9 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "offset_y": ("visuals", "offset_y"),
     "float_x": ("visuals", "float_x"),
     "float_y": ("visuals", "float_y"),
+    "chat_width": ("visuals", "chat_width"),
+    "chat_height": ("visuals", "chat_height"),
+    "chat_density": ("visuals", "chat_density"),
 }
 
 
@@ -147,6 +150,8 @@ class AiPetDaemon:
             on_state_change=self._on_subsystem_state_change,
             on_prompt_transcribed=self._on_voice_prompt,
             on_barge_in=self.tts_player.barge_in,
+            is_busy=lambda: self.state in ("THINKING", "TOOL_CALLING", "SPEAKING")
+            or self._chat_lock.locked(),
         )
 
         self.state: str = "IDLE"
@@ -402,7 +407,7 @@ class AiPetDaemon:
         self.state = state
         if emotion is not None:
             self.emotion = emotion
-        if state in ("LISTENING", "THINKING", "TOOL_CALLING", "SPEAKING"):
+        if state in ("THINKING", "TOOL_CALLING", "SPEAKING"):
             self._cancel_emotion_reset()
         payload: dict[str, Any] = {
             "type": "state_changed",
@@ -431,7 +436,12 @@ class AiPetDaemon:
             try:
                 await asyncio.sleep(wait_s)
                 await self.tts_player.wait_idle()
-                if self.state in ("IDLE", "MUTED") or (reset_error_state and self.state == "ERROR"):
+                if self.state == "LISTENING":
+                    if self.emotion != "neutral":
+                        await self._set_state("LISTENING", emotion="neutral")
+                elif self.state in ("IDLE", "MUTED") or (
+                    reset_error_state and self.state == "ERROR"
+                ):
                     target_state = (
                         "MUTED"
                         if self.config_manager.config.voice_in.mic_muted
@@ -774,11 +784,20 @@ class AiPetDaemon:
                     }
                 )
                 target_idle_state = "MUTED" if cfg.voice_in.mic_muted else "IDLE"
+                continue_voice = (
+                    input_mode == "voice"
+                    and not cfg.voice_in.mic_muted
+                    and self.enable_voice_capture
+                )
                 if cfg.voice_out.tts_muted or cfg.voice_out.tts_provider == "disabled":
-                    await self._set_state(
-                        target_idle_state,
-                        emotion=final_emotion,
-                    )
+                    if continue_voice:
+                        self.emotion = final_emotion
+                        await self.voice_input.start_followup_listen()
+                    else:
+                        await self._set_state(
+                            target_idle_state,
+                            emotion=final_emotion,
+                        )
                     if final_emotion != "neutral":
                         self._schedule_emotion_reset(self.emotion_reset_delay_s)
                 else:
@@ -787,16 +806,24 @@ class AiPetDaemon:
                     tts_elapsed = asyncio.get_running_loop().time() - t0
                     if tts_elapsed >= 0.35:
                         # Audio reproduction completed: return mood back to neutral immediately.
-                        await self._set_state(
-                            target_idle_state,
-                            emotion="neutral",
-                        )
+                        if continue_voice:
+                            self.emotion = "neutral"
+                            await self.voice_input.start_followup_listen()
+                        else:
+                            await self._set_state(
+                                target_idle_state,
+                                emotion="neutral",
+                            )
                     else:
                         # No audio played (or instant failure): keep mood briefly, then reset.
-                        await self._set_state(
-                            target_idle_state,
-                            emotion=final_emotion,
-                        )
+                        if continue_voice:
+                            self.emotion = final_emotion
+                            await self.voice_input.start_followup_listen()
+                        else:
+                            await self._set_state(
+                                target_idle_state,
+                                emotion=final_emotion,
+                            )
                         if final_emotion != "neutral":
                             self._schedule_emotion_reset(
                                 max(0.5, self.emotion_reset_delay_s - tts_elapsed)

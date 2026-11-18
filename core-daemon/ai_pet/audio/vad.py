@@ -31,9 +31,10 @@ class VADProcessor:
         frame_ms: int = 30,
         vad_threshold: float = 0.015,
         silence_timeout_ms: int = 1300,
-        pre_roll_ms: int = 1500,
+        pre_roll_ms: int = 450,
         max_utterance_s: float = 30.0,
         onset_window_ms: int = 1200,
+        manual_wait_timeout_ms: int = 10000,
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_ms = frame_ms
@@ -42,6 +43,7 @@ class VADProcessor:
         self.pre_roll_ms = pre_roll_ms
         self.max_utterance_s = max_utterance_s
         self.onset_window_ms = onset_window_ms
+        self.manual_wait_timeout_ms = manual_wait_timeout_ms
 
         self.frame_samples = max(1, int(self.sample_rate * self.frame_ms / 1000))
         self.frame_bytes = self.frame_samples * 2
@@ -50,11 +52,13 @@ class VADProcessor:
 
         self._utterance_frames: list[bytes] = []
         self._active: bool = False
+        self._speech_detected: bool = False
         self._onset_emitted: bool = False
         self._manual_mode: bool = False
         self._post_onset_ms: float = 0.0
         self._utterance_ms: float = 0.0
         self._silence_ms: float = 0.0
+        self._manual_wait_ms: float = 0.0
 
         self._silero_model: Any = None
         self._silero_win = 512 if self.sample_rate >= 16000 else 256
@@ -101,22 +105,25 @@ class VADProcessor:
     def _reset_active(self) -> None:
         self._utterance_frames.clear()
         self._active = False
+        self._speech_detected = False
         self._onset_emitted = False
         self._manual_mode = False
         self._post_onset_ms = 0.0
         self._utterance_ms = 0.0
         self._silence_ms = 0.0
+        self._manual_wait_ms = 0.0
 
     def force_start_listening(self) -> None:
         """Immediately enter active listening mode (manual trigger / push-to-talk)."""
         self._manual_mode = True
         if not self._active:
             self._active = True
-            self._utterance_frames = list(self._pre_roll)
-            self._pre_roll.clear()
+            self._speech_detected = False
+            self._utterance_frames = []
             self._post_onset_ms = 0.0
             self._utterance_ms = 0.0
             self._silence_ms = 0.0
+            self._manual_wait_ms = 0.0
             self._onset_emitted = False
 
     def force_stop_listening(self) -> bytes | None:
@@ -158,6 +165,7 @@ class VADProcessor:
                 }
 
             self._active = True
+            self._speech_detected = True
             self._utterance_frames = list(self._pre_roll)
             if pcm_bytes:
                 self._utterance_frames.append(pcm_bytes)
@@ -165,6 +173,7 @@ class VADProcessor:
             self._post_onset_ms = frame_dur_ms
             self._utterance_ms = frame_dur_ms
             self._silence_ms = 0.0
+            self._manual_wait_ms = 0.0
             self._onset_emitted = False
 
             if self._manual_mode or self._post_onset_ms >= self.onset_window_ms:
@@ -184,6 +193,37 @@ class VADProcessor:
                 "onset_audio": None,
                 "utterance_audio": None,
             }
+
+        # Active via manual trigger waiting for first speech onset: do not start
+        # the 1.3s trailing silence timer until the user actually begins speaking.
+        if not self._speech_detected:
+            if not is_speech:
+                if pcm_bytes:
+                    self._pre_roll.append(pcm_bytes)
+                self._manual_wait_ms += frame_dur_ms
+                if self._manual_wait_ms >= self.manual_wait_timeout_ms:
+                    self._reset_active()
+                    return {
+                        "rms": rms,
+                        "is_speech": False,
+                        "state": "utterance_end",
+                        "onset_audio": None,
+                        "utterance_audio": b"",
+                    }
+                return {
+                    "rms": rms,
+                    "is_speech": False,
+                    "state": "speaking",
+                    "onset_audio": None,
+                    "utterance_audio": None,
+                }
+
+            self._speech_detected = True
+            self._utterance_frames = list(self._pre_roll)
+            self._pre_roll.clear()
+            self._silence_ms = 0.0
+            self._utterance_ms = 0.0
+            self._post_onset_ms = 0.0
 
         if pcm_bytes:
             self._utterance_frames.append(pcm_bytes)

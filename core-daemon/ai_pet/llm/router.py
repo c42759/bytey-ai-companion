@@ -445,6 +445,17 @@ class LLMRouter:
         parser = EmotionStreamParser(on_emotion=on_emotion)
         clean_parts: list[str] = []
 
+        effective_prompt = system_prompt
+        if tools:
+            tool_rule = (
+                "\nIMPORTANT TOOL RULE: When a question requires external or up-to-date information "
+                "(such as web search, weather, location, or website fetch), invoke the matching tool "
+                "function directly right away. Never reply with a text message saying you are going "
+                "to use a tool without calling the tool first; only output your [emotion:<tag>] "
+                "spoken reply after receiving the tool result."
+            )
+            effective_prompt = f"{system_prompt.rstrip()}\n{tool_rule}" if system_prompt else tool_rule.lstrip()
+
         async def emit_delta(raw_delta: str) -> None:
             if not raw_delta:
                 return
@@ -456,19 +467,19 @@ class LLMRouter:
 
         if prov in ("openai", "custom"):
             tool_calls = await self._chat_openai_compat(
-                prov, messages, system_prompt, model, base_url, api_key, temperature, tools, emit_delta
+                prov, messages, effective_prompt, model, base_url, api_key, temperature, tools, emit_delta
             )
         elif prov == "ollama":
             tool_calls = await self._chat_ollama(
-                messages, system_prompt, model, base_url, temperature, tools, emit_delta
+                messages, effective_prompt, model, base_url, temperature, tools, emit_delta
             )
         elif prov == "gemini":
             tool_calls = await self._chat_gemini(
-                messages, system_prompt, model, base_url, api_key, temperature, tools, emit_delta
+                messages, effective_prompt, model, base_url, api_key, temperature, tools, emit_delta
             )
         elif prov == "anthropic":
             tool_calls = await self._chat_anthropic(
-                messages, system_prompt, model, base_url, api_key, temperature, tools, emit_delta
+                messages, effective_prompt, model, base_url, api_key, temperature, tools, emit_delta
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")

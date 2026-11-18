@@ -83,6 +83,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "offset_y": 12,
         "float_x": 100,
         "float_y": 80,
+        "chat_width": 380,
+        "chat_height": 420,
+        "chat_density": "comfortable",
     },
     "mcpServers": {},
 }

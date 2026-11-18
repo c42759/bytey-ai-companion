@@ -39,6 +39,19 @@ def _normalize_kokoro_voices(raw: Any) -> list[dict[str, Any]]:
     return voices
 
 
+def _normalize_kokoro_base_url(base_url: str) -> str:
+    """Normalize Kokoro base URL so /v1 is included whether user omitted or included it."""
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    for suffix in ("/audio/speech", "/audio/voices"):
+        if base.lower().endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+    if not base.lower().endswith("/v1"):
+        base = f"{base}/v1"
+    return base
+
+
 class KokoroTTSClient:
     """Client for OpenAI-compatible Kokoro HTTP TTS instances."""
 
@@ -63,7 +76,7 @@ class KokoroTTSClient:
     ) -> list[dict[str, Any]]:
         """Fetch voices from GET {base_url}/audio/voices with DEFAULT_KOKORO_VOICES fallback."""
         fallback = [{"id": v, "name": v} for v in DEFAULT_KOKORO_VOICES]
-        base = (base_url or "").strip().rstrip("/")
+        base = _normalize_kokoro_base_url(base_url)
         if not base:
             return fallback
 
@@ -90,7 +103,7 @@ class KokoroTTSClient:
         api_key: str | None = None,
     ) -> tuple[bytes, str]:
         """Synthesize text via POST {base_url}/audio/speech requesting WAV audio."""
-        base = (base_url or "").strip().rstrip("/")
+        base = _normalize_kokoro_base_url(base_url)
         if not base:
             raise ValueError("Kokoro base_url is required")
 

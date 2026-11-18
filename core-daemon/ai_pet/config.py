@@ -112,6 +112,9 @@ class VisualsConfig(BaseModel):
     offset_y: int = 12
     float_x: int = 500
     float_y: int = 40
+    chat_width: int = 380
+    chat_height: int = 420
+    chat_density: str = "comfortable"
 
 
 class MCPServerConfig(BaseModel):

@@ -109,6 +109,8 @@ class WakeWordMatcher:
                     out.append("H")
             elif ch == "c":
                 out.append("S" if nxt in ("e", "i", "y") else "K")
+            elif ch in ("d", "t"):
+                out.append("T")
             elif ch == "g":
                 out.append("J" if nxt in ("e", "i", "y") else "G")
             elif ch == "q":
@@ -147,19 +149,13 @@ class WakeWordMatcher:
         return 0.5 * text_sim + 0.5 * phon_sim
 
     @classmethod
-    def match_wake_phrase(
+    def _match_once(
         cls,
         transcript: str,
-        wake_phrase: str,
-        sensitivity: float = 0.72,
+        wake_tokens: list[str],
+        sensitivity: float,
     ) -> tuple[bool, str]:
-        """Match wake phrase at transcript start (or after brief filler) and return remainder."""
-        wake_norm = cls.normalize(wake_phrase)
-        if not transcript or not wake_norm:
-            return False, ""
-        wake_tokens = wake_norm.split()
         w_len = len(wake_tokens)
-
         raw_spans: list[tuple[int, int, str]] = []
         for match in re.finditer(r"[\w'’]+", transcript):
             norm_tok = cls.normalize(match.group(0))
@@ -197,3 +193,27 @@ class WakeWordMatcher:
             remainder = transcript[best_end_char:].lstrip(" \t\r\n,.:;!?-–—")
             return True, remainder
         return False, ""
+
+    @classmethod
+    def match_wake_phrase(
+        cls,
+        transcript: str,
+        wake_phrase: str,
+        sensitivity: float = 0.72,
+    ) -> tuple[bool, str]:
+        """Match wake phrase at transcript start (stripping repeated wake phrases) and return remainder."""
+        wake_norm = cls.normalize(wake_phrase)
+        if not transcript or not wake_norm:
+            return False, ""
+        wake_tokens = wake_norm.split()
+
+        matched, remainder = cls._match_once(transcript, wake_tokens, sensitivity)
+        if not matched:
+            return False, ""
+
+        while remainder:
+            sub_matched, sub_rem = cls._match_once(remainder, wake_tokens, sensitivity)
+            if not sub_matched:
+                break
+            remainder = sub_rem
+        return True, remainder
