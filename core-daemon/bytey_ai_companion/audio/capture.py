@@ -157,7 +157,7 @@ class VoiceInputService:
                         ("general", "pet_name"),
                         ("pet_name",),
                     ),
-                    "Nova",
+                    "Bytey",
                 )
             ),
             "wake_phrase": str(
@@ -170,7 +170,7 @@ class VoiceInputService:
                         ("audio", "wake_phrase"),
                         ("wake_phrase",),
                     ),
-                    "Hey Nova",
+                    "Hey Bytey",
                 )
             ),
             "wake_sensitivity": float(
@@ -540,10 +540,18 @@ class VoiceInputService:
 
     @staticmethod
     def _build_whisper_hints(settings: dict[str, Any]) -> tuple[str, str]:
-        wake = str(settings.get("wake_phrase") or "Hey Nova").strip()
-        pet = str(settings.get("pet_name") or "Nova").strip()
-        prompt_hint = f"{wake}. {pet}." if pet and pet.lower() not in wake.lower() else f"{wake}."
-        hotwords = f"{wake}, {pet}" if pet and pet.lower() not in wake.lower() else wake
+        wake = str(settings.get("wake_phrase") or "Hey Bytey").strip()
+        companion = str(settings.get("pet_name") or "Bytey").strip()
+        prompt_hint = (
+            f"{wake}. {companion}."
+            if companion and companion.lower() not in wake.lower()
+            else f"{wake}."
+        )
+        hotwords = (
+            f"{wake}, {companion}"
+            if companion and companion.lower() not in wake.lower()
+            else wake
+        )
         return prompt_hint, hotwords
 
     async def _transcribe_wake_clip(self, pcm_bytes: bytes, settings: dict[str, Any]) -> str:
@@ -711,7 +719,7 @@ class VoiceInputService:
             await _invoke(self._on_state_change, "THINKING")
             await _invoke(self._on_prompt_transcribed, prompt_text)
         else:
-            # Wake-only utterance ("Hey Nova"): stay in LISTENING for follow-up prompt.
+            # Wake-only utterance ("Hey Bytey"): stay in LISTENING for follow-up prompt.
             self._awake = True
             self._awaiting_followup = True
             self._followup_idle_ms = 0.0

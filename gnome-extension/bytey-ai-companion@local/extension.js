@@ -14,19 +14,19 @@ const WS_BACKOFF_MIN_MS = 1000;
 const WS_BACKOFF_MAX_MS = 30000;
 
 /**
- * GNOME Shell 46-50 Extension entrypoint for AI Pet Dynamic Island.
+ * GNOME Shell 46-50 Extension entrypoint for Bytey AI Companion Dynamic Island.
  */
-export default class AiPetExtension extends Extension {
+export default class ByteyExtension extends Extension {
     enable() {
         this._disabled = false;
         this._exitedByUser = false;
 
-        const envUrl = GLib.getenv('AI_PET_DAEMON_URL');
+        const envUrl = GLib.getenv('BYTEY_DAEMON_URL') || GLib.getenv('AI_PET_DAEMON_URL');
         this._baseUrl = (envUrl && envUrl.trim() ? envUrl.trim() : DEFAULT_BASE_URL).replace(/\/+$/, '');
         this._wsUrl = `${this._baseUrl.replace(/^http/i, 'ws')}/ws`;
 
         this._config = {
-            general: {pet_name: 'Nova'},
+            general: {pet_name: 'Bytey'},
             provider: {active_provider: 'ollama', model: ''},
             voice_in: {mic_muted: false},
             voice_out: {tts_muted: false},

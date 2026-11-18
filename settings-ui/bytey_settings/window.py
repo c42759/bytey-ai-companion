@@ -1,10 +1,11 @@
-"""GTK4 / Libadwaita Settings UI for AI Pet."""
+"""GTK4 / Libadwaita Settings UI for Bytey AI Companion."""
 
 from __future__ import annotations
 
 import copy
 import json
 import threading
+from pathlib import Path
 from typing import Any, Callable
 
 import gi
@@ -376,13 +377,13 @@ class MCPServerDialog(Adw.Dialog):
         self.close()
 
 
-class PetPreferencesWindow(Adw.PreferencesWindow):
-    """Main 5-tab Libadwaita PreferencesWindow for AI Pet."""
+class ByteyPreferencesWindow(Adw.PreferencesWindow):
+    """Main 5-tab Libadwaita PreferencesWindow for Bytey AI Companion."""
 
     def __init__(self, application: Adw.Application, client: DaemonClient) -> None:
         super().__init__(
             application=application,
-            title="AI Pet Settings",
+            title="Bytey AI Companion Settings",
             default_width=780,
             default_height=700,
             search_enabled=True,
@@ -467,8 +468,13 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
         self.add_toast(toast)
 
     def _create_offline_banner(self) -> Adw.Banner:
+        try:
+            rel = self.client.config_path.relative_to(Path.home())
+            display_path = f"~/{rel}"
+        except ValueError:
+            display_path = str(self.client.config_path)
         banner = Adw.Banner(
-            title="Daemon offline — editing ~/.config/ai-pet/config.json locally",
+            title=f"Daemon offline — editing {display_path} locally",
             revealed=False,
         )
         banner.set_button_label("Retry")
@@ -572,11 +578,11 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
 
         identity_group = Adw.PreferencesGroup(
             title="Identity & Wake Word",
-            description="Customize your pet's name and open-vocabulary wake phrase.",
+            description="Customize your companion's name and open-vocabulary wake phrase.",
         )
-        self.pet_name_row = Adw.EntryRow(title="Pet Name", show_apply_button=True)
+        self.pet_name_row = Adw.EntryRow(title="Companion Name", show_apply_button=True)
         self.pet_name_row.connect(
-            "apply", lambda *_: self._patch_fields({"pet_name": self.pet_name_row.get_text().strip()}, "Saved pet name")
+            "apply", lambda *_: self._patch_fields({"pet_name": self.pet_name_row.get_text().strip()}, "Saved companion name")
         )
         identity_group.add(self.pet_name_row)
 
@@ -633,8 +639,8 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
         prompt = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True).strip()
         self._patch_fields(
             {
-                "pet_name": self.pet_name_row.get_text().strip() or "Nova",
-                "wake_phrase": self.wake_phrase_row.get_text().strip() or "Hey Nova",
+                "pet_name": self.pet_name_row.get_text().strip() or "Bytey",
+                "wake_phrase": self.wake_phrase_row.get_text().strip() or "Hey Bytey",
                 "system_prompt": prompt or DEFAULT_SYSTEM_PROMPT,
             },
             "General settings saved",
@@ -1590,8 +1596,8 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
         self._loading = True
         try:
             # General
-            self.pet_name_row.set_text(str(self._read_field("pet_name", "Nova")))
-            self.wake_phrase_row.set_text(str(self._read_field("wake_phrase", "Hey Nova")))
+            self.pet_name_row.set_text(str(self._read_field("pet_name", "Bytey")))
+            self.wake_phrase_row.set_text(str(self._read_field("wake_phrase", "Hey Bytey")))
             self.system_prompt_view.get_buffer().set_text(
                 str(self._read_field("system_prompt", DEFAULT_SYSTEM_PROMPT))
             )
@@ -1665,16 +1671,16 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
 
 
 class SettingsApplication(Adw.Application):
-    """Libadwaita application wrapper for AI Pet Settings."""
+    """Libadwaita application wrapper for Bytey AI Companion Settings."""
 
     def __init__(self, daemon_url: str = "http://127.0.0.1:8765") -> None:
-        super().__init__(application_id="local.ai_pet.Settings")
+        super().__init__(application_id="local.bytey_ai_companion.Settings")
         self._daemon_url = daemon_url
-        self._window: PetPreferencesWindow | None = None
+        self._window: ByteyPreferencesWindow | None = None
 
     def do_activate(self) -> None:
         if self._window is None:
             client = DaemonClient(base_url=self._daemon_url)
-            self._window = PetPreferencesWindow(application=self, client=client)
+            self._window = ByteyPreferencesWindow(application=self, client=client)
             self._window.connect("destroy", lambda *_: client.close())
         self._window.present()

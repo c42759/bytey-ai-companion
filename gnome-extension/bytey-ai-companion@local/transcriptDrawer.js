@@ -48,7 +48,7 @@ export class TranscriptDrawer {
         this._destroyed = false;
         this._online = false;
         this._listening = false;
-        this._petName = 'AI Pet';
+        this._petName = 'Bytey';
         this._monitorIndex = 0;
 
         this._drawerWidth = DRAWER_WIDTH_FALLBACK;
@@ -70,7 +70,7 @@ export class TranscriptDrawer {
         this._signalIds = [];
 
         this._container = new St.BoxLayout({
-            style_class: 'ai-pet-drawer ai-pet-density-comfortable',
+            style_class: 'bytey-drawer bytey-density-comfortable',
             orientation: Clutter.Orientation.VERTICAL,
             width: this._drawerWidth,
             height: this._drawerHeight,
@@ -118,13 +118,13 @@ export class TranscriptDrawer {
 
     _buildHeader() {
         const header = new St.BoxLayout({
-            style_class: 'ai-pet-drawer-header',
+            style_class: 'bytey-drawer-header',
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
 
         this._providerLabel = new St.Label({
-            style_class: 'ai-pet-provider-pill',
+            style_class: 'bytey-provider-pill',
             text: 'ollama',
             y_align: Clutter.ActorAlign.CENTER,
         });
@@ -132,7 +132,7 @@ export class TranscriptDrawer {
         header.add_child(this._providerLabel);
 
         this._statusLabel = new St.Label({
-            style_class: 'ai-pet-status-dot',
+            style_class: 'bytey-status-dot',
             text: 'Offline',
             x_expand: true,
             x_align: Clutter.ActorAlign.START,
@@ -141,7 +141,7 @@ export class TranscriptDrawer {
         header.add_child(this._statusLabel);
 
         this._densityBtn = new St.Button({
-            style_class: 'ai-pet-density-btn',
+            style_class: 'bytey-density-btn',
             label: DENSITY_LABELS[this._density] ?? 'Comfort',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
@@ -152,7 +152,7 @@ export class TranscriptDrawer {
         header.add_child(this._densityBtn);
 
         const clearBtn = new St.Button({
-            style_class: 'ai-pet-clear-btn',
+            style_class: 'bytey-clear-btn',
             label: 'New Chat',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
@@ -167,7 +167,7 @@ export class TranscriptDrawer {
             icon_size: DENSITY_ICON_SIZES[this._density].close,
         });
         const closeBtn = new St.Button({
-            style_class: 'ai-pet-close-btn',
+            style_class: 'bytey-close-btn',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
             child: this._closeIcon,
@@ -180,13 +180,13 @@ export class TranscriptDrawer {
 
     _buildMessageArea() {
         this._messagesBox = new St.BoxLayout({
-            style_class: 'ai-pet-messages',
+            style_class: 'bytey-messages',
             orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
 
         this._scrollView = new St.ScrollView({
-            style_class: 'ai-pet-scroll',
+            style_class: 'bytey-scroll',
             hscrollbar_policy: St.PolicyType.NEVER,
             vscrollbar_policy: St.PolicyType.AUTOMATIC,
             enable_mouse_scrolling: true,
@@ -201,13 +201,13 @@ export class TranscriptDrawer {
 
     _buildFooter() {
         const footer = new St.BoxLayout({
-            style_class: 'ai-pet-drawer-footer',
+            style_class: 'bytey-drawer-footer',
             x_expand: true,
         });
 
         this._entry = new St.Entry({
-            style_class: 'ai-pet-entry',
-            hint_text: 'Ask AI Pet...',
+            style_class: 'bytey-entry',
+            hint_text: 'Ask Bytey...',
             can_focus: true,
             reactive: true,
             x_expand: true,
@@ -234,7 +234,7 @@ export class TranscriptDrawer {
         footer.add_child(this._entry);
 
         const sendBtn = new St.Button({
-            style_class: 'ai-pet-send-btn',
+            style_class: 'bytey-send-btn',
             label: 'Send',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
@@ -247,7 +247,7 @@ export class TranscriptDrawer {
             icon_size: DENSITY_ICON_SIZES[this._density].mic,
         });
         this._micBtn = new St.Button({
-            style_class: 'ai-pet-mic-btn',
+            style_class: 'bytey-mic-btn',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
             child: this._micIcon,
@@ -258,13 +258,13 @@ export class TranscriptDrawer {
         footer.add_child(this._micBtn);
 
         const gripLabel = new St.Label({
-            style_class: 'ai-pet-resize-grip-label',
+            style_class: 'bytey-resize-grip-label',
             text: '◢',
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.END,
         });
         this._resizeHandle = new St.Bin({
-            style_class: 'ai-pet-resize-grip',
+            style_class: 'bytey-resize-grip',
             reactive: true,
             track_hover: true,
             can_focus: false,
@@ -298,9 +298,9 @@ export class TranscriptDrawer {
         this._online = Boolean(online);
         this._statusLabel.text = this._online ? 'Connected' : 'Offline';
         if (this._online)
-            this._statusLabel.add_style_class_name('ai-pet-status-dot-online');
+            this._statusLabel.add_style_class_name('bytey-status-dot-online');
         else
-            this._statusLabel.remove_style_class_name('ai-pet-status-dot-online');
+            this._statusLabel.remove_style_class_name('bytey-status-dot-online');
     }
 
     /**
@@ -313,13 +313,13 @@ export class TranscriptDrawer {
             return;
         this._listening = Boolean(listening);
         if (this._listening)
-            this._micBtn.add_style_class_name('ai-pet-mic-btn-active');
+            this._micBtn.add_style_class_name('bytey-mic-btn-active');
         else
-            this._micBtn.remove_style_class_name('ai-pet-mic-btn-active');
+            this._micBtn.remove_style_class_name('bytey-mic-btn-active');
     }
 
     /**
-     * Update active provider/model pill and pet display name from daemon config.
+     * Update active provider/model pill and companion display name from daemon config.
      *
      * @param {object} config
      */
@@ -330,6 +330,8 @@ export class TranscriptDrawer {
         const petName = config.general?.pet_name ?? config.pet_name;
         if (typeof petName === 'string' && petName.trim())
             this._petName = petName.trim();
+        if (this._entry)
+            this._entry.hint_text = `Ask ${this._petName}...`;
 
         const provider = config.provider?.active_provider ??
             config.llm?.provider ??
@@ -386,8 +388,8 @@ export class TranscriptDrawer {
             return;
         this._density = density;
         for (const mode of DENSITY_ORDER)
-            this._container.remove_style_class_name(`ai-pet-density-${mode}`);
-        this._container.add_style_class_name(`ai-pet-density-${density}`);
+            this._container.remove_style_class_name(`bytey-density-${mode}`);
+        this._container.add_style_class_name(`bytey-density-${density}`);
 
         if (this._densityBtn)
             this._densityBtn.label = DENSITY_LABELS[density] ?? 'Comfort';
@@ -419,7 +421,7 @@ export class TranscriptDrawer {
         } catch (_e) {
             this._resizeGrab = null;
         }
-        this._container.add_style_class_name('ai-pet-drawer-resizing');
+        this._container.add_style_class_name('bytey-drawer-resizing');
         return Clutter.EVENT_STOP;
     }
 
@@ -459,7 +461,7 @@ export class TranscriptDrawer {
 
         this._resizing = false;
         this._releaseResizeGrab();
-        this._container?.remove_style_class_name('ai-pet-drawer-resizing');
+        this._container?.remove_style_class_name('bytey-drawer-resizing');
         this._callbacks.onResizeCommit?.(this._drawerWidth, this._drawerHeight);
         return Clutter.EVENT_STOP;
     }
@@ -780,7 +782,7 @@ export class TranscriptDrawer {
         if (this._destroyed || !this._messagesBox || this._emptyStateActor)
             return;
         const emptyLabel = new St.Label({
-            style_class: 'ai-pet-empty-state',
+            style_class: 'bytey-empty-state',
             text: 'No messages yet. Speak your wake phrase or type below.',
             x_expand: true,
             x_align: Clutter.ActorAlign.CENTER,
@@ -830,18 +832,18 @@ export class TranscriptDrawer {
 
         const isUser = msg.role === 'user';
         const bubble = new St.BoxLayout({
-            style_class: isUser ? 'ai-pet-msg-user' : 'ai-pet-msg-assistant',
+            style_class: isUser ? 'bytey-msg-user' : 'bytey-msg-assistant',
             orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
 
         const metaRow = new St.BoxLayout({
-            style_class: 'ai-pet-msg-meta',
+            style_class: 'bytey-msg-meta',
             x_expand: true,
         });
 
         const roleLabel = new St.Label({
-            style_class: 'ai-pet-msg-role',
+            style_class: 'bytey-msg-role',
             text: isUser ? 'You' : this._petName,
             y_align: Clutter.ActorAlign.CENTER,
         });
@@ -850,7 +852,7 @@ export class TranscriptDrawer {
         if (isUser) {
             const isVoice = msg.input_mode === 'voice';
             const srcBadge = new St.Label({
-                style_class: `ai-pet-source-badge ${isVoice ? 'ai-pet-source-voice' : 'ai-pet-source-text'}`,
+                style_class: `bytey-source-badge ${isVoice ? 'bytey-source-voice' : 'bytey-source-text'}`,
                 text: isVoice ? 'Voice' : 'Text',
                 y_align: Clutter.ActorAlign.CENTER,
             });
@@ -858,7 +860,7 @@ export class TranscriptDrawer {
         }
 
         const emotionLabel = new St.Label({
-            style_class: 'ai-pet-emotion-tag',
+            style_class: 'bytey-emotion-tag',
             text: msg.emotion,
             visible: !isUser && msg.emotion && msg.emotion !== 'neutral',
             y_align: Clutter.ActorAlign.CENTER,
@@ -877,7 +879,7 @@ export class TranscriptDrawer {
                 icon_size: iconSizes.replay,
             });
             replayBtn = new St.Button({
-                style_class: 'ai-pet-replay-btn',
+                style_class: 'bytey-replay-btn',
                 can_focus: true,
                 visible: msg.content.trim().length > 0,
                 y_align: Clutter.ActorAlign.CENTER,
@@ -894,7 +896,7 @@ export class TranscriptDrawer {
         bubble.add_child(metaRow);
 
         const bodyLabel = new St.Label({
-            style_class: 'ai-pet-msg-text',
+            style_class: 'bytey-msg-text',
             text: msg.content,
             x_expand: true,
         });
@@ -904,7 +906,7 @@ export class TranscriptDrawer {
         bubble.add_child(bodyLabel);
 
         const toolBox = new St.BoxLayout({
-            style_class: 'ai-pet-tool-list',
+            style_class: 'bytey-tool-list',
             orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
             visible: msg.tool_calls.length > 0,
@@ -932,30 +934,30 @@ export class TranscriptDrawer {
         toolBox.visible = true;
 
         const badge = new St.BoxLayout({
-            style_class: `ai-pet-tool-badge ai-pet-tool-${tool.status}`,
+            style_class: `bytey-tool-badge bytey-tool-${tool.status}`,
             orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
 
         const headerBtn = new St.Button({
-            style_class: 'ai-pet-tool-header-btn',
+            style_class: 'bytey-tool-header-btn',
             x_expand: true,
             can_focus: true,
         });
 
         const headerRow = new St.BoxLayout({
-            style_class: 'ai-pet-tool-header',
+            style_class: 'bytey-tool-header',
             x_expand: true,
         });
         const titleLabel = new St.Label({
-            style_class: 'ai-pet-tool-title',
+            style_class: 'bytey-tool-title',
             text: `${tool.server} · ${tool.tool}`,
             x_expand: true,
             x_align: Clutter.ActorAlign.START,
             y_align: Clutter.ActorAlign.CENTER,
         });
         const statusLabel = new St.Label({
-            style_class: 'ai-pet-tool-status-chip',
+            style_class: 'bytey-tool-status-chip',
             text: this._formatToolStatus(tool.status),
             y_align: Clutter.ActorAlign.CENTER,
         });
@@ -965,7 +967,7 @@ export class TranscriptDrawer {
         badge.add_child(headerBtn);
 
         const detailsLabel = new St.Label({
-            style_class: 'ai-pet-tool-details',
+            style_class: 'bytey-tool-details',
             text: this._formatToolDetails(tool),
             visible: tool.status === 'awaiting_confirm',
             x_expand: true,
@@ -976,17 +978,17 @@ export class TranscriptDrawer {
         badge.add_child(detailsLabel);
 
         const confirmRow = new St.BoxLayout({
-            style_class: 'ai-pet-confirm-row',
+            style_class: 'bytey-confirm-row',
             visible: tool.status === 'awaiting_confirm',
             x_expand: true,
         });
         const allowBtn = new St.Button({
-            style_class: 'ai-pet-btn-allow',
+            style_class: 'bytey-btn-allow',
             label: 'Allow',
             can_focus: true,
         });
         const denyBtn = new St.Button({
-            style_class: 'ai-pet-btn-deny',
+            style_class: 'bytey-btn-deny',
             label: 'Deny',
             can_focus: true,
         });
@@ -1036,8 +1038,8 @@ export class TranscriptDrawer {
     _refreshToolWidget(record) {
         const {tool, badge, statusLabel, detailsLabel, confirmRow, allowBtn, denyBtn} = record;
         for (const cls of ['running', 'ok', 'error', 'awaiting_confirm'])
-            badge.remove_style_class_name(`ai-pet-tool-${cls}`);
-        badge.add_style_class_name(`ai-pet-tool-${tool.status}`);
+            badge.remove_style_class_name(`bytey-tool-${cls}`);
+        badge.add_style_class_name(`bytey-tool-${tool.status}`);
 
         statusLabel.text = this._formatToolStatus(tool.status);
         const detailText = this._formatToolDetails(tool);

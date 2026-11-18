@@ -21,7 +21,7 @@ from .schema_sync import _to_dict
 logger = logging.getLogger(__name__)
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
-_CLIENT_INFO = {"name": "ai-pet", "version": "0.1.0"}
+_CLIENT_INFO = {"name": "bytey-ai-companion", "version": "0.1.0"}
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _STDOUT_BUFFER_LIMIT = 4 * 1024 * 1024
 

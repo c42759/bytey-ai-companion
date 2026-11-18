@@ -1,0 +1,13 @@
+{
+  "uuid": "bytey-ai-companion@local",
+  "name": "Bytey AI Companion",
+  "description": "Always-on-top Dynamic Island overlay for Bytey AI Companion with procedural Cairo eyes, voice interaction, and anchored transcript drawer.",
+  "shell-version": [
+    "50",
+    "49",
+    "48",
+    "47",
+    "46"
+  ],
+  "version": 1
+}

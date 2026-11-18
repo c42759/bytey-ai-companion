@@ -1,4 +1,4 @@
-"""Voice input, VAD, wake-word matching, and STT pipeline for AI Pet."""
+"""Voice input, VAD, wake-word matching, and STT pipeline for Bytey AI Companion."""
 
 from .capture import VoiceInputService
 from .stt import STTEngine, pcm_to_wav_bytes

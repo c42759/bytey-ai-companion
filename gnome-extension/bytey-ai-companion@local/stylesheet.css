@@ -1,6 +1,6 @@
-/* AI Pet Dynamic Island - GNOME Shell 46-50 Stylesheet */
+/* Bytey AI Companion Dynamic Island - GNOME Shell 46-50 Stylesheet */
 
-.ai-pet-island {
+.bytey-island {
   background-color: #0a0a0c;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -12,53 +12,53 @@
   transition: 180ms ease;
 }
 
-.ai-pet-island:hover {
+.bytey-island:hover {
   border-color: rgba(255, 255, 255, 0.24);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.68);
 }
 
-.ai-pet-island-expanded {
+.bytey-island-expanded {
   padding: 4px 10px;
   min-width: 164px;
   min-height: 42px;
 }
 
-.ai-pet-island-listening {
+.bytey-island-listening {
   border-color: rgba(56, 189, 248, 0.65);
   box-shadow: 0 8px 26px rgba(56, 189, 248, 0.28);
 }
 
-.ai-pet-island-thinking {
+.bytey-island-thinking {
   border-color: rgba(168, 85, 247, 0.52);
   box-shadow: 0 8px 26px rgba(139, 92, 246, 0.24);
 }
 
-.ai-pet-island-tool {
+.bytey-island-tool {
   border-color: rgba(251, 191, 36, 0.6);
   box-shadow: 0 8px 26px rgba(245, 158, 11, 0.24);
 }
 
-.ai-pet-island-speaking {
+.bytey-island-speaking {
   border-color: rgba(96, 165, 250, 0.6);
   box-shadow: 0 8px 26px rgba(59, 130, 246, 0.26);
 }
 
-.ai-pet-island-muted {
+.bytey-island-muted {
   border-color: rgba(255, 255, 255, 0.08);
   opacity: 200;
 }
 
-.ai-pet-island-error {
+.bytey-island-error {
   border-color: rgba(255, 90, 95, 0.85);
   box-shadow: 0 8px 26px rgba(255, 90, 95, 0.34);
 }
 
-.ai-pet-island-dragging {
+.bytey-island-dragging {
   border-color: rgba(255, 255, 255, 0.42);
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.75);
 }
 
-.ai-pet-island-label {
+.bytey-island-label {
   color: rgba(244, 244, 247, 0.88);
   font-size: 10pt;
   font-weight: 600;
@@ -67,7 +67,7 @@
 
 /* Anchored Transcript Drawer */
 
-.ai-pet-drawer {
+.bytey-drawer {
   background-color: rgba(14, 14, 18, 0.96);
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -77,17 +77,17 @@
   color: #f4f4f7;
 }
 
-.ai-pet-drawer-resizing {
+.bytey-drawer-resizing {
   border-color: rgba(56, 189, 248, 0.55);
 }
 
-.ai-pet-drawer-header {
+.bytey-drawer-header {
   spacing: 6px;
   padding-bottom: 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.ai-pet-provider-pill {
+.bytey-provider-pill {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
@@ -99,19 +99,19 @@
   color: #e4e4ec;
 }
 
-.ai-pet-status-dot {
+.bytey-status-dot {
   font-size: 8.5pt;
   padding-left: 2px;
   color: rgba(148, 163, 184, 0.9);
 }
 
-.ai-pet-status-dot-online {
+.bytey-status-dot-online {
   color: #4ade80;
 }
 
-.ai-pet-density-btn,
-.ai-pet-clear-btn,
-.ai-pet-close-btn {
+.bytey-density-btn,
+.bytey-clear-btn,
+.bytey-close-btn {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
@@ -123,27 +123,27 @@
   transition: 120ms ease;
 }
 
-.ai-pet-density-btn:hover,
-.ai-pet-clear-btn:hover,
-.ai-pet-close-btn:hover {
+.bytey-density-btn:hover,
+.bytey-clear-btn:hover,
+.bytey-close-btn:hover {
   background-color: rgba(255, 255, 255, 0.16);
 }
 
-.ai-pet-close-btn {
+.bytey-close-btn {
   width: 26px;
   padding: 0;
 }
 
-.ai-pet-scroll {
+.bytey-scroll {
   min-height: 100px;
 }
 
-.ai-pet-messages {
+.bytey-messages {
   spacing: 8px;
   padding: 4px 6px 4px 2px;
 }
 
-.ai-pet-empty-state {
+.bytey-empty-state {
   color: rgba(255, 255, 255, 0.48);
   font-size: 9.5pt;
   padding: 24px 12px;
@@ -152,39 +152,39 @@
 
 /* Message Bubbles */
 
-.ai-pet-msg-user,
-.ai-pet-msg-assistant {
+.bytey-msg-user,
+.bytey-msg-assistant {
   border-radius: 12px;
   padding: 8px 10px;
   spacing: 5px;
 }
 
-.ai-pet-msg-user {
+.bytey-msg-user {
   background-color: rgba(56, 189, 248, 0.14);
   border: 1px solid rgba(56, 189, 248, 0.25);
   margin-left: 16px;
   margin-right: 4px;
 }
 
-.ai-pet-msg-assistant {
+.bytey-msg-assistant {
   background-color: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.09);
   margin-left: 2px;
   margin-right: 12px;
 }
 
-.ai-pet-msg-meta {
+.bytey-msg-meta {
   spacing: 6px;
   min-height: 24px;
 }
 
-.ai-pet-msg-role {
+.bytey-msg-role {
   font-size: 8.5pt;
   font-weight: 700;
   color: rgba(255, 255, 255, 0.78);
 }
 
-.ai-pet-source-badge {
+.bytey-source-badge {
   border-radius: 6px;
   padding: 2px 7px;
   font-size: 7.5pt;
@@ -193,17 +193,17 @@
   color: #cbd5e1;
 }
 
-.ai-pet-source-voice {
+.bytey-source-voice {
   background-color: rgba(56, 189, 248, 0.22);
   color: #7dd3fc;
 }
 
-.ai-pet-source-text {
+.bytey-source-text {
   background-color: rgba(148, 163, 184, 0.2);
   color: #e2e8f0;
 }
 
-.ai-pet-emotion-tag {
+.bytey-emotion-tag {
   border-radius: 6px;
   padding: 2px 7px;
   font-size: 7.5pt;
@@ -212,12 +212,12 @@
   color: #d8b4fe;
 }
 
-.ai-pet-msg-text {
+.bytey-msg-text {
   font-size: 9.5pt;
   color: #f8fafc;
 }
 
-.ai-pet-replay-btn {
+.bytey-replay-btn {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 6px;
@@ -228,19 +228,19 @@
   transition: 120ms ease;
 }
 
-.ai-pet-replay-btn:hover {
+.bytey-replay-btn:hover {
   background-color: rgba(56, 189, 248, 0.25);
   color: #ffffff;
 }
 
 /* Tool-Call Badges */
 
-.ai-pet-tool-list {
+.bytey-tool-list {
   spacing: 5px;
   margin-top: 2px;
 }
 
-.ai-pet-tool-badge {
+.bytey-tool-badge {
   border-radius: 10px;
   padding: 5px 8px;
   spacing: 4px;
@@ -248,55 +248,55 @@
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-.ai-pet-tool-running {
+.bytey-tool-running {
   background-color: rgba(245, 158, 11, 0.14);
   border-color: rgba(251, 191, 36, 0.35);
 }
 
-.ai-pet-tool-ok {
+.bytey-tool-ok {
   background-color: rgba(34, 197, 94, 0.12);
   border-color: rgba(74, 222, 128, 0.32);
 }
 
-.ai-pet-tool-error {
+.bytey-tool-error {
   background-color: rgba(255, 90, 95, 0.16);
   border-color: rgba(255, 90, 95, 0.45);
 }
 
-.ai-pet-tool-awaiting_confirm {
+.bytey-tool-awaiting_confirm {
   background-color: rgba(251, 191, 36, 0.18);
   border-color: rgba(251, 191, 36, 0.65);
 }
 
-.ai-pet-tool-header {
+.bytey-tool-header {
   spacing: 6px;
 }
 
-.ai-pet-tool-title {
+.bytey-tool-title {
   font-size: 8.5pt;
   font-weight: 700;
   color: #f1f5f9;
 }
 
-.ai-pet-tool-status-chip {
+.bytey-tool-status-chip {
   font-size: 7.5pt;
   font-weight: 700;
   color: rgba(255, 255, 255, 0.85);
 }
 
-.ai-pet-tool-details {
+.bytey-tool-details {
   font-size: 8.5pt;
   color: rgba(226, 232, 240, 0.82);
   padding-top: 2px;
 }
 
-.ai-pet-confirm-row {
+.bytey-confirm-row {
   spacing: 6px;
   padding-top: 4px;
 }
 
-.ai-pet-btn-allow,
-.ai-pet-btn-deny {
+.bytey-btn-allow,
+.bytey-btn-deny {
   border-radius: 8px;
   height: 28px;
   padding: 0 12px;
@@ -305,33 +305,33 @@
   transition: 120ms ease;
 }
 
-.ai-pet-btn-allow {
+.bytey-btn-allow {
   background-color: #16a34a;
   color: #ffffff;
 }
 
-.ai-pet-btn-allow:hover {
+.bytey-btn-allow:hover {
   background-color: #22c55e;
 }
 
-.ai-pet-btn-deny {
+.bytey-btn-deny {
   background-color: rgba(255, 90, 95, 0.85);
   color: #ffffff;
 }
 
-.ai-pet-btn-deny:hover {
+.bytey-btn-deny:hover {
   background-color: #ff5a5f;
 }
 
 /* Footer Input Bar */
 
-.ai-pet-drawer-footer {
+.bytey-drawer-footer {
   spacing: 6px;
   padding-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.ai-pet-entry {
+.bytey-entry {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 10px;
@@ -342,13 +342,13 @@
   font-size: 9.5pt;
 }
 
-.ai-pet-entry:focus {
+.bytey-entry:focus {
   border-color: rgba(56, 189, 248, 0.65);
   background-color: rgba(255, 255, 255, 0.11);
 }
 
-.ai-pet-send-btn,
-.ai-pet-mic-btn {
+.bytey-send-btn,
+.bytey-mic-btn {
   background-color: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 10px;
@@ -360,220 +360,220 @@
   transition: 120ms ease;
 }
 
-.ai-pet-send-btn:hover,
-.ai-pet-mic-btn:hover {
+.bytey-send-btn:hover,
+.bytey-mic-btn:hover {
   background-color: rgba(255, 255, 255, 0.18);
 }
 
-.ai-pet-mic-btn {
+.bytey-mic-btn {
   width: 34px;
   padding: 0;
 }
 
-.ai-pet-mic-btn-active {
+.bytey-mic-btn-active {
   background-color: rgba(56, 189, 248, 0.3);
   border-color: rgba(56, 189, 248, 0.75);
   color: #ffffff;
 }
 
-.ai-pet-resize-grip {
+.bytey-resize-grip {
   width: 16px;
   height: 24px;
   padding: 0 0 1px 2px;
 }
 
-.ai-pet-resize-grip-label {
+.bytey-resize-grip-label {
   font-size: 9pt;
   color: rgba(255, 255, 255, 0.32);
 }
 
-.ai-pet-resize-grip:hover .ai-pet-resize-grip-label {
+.bytey-resize-grip:hover .bytey-resize-grip-label {
   color: rgba(56, 189, 248, 0.85);
 }
 
 /* Desktop Density Presets: Compact & Spacious */
 
-.ai-pet-density-compact {
+.bytey-density-compact {
   padding: 8px;
   spacing: 6px;
   border-radius: 14px;
 }
 
-.ai-pet-density-compact .ai-pet-drawer-header {
+.bytey-density-compact .bytey-drawer-header {
   spacing: 4px;
   padding-bottom: 5px;
 }
 
-.ai-pet-density-compact .ai-pet-provider-pill,
-.ai-pet-density-compact .ai-pet-density-btn,
-.ai-pet-density-compact .ai-pet-clear-btn,
-.ai-pet-density-compact .ai-pet-close-btn {
+.bytey-density-compact .bytey-provider-pill,
+.bytey-density-compact .bytey-density-btn,
+.bytey-density-compact .bytey-clear-btn,
+.bytey-density-compact .bytey-close-btn {
   height: 22px;
   border-radius: 6px;
   font-size: 7.5pt;
   padding: 0 6px;
 }
 
-.ai-pet-density-compact .ai-pet-close-btn {
+.bytey-density-compact .bytey-close-btn {
   width: 22px;
   padding: 0;
 }
 
-.ai-pet-density-compact .ai-pet-status-dot {
+.bytey-density-compact .bytey-status-dot {
   font-size: 7.5pt;
 }
 
-.ai-pet-density-compact .ai-pet-messages {
+.bytey-density-compact .bytey-messages {
   spacing: 5px;
 }
 
-.ai-pet-density-compact .ai-pet-msg-user,
-.ai-pet-density-compact .ai-pet-msg-assistant {
+.bytey-density-compact .bytey-msg-user,
+.bytey-density-compact .bytey-msg-assistant {
   padding: 5px 8px;
   spacing: 3px;
   border-radius: 9px;
 }
 
-.ai-pet-density-compact .ai-pet-msg-meta {
+.bytey-density-compact .bytey-msg-meta {
   min-height: 20px;
   spacing: 4px;
 }
 
-.ai-pet-density-compact .ai-pet-msg-role {
+.bytey-density-compact .bytey-msg-role {
   font-size: 7.5pt;
 }
 
-.ai-pet-density-compact .ai-pet-source-badge,
-.ai-pet-density-compact .ai-pet-emotion-tag {
+.bytey-density-compact .bytey-source-badge,
+.bytey-density-compact .bytey-emotion-tag {
   font-size: 6.8pt;
   padding: 1px 5px;
   border-radius: 5px;
 }
 
-.ai-pet-density-compact .ai-pet-msg-text {
+.bytey-density-compact .bytey-msg-text {
   font-size: 8.5pt;
 }
 
-.ai-pet-density-compact .ai-pet-replay-btn {
+.bytey-density-compact .bytey-replay-btn {
   width: 20px;
   height: 20px;
   border-radius: 5px;
 }
 
-.ai-pet-density-compact .ai-pet-drawer-footer {
+.bytey-density-compact .bytey-drawer-footer {
   spacing: 4px;
   padding-top: 5px;
 }
 
-.ai-pet-density-compact .ai-pet-entry,
-.ai-pet-density-compact .ai-pet-send-btn,
-.ai-pet-density-compact .ai-pet-mic-btn {
+.bytey-density-compact .bytey-entry,
+.bytey-density-compact .bytey-send-btn,
+.bytey-density-compact .bytey-mic-btn {
   height: 28px;
   border-radius: 8px;
   font-size: 8.5pt;
 }
 
-.ai-pet-density-compact .ai-pet-mic-btn {
+.bytey-density-compact .bytey-mic-btn {
   width: 28px;
   padding: 0;
 }
 
-.ai-pet-density-spacious {
+.bytey-density-spacious {
   padding: 16px;
   spacing: 12px;
   border-radius: 20px;
 }
 
-.ai-pet-density-spacious .ai-pet-drawer-header {
+.bytey-density-spacious .bytey-drawer-header {
   spacing: 8px;
   padding-bottom: 10px;
 }
 
-.ai-pet-density-spacious .ai-pet-provider-pill,
-.ai-pet-density-spacious .ai-pet-density-btn,
-.ai-pet-density-spacious .ai-pet-clear-btn,
-.ai-pet-density-spacious .ai-pet-close-btn {
+.bytey-density-spacious .bytey-provider-pill,
+.bytey-density-spacious .bytey-density-btn,
+.bytey-density-spacious .bytey-clear-btn,
+.bytey-density-spacious .bytey-close-btn {
   height: 30px;
   border-radius: 10px;
   font-size: 9.5pt;
   padding: 0 11px;
 }
 
-.ai-pet-density-spacious .ai-pet-close-btn {
+.bytey-density-spacious .bytey-close-btn {
   width: 30px;
   padding: 0;
 }
 
-.ai-pet-density-spacious .ai-pet-status-dot {
+.bytey-density-spacious .bytey-status-dot {
   font-size: 9.5pt;
 }
 
-.ai-pet-density-spacious .ai-pet-messages {
+.bytey-density-spacious .bytey-messages {
   spacing: 10px;
 }
 
-.ai-pet-density-spacious .ai-pet-msg-user,
-.ai-pet-density-spacious .ai-pet-msg-assistant {
+.bytey-density-spacious .bytey-msg-user,
+.bytey-density-spacious .bytey-msg-assistant {
   padding: 10px 14px;
   spacing: 7px;
   border-radius: 14px;
 }
 
-.ai-pet-density-spacious .ai-pet-msg-meta {
+.bytey-density-spacious .bytey-msg-meta {
   min-height: 28px;
   spacing: 8px;
 }
 
-.ai-pet-density-spacious .ai-pet-msg-role {
+.bytey-density-spacious .bytey-msg-role {
   font-size: 9.5pt;
 }
 
-.ai-pet-density-spacious .ai-pet-source-badge,
-.ai-pet-density-spacious .ai-pet-emotion-tag {
+.bytey-density-spacious .bytey-source-badge,
+.bytey-density-spacious .bytey-emotion-tag {
   font-size: 8.2pt;
   padding: 2px 9px;
   border-radius: 7px;
 }
 
-.ai-pet-density-spacious .ai-pet-msg-text {
+.bytey-density-spacious .bytey-msg-text {
   font-size: 10.5pt;
 }
 
-.ai-pet-density-spacious .ai-pet-replay-btn {
+.bytey-density-spacious .bytey-replay-btn {
   width: 28px;
   height: 28px;
   border-radius: 8px;
 }
 
-.ai-pet-density-spacious .ai-pet-drawer-footer {
+.bytey-density-spacious .bytey-drawer-footer {
   spacing: 8px;
   padding-top: 10px;
 }
 
-.ai-pet-density-spacious .ai-pet-entry,
-.ai-pet-density-spacious .ai-pet-send-btn,
-.ai-pet-density-spacious .ai-pet-mic-btn {
+.bytey-density-spacious .bytey-entry,
+.bytey-density-spacious .bytey-send-btn,
+.bytey-density-spacious .bytey-mic-btn {
   height: 40px;
   border-radius: 12px;
   font-size: 10.5pt;
 }
 
-.ai-pet-density-spacious .ai-pet-mic-btn {
+.bytey-density-spacious .bytey-mic-btn {
   width: 40px;
   padding: 0;
 }
 
 /* Right-Click Context Menu */
 
-.ai-pet-context-menu {
+.bytey-context-menu {
   font-size: 9.5pt;
 }
 
-.ai-pet-context-menu .popup-menu-item {
+.bytey-context-menu .popup-menu-item {
   padding: 6px 12px;
 }
 
-.ai-pet-context-menu-danger {
+.bytey-context-menu-danger {
   color: #ff6b70;
   font-weight: 600;
 }

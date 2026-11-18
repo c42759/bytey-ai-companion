@@ -1,4 +1,4 @@
-# AI Pet (`pet`) — Architecture & Implementation Plan
+# Bytey AI Companion — Architecture & Implementation Plan
 
 > **Target Platform (Initial):** GNOME Shell 50 on Wayland (Linux, PipeWire)
 > **Cross-Platform Strategy:** Thin GNOME Shell presentation layer coupled over localhost IPC to a portable Python 3 core daemon (`core-daemon/`), enabling future macOS/Windows overlays without rewriting AI, voice, or MCP subsystems.
@@ -7,13 +7,13 @@
 
 ## 1. Description of the Request
 
-Build an always-on-top **AI Pet** inspired by the iOS Dynamic Island: a compact matte-black pill featuring two playful, Grok-style expressive eyes that react to listening, thinking, tool usage, speaking, and emotional state. Users summon the pet hands-free using a customizable wake phrase (e.g., `"Hey <name>"`), hold natural voice or typed conversations backed by configurable AI providers and MCP tools, hear streaming responses via Kokoro or ElevenLabs TTS, inspect or continue full transcripts on left-click, and manage all preferences or exit via right-click.
+Build an always-on-top **Bytey AI Companion** inspired by the iOS Dynamic Island: a compact matte-black pill featuring two playful, Grok-style expressive eyes that react to listening, thinking, tool usage, speaking, and emotional state. Users summon Bytey hands-free using a customizable wake phrase (e.g., `"Hey <name>"`), hold natural voice or typed conversations backed by configurable AI providers and MCP tools, hear streaming responses via Kokoro or ElevenLabs TTS, inspect or continue full transcripts on left-click, and manage all preferences or exit via right-click.
 
 ---
 
 ## 2. Possible Use Cases
 
-1. **Hands-Free Voice Assistant While Working**: Trigger `"Hey Nova"` while coding or reading full-screen docs; the island floats above all Wayland windows without stealing focus, captures the prompt until silence, executes tools if needed, and speaks a concise reply.
+1. **Hands-Free Voice Assistant While Working**: Trigger `"Hey Bytey"` while coding or reading full-screen docs; the island floats above all Wayland windows without stealing focus, captures the prompt until silence, executes tools if needed, and speaks a concise reply.
 2. **MCP-Powered Desktop & Dev Copilot**: Attach local `stdio` or remote `SSE` / `Streamable HTTP` MCP servers (filesystem, calendar, GitHub, smart-home) when a tool-capable LLM is selected, watching live tool execution status directly on the island.
 3. **Silent Typed Assistant**: Toggle Mic/TTS mute from the right-click menu and left-click the island to expand the anchored conversation drawer for quiet keyboard chatting and transcript review.
 4. **Adaptive Workspace Placement**: Anchor the island to a fixed monitor alignment (`top-center`, `bottom-right`, etc. with custom pixel offsets) or unlock Floating mode to drag it anywhere across monitors with saved coordinates.
@@ -71,7 +71,7 @@ Build an always-on-top **AI Pet** inspired by the iOS Dynamic Island: a compact 
 
 ### Phase 5: Native GTK4/Libadwaita Settings UI & Packaging
 1. `[PARALLEL]` **FrontendBot**: Build `settings-ui/` (`Adw.PreferencesWindow`) with tabs for General/Prompt, AI & Tools (Provider/Model/MCP Form + Raw JSON), Voice Input, Voice Output, and Appearance & Position.
-2. `[PARALLEL]` **DocumentationBot**: Add `systemd/ai-pet-daemon.service` user unit, installation helpers, `README.md`, and final `.agents-memory/progress.md` update.
+2. `[PARALLEL]` **DocumentationBot**: Add `systemd/bytey-ai-companion-daemon.service` user unit, installation helpers, `README.md`, and final `.agents-memory/progress.md` update.
 3. `[SEQUENTIAL]` **TestingBot + SecurityBot**: End-to-end validation of lifecycle (`systemd` start, `Exit` clean shutdown, config round-trip, nested GNOME Wayland UX).
 
 ---
@@ -108,7 +108,7 @@ To solve this cleanly without sacrificing future OS portability:
 ```
 
 ### Process Lifecycle
-- **Auto-Start**: Managed via a `systemd --user` service (`ai-pet-daemon.service`) started at GNOME login, with fallback spawn/reconnect logic if the extension enables before the socket is ready.
+- **Auto-Start**: Managed via a `systemd --user` service (`bytey-ai-companion-daemon.service`) started at GNOME login, with fallback spawn/reconnect logic if the extension enables before the socket is ready.
 - **Clean Exit**: Selecting `Exit` in the Right-Click menu triggers `POST /api/v1/system/exit`, which stops audio capture/TTS, closes active MCP child processes, terminates the daemon gracefully (using `systemctl --user stop` or clean process exit without triggering unwanted auto-restart), and hides the overlay until re-enabled.
 
 ---
@@ -149,7 +149,7 @@ Rendered procedurally in Cairo rather than static sprites for crisp scaling at a
   - Plus signed pixel offsets `offset_x` and `offset_y` (e.g., `top-center` with `offset_y: 12` to sit cleanly beneath the GNOME top bar).
 - **Floating Mode**:
   - Mouse press + drag moves the island anywhere across monitor space.
-  - **5px Click-vs-Drag Threshold**: Pointer travel `< 5px` on release registers as a **Left-Click** (opens transcript drawer); travel `>= 5px` initiates drag, clamps final `(float_x, float_y)` inside valid monitor bounds so the pet can never be lost off-screen, and persists coordinates via `PATCH /api/v1/config`.
+  - **5px Click-vs-Drag Threshold**: Pointer travel `< 5px` on release registers as a **Left-Click** (opens transcript drawer); travel `>= 5px` initiates drag, clamps final `(float_x, float_y)` inside valid monitor bounds so Bytey can never be lost off-screen, and persists coordinates via `PATCH /api/v1/config`.
   - When toggled in Settings or right-click menu (`Lock Position / Float`), immediately snaps to the corresponding mode.
 
 ---
@@ -160,9 +160,9 @@ Rendered procedurally in Cairo rather than static sprites for crisp scaling at a
 Clicking the island (without dragging) opens an anchored floating panel directly below the island (or above it automatically if the island sits in the lower half of the monitor):
 - **Header Bar**: Active provider/model pill, current session title, and `Clear / New Chat` button.
 - **Scrollable History (`St.ScrollView`)**:
-  - Persisted in SQLite (`messages` & `tool_calls`), showing both voice-transcribed prompts (tagged with mic badge) and typed messages, alongside pet responses.
+  - Persisted in SQLite (`messages` & `tool_calls`), showing both voice-transcribed prompts (tagged with mic badge) and typed messages, alongside Bytey responses.
   - **Tool Call Pills**: Collapsible summary chips showing MCP server, tool name, arguments, and execution status (`running`, `ok`, `error`).
-  - **Replay TTS Button**: Speaker icon on each pet response to re-synthesize/replay via active TTS engine.
+  - **Replay TTS Button**: Speaker icon on each Bytey response to re-synthesize/replay via active TTS engine.
 - **Footer Input Bar**: Text input box + `Send` button (for silent prompting without using voice) and a manual `Push-to-Talk` mic button.
 
 ### Right-Click: Context Menu (`PopupMenu`)
@@ -183,11 +183,11 @@ Right-clicking the island opens a native GNOME `PopupMenu` with:
 1. **Audio Capture**: `sounddevice` opens a 16kHz, 16-bit mono PCM stream through PipeWire (`30ms` / `512`-sample frames).
 2. **Silero VAD**: Runs lightweight local voice activity detection on incoming frames, maintaining a rolling `1.5s` pre-roll ring buffer.
 3. **Custom Wake-Word Detection (Zero Retraining)**:
-   - User types any wake phrase in Settings (e.g., `"Hey Nova"`, `"Hey Jarvis"`, `"Ok Buddy"`).
+   - User types any wake phrase in Settings (e.g., `"Hey Bytey"`, `"Hey Jarvis"`, `"Ok Buddy"`).
    - When Silero VAD detects speech onset, the daemon captures the opening `1.2s–1.8s` utterance chunk and runs a fast local tiny model (`faster-whisper` `tiny.en`/`base` on CPU/GPU or `sherpa-onnx` keyword spotter).
    - Transcribed onset text is normalized (lowercase, stripped punctuation, phonetic normalization via Metaphone/Soundex + `rapidfuzz` ratio threshold configurable via `"Wake Sensitivity"` slider).
-   - **Same-Utterance Command Support**: If the user speaks continuously (`"Hey Nova, what's the weather today?"`), the text *after* the wake phrase is preserved immediately rather than forcing the user to pause and repeat!
-   - **Barge-In**: Detecting the wake phrase while the pet is speaking immediately cancels TTS playback and switches to `LISTENING`.
+   - **Same-Utterance Command Support**: If the user speaks continuously (`"Hey Bytey, what's the weather today?"`), the text *after* the wake phrase is preserved immediately rather than forcing the user to pause and repeat!
+   - **Barge-In**: Detecting the wake phrase while Bytey is speaking immediately cancels TTS playback and switches to `LISTENING`.
 
 ### Configurable Prompt STT
 Once awake (via wake-word, manual drawer mic button, or optional global hotkey):
@@ -244,7 +244,7 @@ When a model is selected, the daemon automatically resolves `supports_tools: boo
 Settings provides a multiline editable **System Prompt** with a `"Reset to Default"` action. Default prompt:
 
 ```text
-You are Pet, a fast, helpful, and friendly desktop AI assistant.
+You are Bytey, a fast, helpful, and friendly desktop AI assistant.
 Keep spoken answers concise, direct, and natural (1-3 sentences unless asked for detail).
 Avoid markdown tables or raw ASCII clutter when replying to voice queries.
 Begin every reply with a single mood tag from: [emotion:happy], [emotion:curious], [emotion:surprised], [emotion:sleepy], [emotion:error], or [emotion:neutral].
@@ -295,7 +295,7 @@ pet/
 ├── .env.example
 ├── core-daemon/
 │   ├── pyproject.toml
-│   └── ai_pet/
+│   └── bytey_ai_companion/
 │       ├── __init__.py
 │       ├── main.py                 # FastAPI + uvicorn entrypoint & lifecycle
 │       ├── config.py               # Pydantic settings + .env / keyring secret loader
@@ -321,7 +321,7 @@ pet/
 │           ├── manager.py          # stdio + SSE/Streamable HTTP ClientSession pool
 │           └── schema_sync.py      # Bidirectional GUI <-> mcpServers JSON adapter
 ├── gnome-extension/
-│   └── ai-pet@local/
+│   └── bytey-ai-companion@local/
 │       ├── metadata.json           # shell-version: ["50"] (and compatible 46-49 if tested)
 │       ├── extension.js            # Extension lifecycle & IPC reconnect loop
 │       ├── islandWidget.js         # Matte-black pill, Cairo DrawingArea eyes, click/drag
@@ -331,12 +331,12 @@ pet/
 │       ├── contextMenu.js          # Right-click menu (Config, Mute toggles, Exit)
 │       └── stylesheet.css
 ├── settings-ui/
-│   └── ai_pet_settings/
+│   └── bytey_settings/
 │       ├── __init__.py
 │       ├── app.py                  # GTK4 / Libadwaita Adw.PreferencesWindow
 │       └── pages/                  # General, AI & MCP, Voice Input, Voice Output, Visuals
 ├── systemd/
-│   └── ai-pet-daemon.service
+│   └── bytey-ai-companion-daemon.service
 └── tests/
     ├── test_wakeword.py
     ├── test_tts_chunker.py
@@ -354,7 +354,7 @@ pet/
   - `config_updated`: `{ "type": "config_updated", "config": { ...redacted... } }`
   - `shutdown`: `{ "type": "shutdown" }`
 - **REST Endpoints (`/api/v1/*`)**:
-  - `GET / PATCH /api/v1/config` — Read/update non-secret config (`~/.config/ai-pet/config.json`)
+  - `GET / PATCH /api/v1/config` — Read/update non-secret config (`~/.config/bytey-ai-companion/config.json`)
   - `PUT /api/v1/secrets` — Store provider/TTS secrets into OS keyring (`libsecret`) or `.env` (never returned in plaintext)
   - `GET /api/v1/providers/{provider}/models` — Fetch models & tool-calling capability flags
   - `POST /api/v1/mcp/test` — Test an MCP server config and return discovered tools
@@ -363,7 +363,7 @@ pet/
   - `POST /api/v1/voice/trigger` & `POST /api/v1/voice/barge-in` — Manual listen / stop speaking
   - `POST /api/v1/system/exit` — Clean daemon shutdown
 
-### SQLite Schema (`~/.local/share/ai-pet/pet.db`)
+### SQLite Schema (`~/.local/share/bytey-ai-companion/bytey.db`)
 - `sessions (id TEXT PRIMARY KEY, title TEXT, created_at TIMESTAMP, updated_at TIMESTAMP)`
 - `messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, input_mode TEXT, content TEXT, emotion TEXT, created_at TIMESTAMP)`
 - `tool_calls (id TEXT PRIMARY KEY, message_id TEXT, server_name TEXT, tool_name TEXT, arguments_json TEXT, result_summary TEXT, status TEXT, created_at TIMESTAMP)`
@@ -373,7 +373,7 @@ pet/
 ## 15. Verification & Testing Strategy
 
 1. **Automated Unit & Integration Tests (`pytest`)**:
-   - **Wake-Word Matching**: Verify `"Hey Nova"`, `"hey nova check this"`, and minor phonetic variants match above threshold while unrelated background phrases do not trigger false positives.
+   - **Wake-Word Matching**: Verify `"Hey Bytey"`, `"hey bytey check this"`, and minor phonetic variants match above threshold while unrelated background phrases do not trigger false positives.
    - **Sentence Chunker & Emotion Parser**: Verify `[emotion:curious] Let's check v1.2! Done.` emits `curious`, strips the tag, and splits cleanly without breaking decimals/URLs.
    - **Provider Capability & MCP Sync**: Verify Ollama `/api/show` `"tools"` detection, manual override toggle, bidirectional form-to-`mcpServers` JSON conversion, and stdio/HTTP mock tool loop.
    - **Storage & IPC**: Verify SQLite CRUD, secret redaction in `GET /api/v1/config`, and real-time WebSocket event delivery across simulated turns.

@@ -1,4 +1,4 @@
-"""Comprehensive automated test suite for AI Pet."""
+"""Comprehensive automated test suite for Bytey AI Companion."""
 
 from __future__ import annotations
 
@@ -18,34 +18,45 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import websockets
 
-os.environ["AI_PET_DISABLE_KEYRING"] = "1"
+os.environ["BYTEY_DISABLE_KEYRING"] = "1"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORE_DAEMON_DIR = REPO_ROOT / "core-daemon"
 SETTINGS_UI_DIR = REPO_ROOT / "settings-ui"
-GNOME_EXT_DIR = REPO_ROOT / "gnome-extension" / "ai-pet@local"
+GNOME_EXT_DIR = REPO_ROOT / "gnome-extension" / "bytey-ai-companion@local"
 
 for _p in (str(CORE_DAEMON_DIR), str(SETTINGS_UI_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from ai_pet.audio.vad import VADProcessor  # noqa: E402
-from ai_pet.audio.wakeword import WakeWordMatcher  # noqa: E402
-from ai_pet.config import ConfigManager, SecretStore  # noqa: E402
-from ai_pet.llm.emotions import EmotionStreamParser, VALID_EMOTIONS  # noqa: E402
-from ai_pet.main import AiPetDaemon  # noqa: E402
-from ai_pet.mcp_host import (  # noqa: E402
+from bytey_ai_companion.audio.vad import VADProcessor  # noqa: E402
+from bytey_ai_companion.audio.wakeword import WakeWordMatcher  # noqa: E402
+from bytey_ai_companion.config import (  # noqa: E402
+    ConfigManager,
+    SecretStore,
+    resolve_config_dir,
+)
+from bytey_ai_companion.llm.emotions import EmotionStreamParser, VALID_EMOTIONS  # noqa: E402
+from bytey_ai_companion.main import ByteyDaemon  # noqa: E402
+from bytey_ai_companion.mcp_host import (  # noqa: E402
     MCPClientManager,
     from_mcp_servers_json,
     to_mcp_servers_json,
 )
-from ai_pet.storage import StorageManager  # noqa: E402
-from ai_pet.tts.chunker import SentenceChunker  # noqa: E402
-from ai_pet_settings.api_client import DaemonClient  # noqa: E402
+from bytey_ai_companion.storage import (  # noqa: E402
+    DEFAULT_DB_FILENAME,
+    LEGACY_DB_FILENAME,
+    StorageManager,
+    resolve_data_dir,
+    resolve_db_path,
+)
+from bytey_ai_companion.tts.chunker import SentenceChunker  # noqa: E402
+from bytey_settings.api_client import DaemonClient, resolve_local_config_path  # noqa: E402
 
 
 MOCK_MCP_SERVER_SCRIPT = '''\
@@ -266,7 +277,7 @@ class TestConfigAndSecrets(unittest.TestCase):
     """Test ConfigManager and SecretStore behavior."""
 
     def setUp(self) -> None:
-        os.environ["AI_PET_DISABLE_KEYRING"] = "1"
+        os.environ["BYTEY_DISABLE_KEYRING"] = "1"
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.cfg_dir = Path(self.tmp_dir.name)
 
@@ -322,13 +333,64 @@ class TestConfigAndSecrets(unittest.TestCase):
         self.assertEqual(reloaded.config.provider.model, "gemini-2.5-flash")
         self.assertEqual(reloaded.config.visuals.float_x, 222)
 
+    def test_legacy_config_dir_and_env_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as home_tmp:
+            fake_home = Path(home_tmp)
+            primary_dir = fake_home / ".config" / "bytey-ai-companion"
+            legacy_dir = fake_home / ".config" / "ai-pet"
+            clean_env = {
+                k: v
+                for k, v in os.environ.items()
+                if k
+                not in (
+                    "BYTEY_CONFIG_DIR",
+                    "AI_PET_CONFIG_DIR",
+                    "BYTEY_DISABLE_KEYRING",
+                    "AI_PET_DISABLE_KEYRING",
+                )
+            }
+
+            with patch.dict(os.environ, clean_env, clear=True), patch(
+                "pathlib.Path.home", return_value=fake_home
+            ):
+                # Fresh home resolves to primary bytey-ai-companion config dir
+                self.assertEqual(resolve_config_dir(), primary_dir)
+
+                # Legacy ~/.config/ai-pet/config.json falls back when primary is absent
+                legacy_dir.mkdir(parents=True, exist_ok=True)
+                (legacy_dir / "config.json").write_text("{}", encoding="utf-8")
+                self.assertEqual(resolve_config_dir(), legacy_dir)
+
+                # Primary ~/.config/bytey-ai-companion/config.json wins when present
+                primary_dir.mkdir(parents=True, exist_ok=True)
+                (primary_dir / "config.json").write_text("{}", encoding="utf-8")
+                self.assertEqual(resolve_config_dir(), primary_dir)
+
+                # AI_PET_CONFIG_DIR fallback and BYTEY_CONFIG_DIR override
+                env_legacy = fake_home / "env-legacy-cfg"
+                env_primary = fake_home / "env-primary-cfg"
+                with patch.dict(os.environ, {"AI_PET_CONFIG_DIR": str(env_legacy)}):
+                    self.assertEqual(resolve_config_dir(), env_legacy)
+                    with patch.dict(os.environ, {"BYTEY_CONFIG_DIR": str(env_primary)}):
+                        self.assertEqual(resolve_config_dir(), env_primary)
+
+                # Keyring disable flag checks (primary + legacy)
+                with patch("bytey_ai_companion.config._LibSecret", object()), patch.object(
+                    SecretStore, "_build_schema", return_value=object()
+                ):
+                    self.assertTrue(SecretStore(config_dir=self.cfg_dir)._keyring_enabled())
+                    with patch.dict(os.environ, {"BYTEY_DISABLE_KEYRING": "1"}):
+                        self.assertFalse(SecretStore(config_dir=self.cfg_dir)._keyring_enabled())
+                    with patch.dict(os.environ, {"AI_PET_DISABLE_KEYRING": "1"}):
+                        self.assertFalse(SecretStore(config_dir=self.cfg_dir)._keyring_enabled())
+
 
 class TestStorageManager(unittest.IsolatedAsyncioTestCase):
     """Test SQLite StorageManager CRUD, tool_call attachment, and FK cascades."""
 
     async def asyncSetUp(self) -> None:
         self.tmp_dir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.tmp_dir.name) / "pet.db"
+        self.db_path = Path(self.tmp_dir.name) / "bytey.db"
         self.storage = StorageManager(db_path=self.db_path)
         await self.storage.init_db()
 
@@ -385,27 +447,80 @@ class TestStorageManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tc_count, 0)
 
 
+class TestStoragePathFallback(unittest.TestCase):
+    """Test legacy data directory and SQLite path fallback resolution."""
+
+    def test_legacy_data_dir_and_db_path_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_home = root / "home"
+            fake_home.mkdir()
+            primary_dir = fake_home / ".local" / "share" / "bytey-ai-companion"
+            legacy_dir = fake_home / ".local" / "share" / "ai-pet"
+            clean_env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("BYTEY_DATA_DIR", "AI_PET_DATA_DIR")
+            }
+
+            with patch.dict(os.environ, clean_env, clear=True), patch(
+                "pathlib.Path.home", return_value=fake_home
+            ):
+                # Fresh home resolves to bytey-ai-companion and bytey.db
+                self.assertEqual(resolve_data_dir(), primary_dir)
+                self.assertEqual(resolve_db_path(), primary_dir / DEFAULT_DB_FILENAME)
+
+                # Legacy ~/.local/share/ai-pet/pet.db falls back when primary is absent
+                legacy_dir.mkdir(parents=True, exist_ok=True)
+                (legacy_dir / LEGACY_DB_FILENAME).write_text("", encoding="utf-8")
+                self.assertEqual(resolve_data_dir(), legacy_dir)
+                self.assertEqual(resolve_db_path(), legacy_dir / LEGACY_DB_FILENAME)
+
+                # Primary ~/.local/share/bytey-ai-companion/bytey.db wins when present
+                primary_dir.mkdir(parents=True, exist_ok=True)
+                (primary_dir / DEFAULT_DB_FILENAME).write_text("", encoding="utf-8")
+                self.assertEqual(resolve_data_dir(), primary_dir)
+                self.assertEqual(resolve_db_path(), primary_dir / DEFAULT_DB_FILENAME)
+
+                # resolve_db_path(explicit_dir) picks pet.db if only pet.db exists, prefers bytey.db if both exist
+                explicit_dir = root / "explicit"
+                explicit_dir.mkdir()
+                self.assertEqual(resolve_db_path(explicit_dir), explicit_dir / DEFAULT_DB_FILENAME)
+                (explicit_dir / LEGACY_DB_FILENAME).write_text("", encoding="utf-8")
+                self.assertEqual(resolve_db_path(explicit_dir), explicit_dir / LEGACY_DB_FILENAME)
+                (explicit_dir / DEFAULT_DB_FILENAME).write_text("", encoding="utf-8")
+                self.assertEqual(resolve_db_path(explicit_dir), explicit_dir / DEFAULT_DB_FILENAME)
+
+                # AI_PET_DATA_DIR fallback and BYTEY_DATA_DIR override
+                env_legacy = root / "env-legacy-data"
+                env_primary = root / "env-primary-data"
+                with patch.dict(os.environ, {"AI_PET_DATA_DIR": str(env_legacy)}):
+                    self.assertEqual(resolve_data_dir(), env_legacy)
+                    with patch.dict(os.environ, {"BYTEY_DATA_DIR": str(env_primary)}):
+                        self.assertEqual(resolve_data_dir(), env_primary)
+
+
 class TestWakeWordAndVAD(unittest.TestCase):
     """Test WakeWordMatcher and VADProcessor."""
 
     def test_wake_word_matches_phonetic_and_rejects_negative(self) -> None:
-        matched, rem = WakeWordMatcher.match_wake_phrase("Hey Nova", "Hey Nova")
+        matched, rem = WakeWordMatcher.match_wake_phrase("Hey Bytey", "Hey Bytey")
         self.assertTrue(matched)
         self.assertEqual(rem, "")
 
         matched, rem = WakeWordMatcher.match_wake_phrase(
-            "hey nova what is the status", "Hey Nova"
+            "hey bytey what is the status", "Hey Bytey"
         )
         self.assertTrue(matched)
         self.assertEqual(rem, "what is the status")
 
         matched, rem = WakeWordMatcher.match_wake_phrase(
-            "Hey Novah check calendar", "Hey Nova"
+            "Hey Bitey check calendar", "Hey Bytey"
         )
         self.assertTrue(matched)
         self.assertEqual(rem, "check calendar")
 
-        matched, rem = WakeWordMatcher.match_wake_phrase("hello world", "Hey Nova")
+        matched, rem = WakeWordMatcher.match_wake_phrase("hello world", "Hey Bytey")
         self.assertFalse(matched)
         self.assertEqual(rem, "")
 
@@ -617,7 +732,7 @@ class TestSchemaSyncAndMCP(unittest.IsolatedAsyncioTestCase):
 
 
 class TestLiveDaemonIntegration(unittest.IsolatedAsyncioTestCase):
-    """End-to-end tests against a live AiPetDaemon on ephemeral localhost port."""
+    """End-to-end tests against a live ByteyDaemon on ephemeral localhost port."""
 
     async def asyncSetUp(self) -> None:
         self.tmp_dir = tempfile.TemporaryDirectory()
@@ -628,7 +743,7 @@ class TestLiveDaemonIntegration(unittest.IsolatedAsyncioTestCase):
         self.server_script.write_text(MOCK_MCP_SERVER_SCRIPT, encoding="utf-8")
 
         self.mock_llm = _MockLLMRouter()
-        self.daemon = AiPetDaemon(
+        self.daemon = ByteyDaemon(
             host="127.0.0.1",
             port=0,
             config_dir=self.cfg_dir,
@@ -755,7 +870,7 @@ class TestLiveDaemonIntegration(unittest.IsolatedAsyncioTestCase):
                     # 5a. Standard chat turn via POST /api/v1/chat
                     r_chat = await client.post(
                         "/api/v1/chat",
-                        json={"content": "Hello Nova", "input_mode": "text"},
+                        json={"content": "Hello Bytey", "input_mode": "text"},
                     )
                     self.assertEqual(r_chat.status_code, 200)
                     self.assertEqual(
@@ -803,14 +918,14 @@ import asyncio, json, os, sys, tempfile
 from pathlib import Path
 import httpx, websockets
 
-os.environ["AI_PET_DISABLE_KEYRING"] = "1"
+os.environ["BYTEY_DISABLE_KEYRING"] = "1"
 sys.path.insert(0, %r)
-from ai_pet.main import AiPetDaemon
+from bytey_ai_companion.main import ByteyDaemon
 
 async def main():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        daemon = AiPetDaemon(
+        daemon = ByteyDaemon(
             host="127.0.0.1",
             port=0,
             config_dir=root / "cfg",
@@ -847,7 +962,7 @@ asyncio.run(main())
             driver,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "AI_PET_DISABLE_KEYRING": "1"},
+            env={**os.environ, "BYTEY_DISABLE_KEYRING": "1"},
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=15.0)
@@ -884,7 +999,7 @@ class TestSettingsClientAndSyntax(unittest.TestCase):
                 get_res = client.get_config()
                 self.assertTrue(get_res.ok)
                 self.assertTrue(get_res.offline)
-                self.assertEqual(get_res.data["general"]["pet_name"], "Nova")
+                self.assertEqual(get_res.data["general"]["pet_name"], "Bytey")
 
                 patch_res = client.patch_config(
                     {
@@ -907,6 +1022,53 @@ class TestSettingsClientAndSyntax(unittest.TestCase):
                 sec_res = client.put_secrets({"OPENAI_API_KEY": "sk-123"})
                 self.assertFalse(sec_res.ok)
                 self.assertTrue(sec_res.offline)
+
+    def test_settings_client_offline_legacy_fallback(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            closed_port = s.getsockname()[1]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_home = Path(tmp)
+            primary_cfg = fake_home / ".config" / "bytey-ai-companion" / "config.json"
+            legacy_cfg = fake_home / ".config" / "ai-pet" / "config.json"
+            clean_env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("BYTEY_CONFIG_DIR", "AI_PET_CONFIG_DIR")
+            }
+
+            with patch.dict(os.environ, clean_env, clear=True), patch(
+                "pathlib.Path.home", return_value=fake_home
+            ):
+                # Returns primary path when neither exists
+                self.assertEqual(resolve_local_config_path(), primary_cfg)
+
+                # Falls back to legacy ~/.config/ai-pet/config.json when only legacy exists
+                legacy_cfg.parent.mkdir(parents=True, exist_ok=True)
+                legacy_cfg.write_text(
+                    json.dumps({"general": {"pet_name": "LegacyBuddy"}}),
+                    encoding="utf-8",
+                )
+                self.assertEqual(resolve_local_config_path(), legacy_cfg)
+
+                # DaemonClient without explicit config_path reads custom value from legacy config
+                with DaemonClient(
+                    base_url=f"http://127.0.0.1:{closed_port}",
+                    timeout=1.0,
+                ) as client:
+                    get_res = client.get_config()
+                    self.assertTrue(get_res.ok)
+                    self.assertTrue(get_res.offline)
+                    self.assertEqual(get_res.data["general"]["pet_name"], "LegacyBuddy")
+
+                # Prefers primary when both exist
+                primary_cfg.parent.mkdir(parents=True, exist_ok=True)
+                primary_cfg.write_text(
+                    json.dumps({"general": {"pet_name": "PrimaryBytey"}}),
+                    encoding="utf-8",
+                )
+                self.assertEqual(resolve_local_config_path(), primary_cfg)
 
     def test_py_compile_all_python_files(self) -> None:
         py_files = [
@@ -935,12 +1097,20 @@ class TestSettingsClientAndSyntax(unittest.TestCase):
                     0,
                     f"node --check failed for {js_file}: {proc.stderr}",
                 )
+                js_text = js_file.read_text(encoding="utf-8")
+                self.assertNotIn("ai-pet-", js_text)
+
+        css_path = GNOME_EXT_DIR / "stylesheet.css"
+        self.assertTrue(css_path.is_file())
+        css_text = css_path.read_text(encoding="utf-8")
+        self.assertNotIn("ai-pet-", css_text)
+        self.assertIn(".popup-menu-item", css_text)
 
         meta_path = GNOME_EXT_DIR / "metadata.json"
         self.assertTrue(meta_path.is_file())
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        self.assertEqual(meta.get("uuid"), "ai-pet@local")
-        self.assertIsInstance(meta.get("name"), str)
+        self.assertEqual(meta.get("uuid"), "bytey-ai-companion@local")
+        self.assertEqual(meta.get("name"), "Bytey AI Companion")
         self.assertIsInstance(meta.get("description"), str)
         self.assertIsInstance(meta.get("shell-version"), list)
         self.assertGreater(len(meta["shell-version"]), 0)

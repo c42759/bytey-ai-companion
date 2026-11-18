@@ -1,4 +1,4 @@
-"""Configuration models, secret store, and config manager for AI Pet."""
+"""Configuration models, secret store, and config manager for Bytey AI Companion."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from typing import Any
 from dotenv import dotenv_values, set_key, unset_key
 from pydantic import BaseModel, ConfigDict, Field
 
+from .llm.emotions import DEFAULT_SYSTEM_PROMPT
+
 try:
     import gi
 
@@ -24,28 +26,33 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are Pet, a fast, helpful, and friendly desktop AI assistant.\n"
-    "Keep spoken answers concise, direct, and natural (1-3 sentences unless asked for detail).\n"
-    "Avoid markdown tables or raw ASCII clutter when replying to voice queries.\n"
-    "Begin every reply with a single mood tag from: [emotion:happy], [emotion:curious], "
-    "[emotion:surprised], [emotion:sleepy], [emotion:error], or [emotion:neutral].\n"
-    "If tools are available and needed, call them concisely and summarize results clearly."
-)
-
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _KEY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MERGE_SECTIONS = ("general", "provider", "voice_in", "voice_out", "visuals")
 
 
+def _primary_config_dir() -> Path:
+    return Path.home() / ".config" / "bytey-ai-companion"
+
+
+def _legacy_config_dir() -> Path:
+    return Path.home() / ".config" / "ai-pet"
+
+
 def resolve_config_dir(config_dir: Path | None = None) -> Path:
-    """Resolve the configuration directory, honoring AI_PET_CONFIG_DIR."""
+    """Resolve configuration directory, honoring BYTEY_CONFIG_DIR (or AI_PET_CONFIG_DIR) and legacy ~/.config/ai-pet fallback."""
     if config_dir is not None:
         return Path(config_dir)
-    env_dir = os.environ.get("AI_PET_CONFIG_DIR")
+    env_dir = os.environ.get("BYTEY_CONFIG_DIR") or os.environ.get("AI_PET_CONFIG_DIR")
     if env_dir:
         return Path(env_dir)
-    return Path.home() / ".config" / "ai-pet"
+    primary = _primary_config_dir()
+    legacy = _legacy_config_dir()
+    if (primary / "config.json").exists() or (primary / ".env").exists():
+        return primary
+    if (legacy / "config.json").exists() or (legacy / ".env").exists():
+        return legacy
+    return primary
 
 
 class GeneralConfig(BaseModel):
@@ -53,8 +60,8 @@ class GeneralConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    pet_name: str = "Nova"
-    wake_phrase: str = "Hey Nova"
+    pet_name: str = "Bytey"
+    wake_phrase: str = "Hey Bytey"
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
 
@@ -133,7 +140,7 @@ class MCPServerConfig(BaseModel):
     disabled_tools: list[str] = Field(default_factory=list)
 
 
-class PetConfig(BaseModel):
+class ByteyConfig(BaseModel):
     """Root non-secret configuration schema persisted to config.json."""
 
     model_config = ConfigDict(extra="ignore")
@@ -159,24 +166,35 @@ class SecretStore:
         "STT_API_KEY",
     )
 
-    _SCHEMA_ID = "io.github.ai_pet.Secrets"
+    _SCHEMA_ID = "io.github.bytey_ai_companion.Secrets"
+    _LEGACY_SCHEMA_ID = "io.github.ai_pet.Secrets"
+
+    @staticmethod
+    def _build_schema(schema_id: str) -> Any:
+        if _LibSecret is None:
+            return None
+        try:
+            return _LibSecret.Schema.new(
+                schema_id,
+                _LibSecret.SchemaFlags.NONE,
+                {
+                    "key": _LibSecret.SchemaAttributeType.STRING,
+                    "config_dir": _LibSecret.SchemaAttributeType.STRING,
+                },
+            )
+        except Exception:
+            return None
 
     def __init__(self, config_dir: Path | None = None) -> None:
         self.config_dir = resolve_config_dir(config_dir)
         self.env_file = self.config_dir / ".env"
-        self._schema: Any = None
-        if _LibSecret is not None:
-            try:
-                self._schema = _LibSecret.Schema.new(
-                    self._SCHEMA_ID,
-                    _LibSecret.SchemaFlags.NONE,
-                    {
-                        "key": _LibSecret.SchemaAttributeType.STRING,
-                        "config_dir": _LibSecret.SchemaAttributeType.STRING,
-                    },
-                )
-            except Exception:
-                self._schema = None
+        self._allow_legacy_fallback = (
+            config_dir is None
+            and not os.environ.get("BYTEY_CONFIG_DIR")
+            and not os.environ.get("AI_PET_CONFIG_DIR")
+        )
+        self._schema: Any = self._build_schema(self._SCHEMA_ID)
+        self._legacy_schema: Any = self._build_schema(self._LEGACY_SCHEMA_ID)
 
     def __repr__(self) -> str:
         return f"SecretStore(config_dir={self.config_dir!r})"
@@ -191,22 +209,54 @@ class SecretStore:
     def _keyring_enabled(self) -> bool:
         if _LibSecret is None or self._schema is None:
             return False
-        disabled = os.environ.get("AI_PET_DISABLE_KEYRING", "").strip().lower()
+        disabled = (
+            os.environ.get("BYTEY_DISABLE_KEYRING")
+            or os.environ.get("AI_PET_DISABLE_KEYRING")
+            or ""
+        ).strip().lower()
         return disabled not in ("1", "true", "yes")
 
     def _keyring_attrs(self, key: str) -> dict[str, str]:
         return {"key": key, "config_dir": str(self.config_dir)}
 
-    def _keyring_get(self, key: str) -> str | None:
-        if not self._keyring_enabled():
+    @staticmethod
+    def _keyring_lookup(schema: Any, attrs: dict[str, str]) -> str | None:
+        if schema is None:
             return None
         try:
-            value = _LibSecret.password_lookup_sync(
-                self._schema, self._keyring_attrs(key), None
-            )
+            value = _LibSecret.password_lookup_sync(schema, attrs, None)
             return value if value else None
         except Exception:
             return None
+
+    @staticmethod
+    def _keyring_clear(schema: Any, attrs: dict[str, str]) -> None:
+        if schema is None:
+            return
+        try:
+            _LibSecret.password_clear_sync(schema, attrs, None)
+        except Exception:
+            pass
+
+    def _keyring_get(self, key: str) -> str | None:
+        if not self._keyring_enabled():
+            return None
+        attrs = self._keyring_attrs(key)
+        value = self._keyring_lookup(self._schema, attrs)
+        if value:
+            return value
+        if self._legacy_schema is not None:
+            value = self._keyring_lookup(self._legacy_schema, attrs)
+            if value:
+                return value
+            if self._allow_legacy_fallback:
+                legacy_dir = _legacy_config_dir()
+                if legacy_dir != self.config_dir:
+                    return self._keyring_lookup(
+                        self._legacy_schema,
+                        {"key": key, "config_dir": str(legacy_dir)},
+                    )
+        return None
 
     def _keyring_set(self, key: str, value: str) -> None:
         if not self._keyring_enabled():
@@ -216,7 +266,7 @@ class SecretStore:
                 self._schema,
                 self._keyring_attrs(key),
                 _LibSecret.COLLECTION_DEFAULT,
-                f"AI Pet: {key}",
+                f"Bytey AI Companion: {key}",
                 value,
                 None,
             )
@@ -226,21 +276,39 @@ class SecretStore:
     def _keyring_delete(self, key: str) -> None:
         if not self._keyring_enabled():
             return
+        attrs = self._keyring_attrs(key)
+        self._keyring_clear(self._schema, attrs)
+        if self._legacy_schema is not None:
+            self._keyring_clear(self._legacy_schema, attrs)
+            if self._allow_legacy_fallback:
+                legacy_dir = _legacy_config_dir()
+                if legacy_dir != self.config_dir:
+                    self._keyring_clear(
+                        self._legacy_schema,
+                        {"key": key, "config_dir": str(legacy_dir)},
+                    )
+
+    @staticmethod
+    def _parse_env_path(path: Path) -> dict[str, str | None]:
+        if not path.is_file():
+            return {}
         try:
-            _LibSecret.password_clear_sync(
-                self._schema, self._keyring_attrs(key), None
-            )
+            return dict(dotenv_values(path))
         except Exception:
-            pass
+            logger.warning("Failed to parse .env file at %s", path)
+            return {}
 
     def _read_env_file(self) -> dict[str, str | None]:
-        if not self.env_file.is_file():
-            return {}
-        try:
-            return dict(dotenv_values(self.env_file))
-        except Exception:
-            logger.warning("Failed to parse .env file at %s", self.env_file)
-            return {}
+        primary_vals = self._parse_env_path(self.env_file)
+        if not self._allow_legacy_fallback:
+            return primary_vals
+        legacy_env = _legacy_config_dir() / ".env"
+        if legacy_env != self.env_file and legacy_env.is_file():
+            legacy_vals = self._parse_env_path(legacy_env)
+            merged = dict(legacy_vals)
+            merged.update({k: v for k, v in primary_vals.items() if v})
+            return merged
+        return primary_vals
 
     def _ensure_env_file_permissions(self) -> None:
         if not self.env_file.exists():
@@ -315,7 +383,7 @@ def _deep_merge_dicts(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, 
 
 
 class ConfigManager:
-    """Load, validate, update, and redact PetConfig persisted in config.json."""
+    """Load, validate, update, and redact ByteyConfig persisted in config.json."""
 
     def __init__(
         self,
@@ -324,28 +392,28 @@ class ConfigManager:
     ) -> None:
         self.config_dir = resolve_config_dir(config_dir)
         self.config_path = self.config_dir / "config.json"
-        self.secret_store = secret_store or SecretStore(config_dir=self.config_dir)
-        self._config: PetConfig = self.load()
+        self.secret_store = secret_store or SecretStore(config_dir=config_dir)
+        self._config: ByteyConfig = self.load()
 
     @property
-    def config(self) -> PetConfig:
+    def config(self) -> ByteyConfig:
         """Return the currently loaded configuration."""
         return self._config
 
-    def load(self) -> PetConfig:
+    def load(self) -> ByteyConfig:
         """Load config.json from disk, falling back to defaults if absent or invalid."""
         if not self.config_path.is_file():
-            self._config = PetConfig()
+            self._config = ByteyConfig()
             return self._config
 
         try:
             raw = json.loads(self.config_path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 raise ValueError("config.json root must be a JSON object")
-            self._config = PetConfig.model_validate(raw)
+            self._config = ByteyConfig.model_validate(raw)
         except Exception as exc:
             logger.warning("Failed to load config from %s: %s", self.config_path, exc)
-            self._config = PetConfig()
+            self._config = ByteyConfig()
         return self._config
 
     def save(self) -> None:
@@ -365,7 +433,7 @@ class ConfigManager:
             tmp_path.unlink(missing_ok=True)
             raise
 
-    def update_config(self, patch: dict[str, Any]) -> PetConfig:
+    def update_config(self, patch: dict[str, Any]) -> ByteyConfig:
         """Validate and persist a partial configuration update.
 
         Standard nested sections (`general`, `provider`, `voice_in`, `voice_out`,
@@ -392,7 +460,7 @@ class ConfigManager:
                 raise ValueError("Section 'mcp_servers' must be a dictionary")
             current_data["mcp_servers"] = copy.deepcopy(servers_patch)
 
-        updated = PetConfig.model_validate(current_data)
+        updated = ByteyConfig.model_validate(current_data)
         self._config = updated
         self.save()
         return self._config

@@ -1,4 +1,4 @@
-"""Core daemon package for AI Pet."""
+"""Core daemon package for Bytey AI Companion."""
 
 __version__ = "0.1.0"
 

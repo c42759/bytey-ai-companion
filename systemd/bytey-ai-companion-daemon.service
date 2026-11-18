@@ -1,5 +1,5 @@
 [Unit]
-Description=AI Pet Core Daemon
+Description=Bytey AI Companion Core Daemon
 After=graphical-session.target pipewire.service
 PartOf=graphical-session.target
 
@@ -8,7 +8,8 @@ Type=simple
 WorkingDirectory=/home/c42759/Git/pet/core-daemon
 Environment=PYTHONPATH=/home/c42759/Git/pet/core-daemon
 EnvironmentFile=-%h/.config/ai-pet/.env
-ExecStart=/usr/bin/python3 -m ai_pet.main
+EnvironmentFile=-%h/.config/bytey-ai-companion/.env
+ExecStart=/usr/bin/python3 -m bytey_ai_companion.main
 Restart=on-failure
 RestartSec=3
 

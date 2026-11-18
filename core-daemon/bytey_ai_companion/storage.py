@@ -13,12 +13,34 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_DB_FILENAME = "bytey.db"
+LEGACY_DB_FILENAME = "pet.db"
+
+
 def resolve_data_dir() -> Path:
-    """Resolve the persistent data directory, honoring AI_PET_DATA_DIR."""
-    env_dir = os.environ.get("AI_PET_DATA_DIR")
+    """Resolve the persistent data directory, honoring BYTEY_DATA_DIR / AI_PET_DATA_DIR and legacy fallback."""
+    env_dir = os.environ.get("BYTEY_DATA_DIR") or os.environ.get("AI_PET_DATA_DIR")
     if env_dir:
         return Path(env_dir)
-    return Path.home() / ".local" / "share" / "ai-pet"
+    primary = Path.home() / ".local" / "share" / "bytey-ai-companion"
+    legacy = Path.home() / ".local" / "share" / "ai-pet"
+    if (primary / DEFAULT_DB_FILENAME).exists() or (primary / LEGACY_DB_FILENAME).exists():
+        return primary
+    if (legacy / DEFAULT_DB_FILENAME).exists() or (legacy / LEGACY_DB_FILENAME).exists():
+        return legacy
+    return primary
+
+
+def resolve_db_path(data_dir: Path | None = None) -> Path:
+    """Resolve SQLite database path, falling back to legacy pet.db when present."""
+    base = Path(data_dir) if data_dir is not None else resolve_data_dir()
+    primary_db = base / DEFAULT_DB_FILENAME
+    legacy_db = base / LEGACY_DB_FILENAME
+    if primary_db.exists():
+        return primary_db
+    if legacy_db.exists():
+        return legacy_db
+    return primary_db
 
 
 def _utc_now_iso() -> str:
@@ -29,10 +51,7 @@ class StorageManager:
     """Async SQLite manager backed by sqlite3 and asyncio.to_thread."""
 
     def __init__(self, db_path: Path | None = None) -> None:
-        if db_path is None:
-            self.db_path = resolve_data_dir() / "pet.db"
-        else:
-            self.db_path = Path(db_path)
+        self.db_path = resolve_db_path() if db_path is None else Path(db_path)
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
 

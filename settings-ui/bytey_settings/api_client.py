@@ -1,9 +1,10 @@
-"""Synchronous REST API client for AI Pet core daemon with offline config fallback."""
+"""Synchronous REST API client for Bytey AI Companion core daemon with offline config fallback."""
 
 from __future__ import annotations
 
 import copy
 import json
+import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,23 @@ from typing import Any
 import httpx
 
 DEFAULT_DAEMON_URL = "http://127.0.0.1:8765"
-LOCAL_CONFIG_PATH = Path.home() / ".config" / "ai-pet" / "config.json"
+PRIMARY_CONFIG_PATH = Path.home() / ".config" / "bytey-ai-companion" / "config.json"
+LEGACY_CONFIG_PATH = Path.home() / ".config" / "ai-pet" / "config.json"
+LOCAL_CONFIG_PATH = PRIMARY_CONFIG_PATH
+
+
+def resolve_local_config_path() -> Path:
+    """Resolve local config.json path with env override and legacy ~/.config/ai-pet fallback."""
+    env_dir = os.environ.get("BYTEY_CONFIG_DIR") or os.environ.get("AI_PET_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir) / "config.json"
+    primary = Path.home() / ".config" / "bytey-ai-companion" / "config.json"
+    legacy = Path.home() / ".config" / "ai-pet" / "config.json"
+    if primary.exists():
+        return primary
+    if legacy.exists():
+        return legacy
+    return primary
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Bytey, a fast, warm, and capable desktop AI companion.\n"
@@ -149,7 +166,7 @@ def _extract_error(response: httpx.Response) -> str:
 
 
 class DaemonClient:
-    """Synchronous HTTP client for AI Pet daemon REST endpoints."""
+    """Synchronous HTTP client for Bytey AI Companion daemon REST endpoints."""
 
     def __init__(
         self,
@@ -158,7 +175,7 @@ class DaemonClient:
         timeout: float = 4.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.config_path = config_path or LOCAL_CONFIG_PATH
+        self.config_path = config_path or resolve_local_config_path()
         self._timeout = timeout
         self._lock = threading.Lock()
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout)

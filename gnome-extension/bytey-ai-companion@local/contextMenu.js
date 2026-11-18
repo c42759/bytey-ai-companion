@@ -26,7 +26,7 @@ export class IslandContextMenu {
 
         this._menuManager = new PopupMenu.PopupMenuManager(sourceActor);
         this._menu = new PopupMenu.PopupMenu(sourceActor, 0.5, St.Side.TOP);
-        this._menu.actor.add_style_class_name('ai-pet-context-menu');
+        this._menu.actor.add_style_class_name('bytey-context-menu');
         this._menu.actor.hide();
         this._menuManager.addMenu(this._menu);
         Main.uiGroup.add_child(this._menu.actor);
@@ -82,7 +82,7 @@ export class IslandContextMenu {
         this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         const exitItem = new PopupMenu.PopupMenuItem('Exit');
-        exitItem.label.add_style_class_name('ai-pet-context-menu-danger');
+        exitItem.label.add_style_class_name('bytey-context-menu-danger');
         exitItem.connect('activate', () => {
             this._callbacks.onExit?.();
         });
@@ -103,7 +103,7 @@ export class IslandContextMenu {
                 }
             });
         } catch (err) {
-            console.error(`AI Pet: failed to launch Settings UI: ${err.message}`);
+            console.error(`Bytey AI Companion: failed to launch Settings UI: ${err.message}`);
         }
     }
 

@@ -48,7 +48,7 @@ export class IslandWidget {
         this._signalIds = [];
 
         this._island = new St.BoxLayout({
-            style_class: 'ai-pet-island',
+            style_class: 'bytey-island',
             reactive: true,
             track_hover: true,
             can_focus: false,
@@ -60,7 +60,7 @@ export class IslandWidget {
         this._island.add_child(this._eyeRenderer.actor);
 
         this._statusLabel = new St.Label({
-            style_class: 'ai-pet-island-label',
+            style_class: 'bytey-island-label',
             text: '',
             visible: false,
             y_align: Clutter.ActorAlign.CENTER,
@@ -252,24 +252,24 @@ export class IslandWidget {
 
     _syncStateStyles() {
         const stateClasses = [
-            'ai-pet-island-expanded',
-            'ai-pet-island-listening',
-            'ai-pet-island-thinking',
-            'ai-pet-island-tool',
-            'ai-pet-island-speaking',
-            'ai-pet-island-muted',
-            'ai-pet-island-error',
+            'bytey-island-expanded',
+            'bytey-island-listening',
+            'bytey-island-thinking',
+            'bytey-island-tool',
+            'bytey-island-speaking',
+            'bytey-island-muted',
+            'bytey-island-error',
         ];
         for (const cls of stateClasses)
             this._island.remove_style_class_name(cls);
 
         const stateClassMap = {
-            LISTENING: 'ai-pet-island-listening',
-            THINKING: 'ai-pet-island-thinking',
-            TOOL_CALLING: 'ai-pet-island-tool',
-            SPEAKING: 'ai-pet-island-speaking',
-            MUTED: 'ai-pet-island-muted',
-            ERROR: 'ai-pet-island-error',
+            LISTENING: 'bytey-island-listening',
+            THINKING: 'bytey-island-thinking',
+            TOOL_CALLING: 'bytey-island-tool',
+            SPEAKING: 'bytey-island-speaking',
+            MUTED: 'bytey-island-muted',
+            ERROR: 'bytey-island-error',
         };
         const cls = stateClassMap[this._state];
         if (cls)
@@ -280,7 +280,7 @@ export class IslandWidget {
         this._statusLabel.visible = showLabel;
 
         if (EXPANDED_STATES.has(this._state) || showLabel)
-            this._island.add_style_class_name('ai-pet-island-expanded');
+            this._island.add_style_class_name('bytey-island-expanded');
     }
 
     _onButtonPress(event) {
@@ -323,7 +323,7 @@ export class IslandWidget {
             if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX)
                 return Clutter.EVENT_PROPAGATE;
             this._dragging = true;
-            this._island.add_style_class_name('ai-pet-island-dragging');
+            this._island.add_style_class_name('bytey-island-dragging');
         }
 
         const bounds = this.getBounds();
@@ -356,7 +356,7 @@ export class IslandWidget {
         const wasDragging = this._dragging ||
             (this._visualsConfig.position_mode === 'floating' && travel >= DRAG_THRESHOLD_PX);
         this._dragging = false;
-        this._island.remove_style_class_name('ai-pet-island-dragging');
+        this._island.remove_style_class_name('bytey-island-dragging');
 
         if (wasDragging) {
             const bounds = this.getBounds();

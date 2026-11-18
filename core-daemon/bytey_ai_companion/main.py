@@ -1,4 +1,4 @@
-"""Main AI Pet core daemon coordinating IPC, SQLite, voice, TTS, LLM, and MCP."""
+"""Main Bytey AI Companion core daemon coordinating IPC, SQLite, voice, TTS, LLM, and MCP."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from .llm import LLMRouter
 from .llm.emotions import parse_emotion_prefix
 from .mcp_host import MCPClientManager, from_mcp_servers_json, to_mcp_servers_json
 from .tts import ElevenLabsTTSClient, KokoroTTSClient, SentenceChunker, StreamingTTSPlayer
-from .storage import StorageManager
+from .storage import StorageManager, resolve_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ def _export_mcp_map_for_ui(servers: dict[str, MCPServerConfig]) -> dict[str, dic
     return exported
 
 
-class AiPetDaemon:
+class ByteyDaemon:
     """Orchestrates IPC, storage, voice pipeline, LLM router, MCP host, and TTS."""
 
     def __init__(
@@ -121,7 +121,7 @@ class AiPetDaemon:
     ) -> None:
         self.secret_store = SecretStore(config_dir=config_dir)
         self.config_manager = ConfigManager(config_dir=config_dir, secret_store=self.secret_store)
-        db_path = (Path(data_dir) / "pet.db") if data_dir is not None else None
+        db_path = resolve_db_path(data_dir) if data_dir is not None else None
         self.storage = StorageManager(db_path=db_path)
 
         self.llm_router = llm_router or LLMRouter()
@@ -201,7 +201,7 @@ class AiPetDaemon:
         if self.enable_voice_capture:
             await self.voice_input.start()
         self._started = True
-        logger.info("AI Pet daemon listening on http://%s:%s", self.ipc.host, self.ipc.port)
+        logger.info("Bytey AI Companion daemon listening on http://%s:%s", self.ipc.host, self.ipc.port)
 
     async def stop(self) -> None:
         """Gracefully shut down all subsystems, subprocesses, and sockets."""
@@ -287,7 +287,7 @@ class AiPetDaemon:
         return data
 
     def _normalize_patch(self, raw_patch: dict[str, Any]) -> tuple[dict[str, Any], bool | None]:
-        """Translate nested/alias/flat UI patches into canonical PetConfig patches."""
+        """Translate nested/alias/flat UI patches into canonical ByteyConfig patches."""
         if not isinstance(raw_patch, dict):
             raise ValueError("Config patch must be a JSON object")
 
@@ -1170,12 +1170,16 @@ class AiPetDaemon:
 
 async def async_main() -> None:
     logging.basicConfig(
-        level=os.environ.get("AI_PET_LOG_LEVEL", "INFO").upper(),
+        level=(
+            os.environ.get("BYTEY_LOG_LEVEL")
+            or os.environ.get("AI_PET_LOG_LEVEL")
+            or "INFO"
+        ).upper(),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    host = os.environ.get("AI_PET_HOST", "127.0.0.1")
-    port = int(os.environ.get("AI_PET_PORT", "8765"))
-    daemon = AiPetDaemon(host=host, port=port)
+    host = os.environ.get("BYTEY_HOST") or os.environ.get("AI_PET_HOST") or "127.0.0.1"
+    port = int(os.environ.get("BYTEY_PORT") or os.environ.get("AI_PET_PORT") or "8765")
+    daemon = ByteyDaemon(host=host, port=port)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1192,7 +1196,7 @@ async def async_main() -> None:
 
 
 def main() -> None:
-    """CLI entrypoint for `python3 -m ai_pet.main`."""
+    """CLI entrypoint for `python3 -m bytey_ai_companion.main`."""
     asyncio.run(async_main())
 
 
