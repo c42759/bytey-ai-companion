@@ -421,7 +421,6 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
         candidates = {
             "pet_name": self.pet_name_row.get_text().strip(),
             "wake_phrase": self.wake_phrase_row.get_text().strip(),
-            "llm_base_url": self.llm_base_url_row.get_text().strip(),
             "llm_model": self.model_entry_row.get_text().strip(),
             "whisper_model": self.whisper_model_row.get_text().strip(),
             "stt_api_url": self.stt_api_url_row.get_text().strip(),
@@ -430,6 +429,8 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
             "elevenlabs_voice_id": self.el_voice_id_row.get_text().strip(),
             "elevenlabs_model_id": self.el_model_row.get_text().strip(),
         }
+        if _combo_selected_text(self.provider_row) != "gemini":
+            candidates["llm_base_url"] = self.llm_base_url_row.get_text().strip()
         dirty: dict[str, Any] = {}
         for field, val in candidates.items():
             if val and val != str(self._read_field(field, "")):
@@ -759,6 +760,7 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
 
     def _refresh_llm_secret_indicator(self) -> None:
         provider = _combo_selected_text(self.provider_row)
+        self.llm_base_url_row.set_visible(provider != "gemini")
         secret_key = PROVIDER_SECRET_MAP.get(provider)
         if not secret_key:
             self.llm_api_key_row.set_text("")
@@ -784,7 +786,7 @@ class PetPreferencesWindow(Adw.PreferencesWindow):
 
     def refresh_models(self) -> None:
         provider = _combo_selected_text(self.provider_row)
-        base_url = self.llm_base_url_row.get_text().strip()
+        base_url = "" if provider == "gemini" else self.llm_base_url_row.get_text().strip()
         self._toast(f"Fetching models for {provider}...")
 
         def on_done(res: ApiResult) -> None:

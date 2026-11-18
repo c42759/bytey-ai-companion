@@ -626,6 +626,16 @@ class _HttpMCPClient(_BaseMCPClient):
         self._legacy_pending.clear()
 
 
+def _sanitize_fn_segment(raw: str) -> str:
+    """Sanitize an MCP server or tool name segment into valid function-name characters."""
+    cleaned = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", raw.strip()).strip("_")
+    if not cleaned:
+        return "tool"
+    if not (cleaned[0].isalpha() or cleaned[0] == "_"):
+        cleaned = f"t_{cleaned}"
+    return cleaned
+
+
 class MCPClientManager:
     """Manages MCP server connections, tool discovery, confirmation gates, and execution."""
 
@@ -640,6 +650,7 @@ class MCPClientManager:
         self._owns_http_client = http_client is None
         self._timeout = request_timeout
         self._sessions: dict[str, tuple[str, _BaseMCPClient]] = {}
+        self._tool_alias_map: dict[str, tuple[str, str]] = {}
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
@@ -739,11 +750,15 @@ class MCPClientManager:
                 tool_name = tool["name"]
                 if tool_name in disabled:
                     continue
+                safe_server = _sanitize_fn_segment(server_name)
+                safe_tool = _sanitize_fn_segment(tool_name)
+                safe_name = f"{safe_server}__{safe_tool}"[:128]
+                self._tool_alias_map[safe_name] = (server_name, tool_name)
                 active_tools.append(
                     {
                         "type": "function",
                         "function": {
-                            "name": f"{server_name}__{tool_name}",
+                            "name": safe_name,
                             "description": tool.get("description", ""),
                             "parameters": tool.get("inputSchema")
                             or {"type": "object", "properties": {}},
@@ -754,20 +769,23 @@ class MCPClientManager:
                 )
         return active_tools
 
-    @staticmethod
     def _split_namespaced_tool(
+        self,
         namespaced_tool: str,
         servers_cfg: dict[str, Any],
     ) -> tuple[str, str] | None:
+        alias = self._tool_alias_map.get(namespaced_tool)
+        if alias is not None:
+            return alias
         if "__" not in namespaced_tool:
             return None
         server_name, tool_name = namespaced_tool.split("__", 1)
         if server_name in servers_cfg:
             return server_name, tool_name
         for candidate in servers_cfg:
-            prefix = f"{candidate}__"
-            if namespaced_tool.startswith(prefix):
-                return candidate, namespaced_tool[len(prefix):]
+            for prefix in (f"{candidate}__", f"{_sanitize_fn_segment(candidate)}__"):
+                if namespaced_tool.startswith(prefix):
+                    return candidate, namespaced_tool[len(prefix):]
         return server_name, tool_name
 
     async def execute_tool_call(

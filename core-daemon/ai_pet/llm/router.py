@@ -11,6 +11,13 @@ from typing import Any
 
 import httpx
 
+try:
+    from google import genai as _google_genai
+    from google.genai import types as _genai_types
+except ImportError:
+    _google_genai = None  # type: ignore[assignment]
+    _genai_types = None  # type: ignore[assignment]
+
 from .emotions import EmotionStreamParser
 
 SUPPORTED_PROVIDERS: tuple[str, ...] = (
@@ -304,42 +311,42 @@ class LLMRouter:
         base_url: str,
         api_key: str | None,
     ) -> dict[str, Any]:
-        base = (base_url or DEFAULT_GEMINI_BASE_URL).strip().rstrip("/")
-        client = self._get_client()
+        del base_url  # Official google-genai SDK handles endpoint routing via API key only.
+        if _google_genai is None:
+            return {
+                "models": [],
+                "error": "google-genai package is not installed; run `pip install google-genai`",
+            }
+        if not api_key:
+            return {"models": [], "error": "GEMINI_API_KEY is not configured"}
+
+        client = _google_genai.Client(api_key=api_key)
+        models: list[dict[str, Any]] = []
         try:
-            resp = await client.get(
-                f"{base}/models",
-                params={"key": api_key or ""},
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
+            pager = await client.aio.models.list()
+            async for item in pager:
+                actions = [str(a) for a in (getattr(item, "supported_actions", None) or [])]
+                if actions and "generateContent" not in actions:
+                    continue
+                raw_name = str(getattr(item, "name", "") or "").strip()
+                mid = raw_name.removeprefix("models/")
+                if not mid:
+                    continue
+                display_name = str(getattr(item, "display_name", None) or mid)
+                models.append(
+                    {
+                        "id": mid,
+                        "name": display_name,
+                        "supports_tools": _heuristic_tool_support("gemini", mid),
+                    }
+                )
         except Exception as exc:
             return {"models": [], "error": str(exc)}
-
-        raw_models = payload.get("models") if isinstance(payload, dict) else None
-        if not isinstance(raw_models, list):
-            return {"models": [], "error": "Unexpected Gemini /models response format"}
-
-        models: list[dict[str, Any]] = []
-        for item in raw_models:
-            if not isinstance(item, dict):
-                continue
-            methods = item.get("supportedGenerationMethods") or []
-            if "generateContent" not in methods:
-                continue
-            raw_name = str(item.get("name") or "").strip()
-            mid = raw_name.removeprefix("models/")
-            if not mid:
-                continue
-            display_name = str(item.get("displayName") or mid)
-            models.append(
-                {
-                    "id": mid,
-                    "name": display_name,
-                    "supports_tools": _heuristic_tool_support("gemini", mid),
-                }
-            )
+        finally:
+            try:
+                await client.aio.aclose()
+            except Exception:
+                pass
         return {"models": models, "error": None}
 
     async def _discover_anthropic_models(
@@ -763,10 +770,14 @@ class LLMRouter:
         tools: list[dict[str, Any]] | None,
         emit_delta: Callable[[str], Any],
     ) -> list[dict[str, Any]]:
-        base = (base_url or DEFAULT_GEMINI_BASE_URL).strip().rstrip("/")
-        model_path = model if model.startswith("models/") else f"models/{model}"
+        del base_url  # Official google-genai SDK handles endpoint routing via API key only.
+        if _google_genai is None or _genai_types is None:
+            raise RuntimeError("google-genai package is not installed")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is required for Gemini provider")
 
-        contents: list[dict[str, Any]] = []
+        model_name = (model or "gemini-2.5-flash").strip().removeprefix("models/")
+        contents: list[Any] = []
         call_id_to_name: dict[str, str] = {}
 
         for msg in messages:
@@ -774,120 +785,107 @@ class LLMRouter:
             if role == "system":
                 continue
             if role == "user":
-                contents.append({"role": "user", "parts": [{"text": _stringify_content(msg.get("content"))}]})
+                contents.append(
+                    _genai_types.Content(
+                        role="user",
+                        parts=[_genai_types.Part.from_text(text=_stringify_content(msg.get("content")))],
+                    )
+                )
             elif role == "assistant":
-                parts: list[dict[str, Any]] = []
+                parts: list[Any] = []
                 text = _stringify_content(msg.get("content"))
                 if text:
-                    parts.append({"text": text})
+                    parts.append(_genai_types.Part.from_text(text=text))
                 for tc in _extract_message_tool_calls(msg):
                     call_id_to_name[tc["id"]] = tc["name"]
-                    parts.append({"functionCall": {"name": tc["name"], "args": tc["arguments"]}})
+                    parts.append(
+                        _genai_types.Part.from_function_call(
+                            name=tc["name"],
+                            args=tc["arguments"] if isinstance(tc["arguments"], dict) else {},
+                        )
+                    )
                 if parts:
-                    contents.append({"role": "model", "parts": parts})
+                    contents.append(_genai_types.Content(role="model", parts=parts))
             elif role == "tool":
-                tool_name = str(msg.get("name") or call_id_to_name.get(str(msg.get("tool_call_id") or ""), ""))
+                tool_name = str(
+                    msg.get("name") or call_id_to_name.get(str(msg.get("tool_call_id") or ""), "")
+                )
                 raw_val = msg.get("content")
                 if isinstance(raw_val, dict):
                     resp_obj: dict[str, Any] = raw_val
                 else:
                     resp_obj = {"result": _stringify_content(raw_val)}
-                part = {"functionResponse": {"name": tool_name, "response": resp_obj}}
-                if contents and contents[-1]["role"] == "user" and any(
-                    "functionResponse" in p for p in contents[-1]["parts"]
+                part = _genai_types.Part.from_function_response(
+                    name=tool_name,
+                    response=resp_obj,
+                )
+                if (
+                    contents
+                    and getattr(contents[-1], "role", None) == "user"
+                    and any(getattr(p, "function_response", None) is not None for p in (contents[-1].parts or []))
                 ):
-                    contents[-1]["parts"].append(part)
+                    contents[-1].parts.append(part)
                 else:
-                    contents.append({"role": "user", "parts": [part]})
+                    contents.append(_genai_types.Content(role="user", parts=[part]))
 
-        body: dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {"temperature": temperature},
-        }
-        if system_prompt:
-            body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+        genai_tools: list[Any] | None = None
         if tools:
-            decls = []
+            decls: list[Any] = []
             for name, desc, params in (_extract_tool_def(t) for t in tools):
                 if not name:
                     continue
                 cleaned_params = {k: v for k, v in params.items() if k != "$schema"}
-                decls.append({"name": name, "description": desc, "parameters": cleaned_params})
+                decls.append(
+                    _genai_types.FunctionDeclaration(
+                        name=name,
+                        description=desc,
+                        parameters=cleaned_params,
+                    )
+                )
             if decls:
-                body["tools"] = [{"functionDeclarations": decls}]
+                genai_tools = [_genai_types.Tool(function_declarations=decls)]
 
-        client = self._get_client()
+        config = _genai_types.GenerateContentConfig(
+            temperature=temperature,
+            system_instruction=system_prompt or None,
+            tools=genai_tools,
+        )
+
+        client = _google_genai.Client(api_key=api_key)
         tool_calls: list[dict[str, Any]] = []
-
-        async def handle_payload(chunk: Any) -> None:
-            if not isinstance(chunk, dict):
-                return
-            for cand in chunk.get("candidates") or []:
-                content_obj = cand.get("content") or {}
-                for part in content_obj.get("parts") or []:
-                    if not isinstance(part, dict):
-                        continue
-                    if "text" in part and not part.get("thought"):
-                        await emit_delta(str(part["text"]))
-                    if "functionCall" in part and isinstance(part["functionCall"], dict):
-                        fc = part["functionCall"]
-                        fc_name = str(fc.get("name") or "").strip()
-                        if fc_name:
-                            tool_calls.append(
-                                {
-                                    "id": str(fc.get("id") or f"gemini_call_{len(tool_calls)}"),
-                                    "name": fc_name,
-                                    "arguments": fc.get("args") if isinstance(fc.get("args"), dict) else {},
-                                }
-                            )
-
-        stream_url = f"{base}/{model_path}:streamGenerateContent"
-        params = {"alt": "sse"}
-        if api_key:
-            params["key"] = api_key
-
-        async with client.stream("POST", stream_url, params=params, json=body) as resp:
-            if resp.status_code == 404:
-                fallback_url = f"{base}/{model_path}:generateContent"
-                fb_params = {"key": api_key} if api_key else {}
-                fb_resp = await client.post(fallback_url, params=fb_params, json=body)
-                if fb_resp.status_code >= 400:
-                    raise RuntimeError(f"gemini API error {fb_resp.status_code}: {fb_resp.text}")
-                await handle_payload(fb_resp.json())
-                return tool_calls
-
-            if resp.status_code >= 400:
-                err_body = (await resp.aread()).decode("utf-8", errors="replace")
-                raise RuntimeError(f"gemini API error {resp.status_code}: {err_body}")
-
-            content_type = resp.headers.get("content-type", "").lower()
-            if "application/json" in content_type and "event-stream" not in content_type:
-                raw_bytes = await resp.aread()
-                data = json.loads(raw_bytes.decode("utf-8"))
-                if isinstance(data, list):
-                    for item in data:
-                        await handle_payload(item)
-                else:
-                    await handle_payload(data)
-                return tool_calls
-
-            async for line in resp.aiter_lines():
-                stripped = line.strip()
-                if not stripped or stripped.startswith(":"):
-                    continue
-                if stripped.startswith("data:"):
-                    stripped = stripped[5:].strip()
-                if stripped == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(chunk, list):
-                    for item in chunk:
-                        await handle_payload(item)
-                else:
-                    await handle_payload(chunk)
+        try:
+            stream = await client.aio.models.generate_content_stream(
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
+            async for chunk in stream:
+                for cand in getattr(chunk, "candidates", None) or []:
+                    content_obj = getattr(cand, "content", None)
+                    for part in getattr(content_obj, "parts", None) or []:
+                        if getattr(part, "thought", False):
+                            continue
+                        part_text = getattr(part, "text", None)
+                        if part_text:
+                            await emit_delta(str(part_text))
+                        fc = getattr(part, "function_call", None)
+                        if fc is not None:
+                            fc_name = str(getattr(fc, "name", None) or "").strip()
+                            if fc_name:
+                                raw_args = getattr(fc, "args", None)
+                                args_dict = dict(raw_args) if isinstance(raw_args, dict) else {}
+                                tool_calls.append(
+                                    {
+                                        "id": str(getattr(fc, "id", None) or f"gemini_call_{len(tool_calls)}"),
+                                        "name": fc_name,
+                                        "arguments": args_dict,
+                                    }
+                                )
+        finally:
+            try:
+                await client.aio.aclose()
+            except Exception:
+                pass
 
         return tool_calls
 
