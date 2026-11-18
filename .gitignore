@@ -1,0 +1,75 @@
+# Agent & Memory Bank Metadata
+.agents
+.agents/
+.agents-memory/
+
+# Secrets & Local Configuration (keep template tracked)
+.env
+.env.*
+!.env.example
+config.json
+.config.*.json.tmp
+
+# SQLite Conversation & Tool Persistence (WAL mode)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Python Bytecode & Environments (core-daemon, settings-ui, tests)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+
+# Python Packaging & Build Artifacts
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Testing, Linting & Coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Voice / ML Models & Runtime Audio Buffers
+models/
+*.onnx
+*.wav
+*.mp3
+*.ogg
+*.raw
+
+# GNOME Shell Extension & GTK Packaging Artifacts
+*.shell-extension.zip
+schemas/gschemas.compiled
+
+# Logs, Runtime Sockets/PIDs & OS/Editor Files
+*.log
+*.pid
+*.sock
+.DS_Store
+*~
+*.swp
+*.swo
+.vscode/
+.idea/

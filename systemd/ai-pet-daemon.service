@@ -1,0 +1,16 @@
+[Unit]
+Description=AI Pet Core Daemon
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/c42759/Git/pet/core-daemon
+Environment=PYTHONPATH=/home/c42759/Git/pet/core-daemon
+EnvironmentFile=-%h/.config/ai-pet/.env
+ExecStart=/usr/bin/python3 -m ai_pet.main
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

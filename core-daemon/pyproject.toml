@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-pet-daemon"
+version = "0.1.0"
+description = "Portable Python asyncio core daemon for the AI Pet Dynamic Island assistant"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "httpx>=0.27",
+    "websockets>=14.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+voice = [
+    "faster-whisper>=1.0",
+    "silero-vad>=5.1",
+    "rapidfuzz>=3.0",
+    "sounddevice>=0.4",
+]
+mcp = [
+    "mcp>=1.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ai_pet*"]
