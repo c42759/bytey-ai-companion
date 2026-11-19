@@ -4,12 +4,53 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UUID="bytey-ai-companion@c42759.gitlab.com"
 EXT_DIR="${SCRIPT_DIR}/${UUID}"
-OUT_DIR="${1:-${SCRIPT_DIR}}"
+OUT_DIR="${SCRIPT_DIR}"
+
+Help() {
+  echo "Usage: $(basename "$0") [-bilh] [-o OUT_DIR] [OUT_DIR]"
+  echo "  -b  build the extension (default if no action flag is given)"
+  echo "  -i  install the built extension"
+  echo "  -l  log out GNOME session afterwards"
+  echo "  -o  output directory for the .shell-extension.zip (default: ${SCRIPT_DIR})"
+  echo "  -h  show this help message"
+}
+
+build=""
+install=""
+logout=""
+
+while getopts ":bilo:h" option; do
+  case "${option}" in
+    b) build=1 ;;
+    i) install=1 ;;
+    l) logout=1 ;;
+    o) OUT_DIR="${OPTARG}" ;;
+    h)
+      Help
+      exit 0
+      ;;
+    *)
+      Help >&2
+      exit 1
+      ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $# -gt 0 ]]; then
+  OUT_DIR="$1"
+fi
+
+if [[ -z "${build}" && -z "${install}" && -z "${logout}" ]]; then
+  build=1
+fi
+
 OUT_ZIP="${OUT_DIR}/${UUID}.shell-extension.zip"
 
-mkdir -p "${OUT_DIR}"
+if [[ -n "${build}" ]]; then
+  mkdir -p "${OUT_DIR}"
 
-python3 - "${EXT_DIR}" "${UUID}" <<'PY'
+  python3 - "${EXT_DIR}" "${UUID}" <<'PY'
 import json, pathlib, sys
 import xml.etree.ElementTree as ET
 ext_dir = pathlib.Path(sys.argv[1])
@@ -27,15 +68,15 @@ for icon_rel in ("icons/bytey-ai-companion.svg", "icons/bytey-ai-companion-symbo
     assert root.tag.endswith("svg"), f"Invalid SVG root tag in {icon_rel}: {root.tag}"
 PY
 
-glib-compile-schemas --strict --dry-run "${EXT_DIR}/schemas"
+  glib-compile-schemas --strict --dry-run "${EXT_DIR}/schemas"
 
-if command -v node >/dev/null 2>&1; then
-  for js in "${EXT_DIR}"/*.js; do
-    node --check "${js}"
-  done
-fi
+  if command -v node >/dev/null 2>&1; then
+    for js in "${EXT_DIR}"/*.js; do
+      node --check "${js}"
+    done
+  fi
 
-python3 - "${EXT_DIR}" "${OUT_ZIP}" <<'PY'
+  python3 - "${EXT_DIR}" "${OUT_ZIP}" <<'PY'
 import pathlib, sys, zipfile
 ext_dir = pathlib.Path(sys.argv[1])
 out_zip = pathlib.Path(sys.argv[2])
@@ -62,3 +103,18 @@ with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.write(src, arcname=rel)
 print(f"Packed {out_zip} ({len(files)} files)")
 PY
+fi
+
+if [[ -n "${install}" ]]; then
+  if [[ ! -f "${OUT_ZIP}" ]]; then
+    echo "Error: missing ${OUT_ZIP}. Run with -b first." >&2
+    exit 1
+  fi
+  echo "Installing extension..."
+  gnome-extensions install --force "${OUT_ZIP}"
+fi
+
+if [[ -n "${logout}" ]]; then
+  echo "Quitting GNOME session..."
+  gnome-session-quit --logout --no-prompt
+fi
