@@ -626,6 +626,25 @@ class ConfigManager:
         self.save()
         return self._config
 
+    def replace_config(self, new_config: dict[str, Any]) -> ByteyConfig:
+        """Validate and persist a full configuration replacement."""
+        if not isinstance(new_config, dict):
+            raise ValueError("Configuration payload must be a JSON object")
+
+        allowed_sections = set(_MERGE_SECTIONS) | {"mcp_servers"}
+        cleaned_data = {
+            key: copy.deepcopy(value)
+            for key, value in new_config.items()
+            if key in allowed_sections
+        }
+        if not cleaned_data:
+            raise ValueError("Invalid configuration JSON: no recognized configuration sections")
+
+        updated = ByteyConfig.model_validate(cleaned_data)
+        self._config = updated
+        self.save()
+        return self._config
+
     def get_redacted_dict(self) -> dict[str, Any]:
         """Serialize configuration with secret presence flags and zero secret values."""
         data = self._config.model_dump(mode="json")

@@ -31,24 +31,26 @@ def resolve_local_config_path() -> Path:
         return legacy
     return primary
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are Bytey, a fast, warm, and capable desktop AI companion.\n"
-    "You are both a friendly digital pet and a sharp, practical assistant.\n"
-    "\n"
-    "Personality:\n"
-    "- Warm, slightly playful, and supportive — like a clever pet that actually helps.\n"
-    "- Speak naturally, as if talking out loud to a friend.\n"
-    "- Stay concise (1–3 sentences) unless the user asks for more detail.\n"
-    "\n"
-    "Core behavior:\n"
-    "- Always begin every reply with exactly one mood tag: [emotion:happy], [emotion:curious], [emotion:surprised], [emotion:sleepy], [emotion:error], or [emotion:neutral].\n"
-    "- Prefer clear, spoken-friendly language. Avoid markdown, tables, bullet lists, code blocks, or any visual clutter in replies that will be spoken.\n"
-    "- Be helpful and proactive. If you lack information that a tool can provide, use the tool instead of guessing or saying you don’t know.\n"
-    "- When you use tools, call them cleanly and give a short, natural spoken summary of the result.\n"
-    "- If something is outside your reach even with tools, say so simply and offer the next useful step.\n"
-    "\n"
-    "Stay in character as Bytey at all times."
-)
+def _load_default_system_prompt() -> str:
+    """Load the default system prompt from the core-daemon Markdown file."""
+    repo_md = (
+        Path(__file__).resolve().parents[2]
+        / "core-daemon"
+        / "bytey_ai_companion"
+        / "llm"
+        / "default_system_prompt.md"
+    )
+    if repo_md.is_file():
+        return repo_md.read_text(encoding="utf-8").strip()
+    try:
+        from bytey_ai_companion.llm.emotions import load_default_system_prompt
+
+        return load_default_system_prompt()
+    except Exception:
+        return ""
+
+
+DEFAULT_SYSTEM_PROMPT = _load_default_system_prompt()
 
 SECRET_KEY_NAMES = frozenset(
     {
@@ -310,6 +312,43 @@ class DaemonClient:
                 payload = resp.json()
             except ValueError:
                 payload = patch
+            return ApiResult(ok=True, offline=False, data=payload, status_code=resp.status_code)
+
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    def replace_config(self, config_data: dict[str, Any]) -> ApiResult:
+        """Replace all configuration via daemon PUT or local file fallback."""
+        if not isinstance(config_data, dict):
+            return ApiResult(ok=False, error="Configuration payload must be a JSON object")
+
+        resp, err, offline = self._request("PUT", "/api/v1/config", json=config_data)
+        if resp is None:
+            if offline:
+                allowed = set(DEFAULT_CONFIG.keys()) | {"mcp_servers", "voice_input", "voice_output", "mcpServers"}
+                if not any(k in config_data for k in allowed):
+                    return ApiResult(
+                        ok=False,
+                        offline=True,
+                        error="Invalid configuration JSON: no recognized configuration sections",
+                    )
+                updated = deep_merge(copy.deepcopy(DEFAULT_CONFIG), _strip_secrets(config_data))
+                try:
+                    self._write_local_config(updated)
+                except OSError as write_exc:
+                    return ApiResult(ok=False, offline=True, error=str(write_exc))
+                return ApiResult(ok=True, offline=True, data=updated)
+            return ApiResult(ok=False, offline=False, error=err)
+
+        if resp.is_success:
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = config_data
             return ApiResult(ok=True, offline=False, data=payload, status_code=resp.status_code)
 
         return ApiResult(

@@ -14,7 +14,7 @@ import gi
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .api_client import (  # noqa: E402
     DEFAULT_CONFIG,
@@ -739,6 +739,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._build_voice_input_page()
         self._build_voice_output_page()
         self._build_visuals_page()
+        self._build_import_export_page()
 
         self.connect("close-request", self._on_close_request)
         self.reload_all()
@@ -2491,6 +2492,148 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         norm = str(mode or "fixed").strip().lower()
         self.fixed_group.set_sensitive(norm == "fixed")
         self.floating_group.set_sensitive(norm == "floating")
+
+    # ------------------------------------------------------------------
+    # Page 6: Import / Export
+    # ------------------------------------------------------------------
+
+    def _build_import_export_page(self) -> None:
+        page = Adw.PreferencesPage(title="Import / Export", icon_name="document-save-symbolic")
+        page.set_name("import-export")
+
+        banner_group = Adw.PreferencesGroup()
+        banner_group.add(self._create_offline_banner())
+        page.add(banner_group)
+
+        backup_group = Adw.PreferencesGroup(
+            title="Backup & Restore",
+            description="Export all configuration to a JSON file, or import a JSON file to replace all current settings.",
+        )
+
+        export_row = Adw.ActionRow(
+            title="Export Configuration",
+            subtitle="Save all non-secret settings (general, provider, voice, visuals, MCP) to JSON",
+        )
+        export_btn = Gtk.Button(label="Export JSON…", valign=Gtk.Align.CENTER)
+        export_btn.connect("clicked", self._on_export_config_clicked)
+        export_row.add_suffix(export_btn)
+        backup_group.add(export_row)
+
+        import_row = Adw.ActionRow(
+            title="Import Configuration",
+            subtitle="Replace all existing settings from a previously exported JSON file",
+        )
+        import_btn = Gtk.Button(label="Import JSON…", valign=Gtk.Align.CENTER)
+        import_btn.add_css_class("destructive-action")
+        import_btn.connect("clicked", self._on_import_config_clicked)
+        import_row.add_suffix(import_btn)
+        backup_group.add(import_row)
+
+        page.add(backup_group)
+        self.add(page)
+
+    @staticmethod
+    def _build_json_file_filters() -> Gio.ListStore:
+        flt = Gtk.FileFilter()
+        flt.set_name("JSON files")
+        flt.add_mime_type("application/json")
+        flt.add_pattern("*.json")
+        store = Gio.ListStore.new(Gtk.FileFilter)
+        store.append(flt)
+        return store
+
+    @staticmethod
+    def _export_payload(raw_cfg: dict[str, Any]) -> dict[str, Any]:
+        keys = ("general", "provider", "voice_in", "voice_out", "visuals", "mcp_servers")
+        return {k: copy.deepcopy(raw_cfg[k]) for k in keys if k in raw_cfg}
+
+    def _on_export_config_clicked(self, *_: object) -> None:
+        def _after_fetch(res: ApiResult) -> None:
+            if not res.ok or not isinstance(res.data, dict):
+                self._toast(res.error or "Failed to fetch configuration")
+                return
+            payload = json.dumps(self._export_payload(res.data), indent=2) + "\n"
+            dlg = Gtk.FileDialog(title="Export Bytey Configuration", initial_name="bytey-config.json")
+            dlg.set_filters(self._build_json_file_filters())
+
+            def _on_save_done(dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+                try:
+                    gfile = dialog.save_finish(result)
+                except GLib.Error:
+                    return
+                if gfile is None or not gfile.get_path():
+                    return
+                try:
+                    Path(gfile.get_path()).write_text(payload, encoding="utf-8")
+                    self._toast(f"Exported configuration to {gfile.get_basename()}")
+                except OSError as exc:
+                    self._toast(f"Export failed: {exc}")
+
+            dlg.save(self, None, _on_save_done)
+
+        self._run_async(self.client.get_config, _after_fetch)
+
+    def _on_import_config_clicked(self, *_: object) -> None:
+        dlg = Gtk.FileDialog(title="Import Bytey Configuration")
+        dlg.set_filters(self._build_json_file_filters())
+
+        def _on_open_done(dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+            try:
+                gfile = dialog.open_finish(result)
+            except GLib.Error:
+                return
+            if gfile is None or not gfile.get_path():
+                return
+            try:
+                raw_text = Path(gfile.get_path()).read_text(encoding="utf-8")
+                parsed = json.loads(raw_text)
+            except (OSError, json.JSONDecodeError) as exc:
+                self._toast(f"Invalid JSON file: {exc}")
+                return
+            if not isinstance(parsed, dict):
+                self._toast("Invalid JSON: expected a configuration object")
+                return
+            self._confirm_replace_import(parsed)
+
+        dlg.open(self, None, _on_open_done)
+
+    def _confirm_replace_import(self, parsed: dict[str, Any]) -> None:
+        def _apply_replace() -> None:
+            def _on_done(res: ApiResult) -> None:
+                self._set_offline(res.offline)
+                if not res.ok:
+                    self._toast(res.error or "Failed to import configuration")
+                    return
+                self.reload_all()
+                self._toast("Configuration imported and replaced")
+
+            self._run_async(lambda: self.client.replace_config(parsed), _on_done)
+
+        if hasattr(Adw, "AlertDialog"):
+            dialog = Adw.AlertDialog(
+                heading="Replace All Configuration?",
+                body="Importing this JSON file will replace all existing Bytey configurations. This cannot be undone.",
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("replace", "Replace All")
+            dialog.set_response_appearance("replace", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.set_default_response("cancel")
+            dialog.set_close_response("cancel")
+            dialog.connect("response", lambda _d, resp: _apply_replace() if resp == "replace" else None)
+            dialog.present(self)
+        else:
+            dialog = Adw.MessageDialog(
+                transient_for=self,
+                modal=True,
+                heading="Replace All Configuration?",
+                body="Importing this JSON file will replace all existing Bytey configurations. This cannot be undone.",
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("replace", "Replace All")
+            dialog.set_response_appearance("replace", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.set_default_response("cancel")
+            dialog.connect("response", lambda _d, resp: _apply_replace() if resp == "replace" else None)
+            dialog.present()
 
     # ------------------------------------------------------------------
     # Initial Load & Population

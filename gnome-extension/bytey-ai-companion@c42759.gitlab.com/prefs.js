@@ -624,6 +624,44 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
         identityGroup.add(petNameRow);
         identityGroup.add(wakePhraseRow);
+
+        const promptTitleLabel = new Gtk.Label({
+            label: 'Companion System Prompt',
+            xalign: 0,
+            margin_top: 12,
+            margin_bottom: 6,
+            css_classes: ['heading'],
+        });
+        identityGroup.add(promptTitleLabel);
+
+        const systemPromptView = new Gtk.TextView({
+            wrap_mode: Gtk.WrapMode.WORD_CHAR,
+            top_margin: 8,
+            bottom_margin: 8,
+            left_margin: 10,
+            right_margin: 10,
+        });
+        const systemPromptScroll = new Gtk.ScrolledWindow({min_content_height: 150});
+        systemPromptScroll.set_child(systemPromptView);
+        const systemPromptFrame = new Gtk.Frame();
+        systemPromptFrame.set_child(systemPromptScroll);
+        identityGroup.add(systemPromptFrame);
+
+        const promptBtnBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 8,
+            halign: Gtk.Align.END,
+            margin_top: 8,
+        });
+        const resetSystemPromptBtn = new Gtk.Button({label: 'Reset Default'});
+        const saveSystemPromptBtn = new Gtk.Button({
+            label: 'Save Prompt',
+            css_classes: ['suggested-action'],
+        });
+        promptBtnBox.append(resetSystemPromptBtn);
+        promptBtnBox.append(saveSystemPromptBtn);
+        identityGroup.add(promptBtnBox);
+
         generalPage.add(identityGroup);
 
         // 2. Visuals & Position Page
@@ -924,9 +962,46 @@ export default class ByteyPreferences extends ExtensionPreferences {
         mcpJsonGroup.add(applyMcpJsonBox);
         voicePage.add(mcpJsonGroup);
 
+        // 4. Import / Export Page
+        const importExportPage = new Adw.PreferencesPage({
+            title: 'Import / Export',
+            icon_name: 'document-save-symbolic',
+        });
+
+        const backupGroup = new Adw.PreferencesGroup({
+            title: 'Backup & Restore',
+            description: 'Export all configuration to a JSON file, or import a JSON file to replace all current settings.',
+        });
+
+        const exportRow = new Adw.ActionRow({
+            title: 'Export Configuration',
+            subtitle: 'Save all non-secret settings (general, AI provider, voice, visuals, MCP) to JSON',
+        });
+        const exportBtn = new Gtk.Button({
+            label: 'Export JSON…',
+            valign: Gtk.Align.CENTER,
+        });
+        exportRow.add_suffix(exportBtn);
+        backupGroup.add(exportRow);
+
+        const importRow = new Adw.ActionRow({
+            title: 'Import Configuration',
+            subtitle: 'Replace all existing settings from a previously exported JSON file',
+        });
+        const importBtn = new Gtk.Button({
+            label: 'Import JSON…',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['destructive-action'],
+        });
+        importRow.add_suffix(importBtn);
+        backupGroup.add(importRow);
+
+        importExportPage.add(backupGroup);
+
         window.add(generalPage);
         window.add(visualsPage);
         window.add(voicePage);
+        window.add(importExportPage);
 
         const syncPlacementSensitivity = () => {
             const mode = positionModeValueForIndex(posModeRow.get_selected());
@@ -1821,6 +1896,8 @@ export default class ByteyPreferences extends ExtensionPreferences {
             dialog.present(window);
         };
 
+        let defaultSystemPrompt = '';
+
         const applyConfig = cfg => {
             loading = true;
             try {
@@ -1834,8 +1911,13 @@ export default class ByteyPreferences extends ExtensionPreferences {
                     ? {...cfg.secrets_configured}
                     : {};
 
+                if (typeof cfg.default_system_prompt === 'string' && cfg.default_system_prompt.trim())
+                    defaultSystemPrompt = cfg.default_system_prompt;
+
                 petNameRow.set_text(String(general.pet_name ?? cfg.pet_name ?? 'Bytey'));
                 wakePhraseRow.set_text(String(general.wake_phrase ?? cfg.wake_phrase ?? 'Hey Bytey'));
+                const promptText = String(general.system_prompt ?? cfg.system_prompt ?? defaultSystemPrompt ?? '');
+                systemPromptView.get_buffer().set_text(promptText, -1);
 
                 setComboText(animModeRow, visuals.animation_mode ?? 'full');
                 cursorTrackRow.set_active(Boolean(visuals.cursor_tracking ?? true));
@@ -2079,6 +2161,182 @@ export default class ByteyPreferences extends ExtensionPreferences {
             if (wakePhrase)
                 patchConfig({general: {wake_phrase: wakePhrase}}, 'Saved wake phrase');
         }));
+
+        resetSystemPromptBtn.connect('clicked', () => onUserChange(() => {
+            if (!defaultSystemPrompt) {
+                showToast('Default prompt unavailable — check daemon connection');
+                return;
+            }
+            systemPromptView.get_buffer().set_text(defaultSystemPrompt, -1);
+            showToast('System prompt reset (click Save Prompt to apply)');
+        }));
+
+        saveSystemPromptBtn.connect('clicked', () => onUserChange(() => {
+            const buf = systemPromptView.get_buffer();
+            const [start, end] = buf.get_bounds();
+            const prompt = buf.get_text(start, end, true).trim();
+            const finalPrompt = prompt || defaultSystemPrompt;
+            if (!finalPrompt) {
+                showToast('System prompt cannot be empty');
+                return;
+            }
+            patchConfig({general: {system_prompt: finalPrompt}}, 'Saved system prompt');
+        }));
+
+        const buildExportPayload = rawCfg => {
+            const exportKeys = ['general', 'provider', 'voice_in', 'voice_out', 'visuals', 'mcp_servers'];
+            const out = {};
+            for (const key of exportKeys) {
+                if (rawCfg && Object.prototype.hasOwnProperty.call(rawCfg, key))
+                    out[key] = rawCfg[key];
+            }
+            return out;
+        };
+
+        const confirmReplaceImport = parsedConfig => {
+            const runImport = async () => {
+                const resp = await httpJson('PUT', '/api/v1/config', parsedConfig);
+                if (destroyed)
+                    return;
+                if (resp.ok && resp.data && typeof resp.data === 'object') {
+                    setOfflineState(false);
+                    applyConfig(resp.data);
+                    showToast('Configuration imported and replaced');
+                } else {
+                    const errMsg = resp.data?.detail || resp.data?.error || 'Failed to import configuration';
+                    showToast(errMsg);
+                }
+            };
+
+            if (typeof Adw.AlertDialog === 'function') {
+                const dialog = new Adw.AlertDialog({
+                    heading: 'Replace All Configuration?',
+                    body: 'Importing this JSON file will replace all existing Bytey configurations. This cannot be undone.',
+                });
+                dialog.add_response('cancel', 'Cancel');
+                dialog.add_response('replace', 'Replace All');
+                dialog.set_response_appearance('replace', Adw.ResponseAppearance.DESTRUCTIVE);
+                dialog.set_default_response('cancel');
+                dialog.set_close_response('cancel');
+                dialog.connect('response', (_dlg, response) => {
+                    if (response === 'replace')
+                        runImport();
+                });
+                dialog.present(window);
+            } else {
+                const dialog = new Adw.MessageDialog({
+                    transient_for: window,
+                    modal: true,
+                    heading: 'Replace All Configuration?',
+                    body: 'Importing this JSON file will replace all existing Bytey configurations. This cannot be undone.',
+                });
+                dialog.add_response('cancel', 'Cancel');
+                dialog.add_response('replace', 'Replace All');
+                dialog.set_response_appearance('replace', Adw.ResponseAppearance.DESTRUCTIVE);
+                dialog.set_default_response('cancel');
+                dialog.connect('response', (_dlg, response) => {
+                    if (response === 'replace')
+                        runImport();
+                });
+                dialog.present();
+            }
+        };
+
+        exportBtn.connect('clicked', async () => {
+            if (destroyed)
+                return;
+            const resp = await httpJson('GET', '/api/v1/config');
+            if (destroyed)
+                return;
+            if (!resp.ok || !resp.data || typeof resp.data !== 'object') {
+                setOfflineState(true);
+                showToast('Daemon offline — cannot export configuration');
+                return;
+            }
+            const payload = JSON.stringify(buildExportPayload(resp.data), null, 2) + '\n';
+            const fileDialog = new Gtk.FileDialog({
+                title: 'Export Bytey Configuration',
+                initial_name: 'bytey-config.json',
+            });
+            const filter = new Gtk.FileFilter();
+            filter.set_name('JSON files');
+            filter.add_mime_type('application/json');
+            filter.add_pattern('*.json');
+            const filters = new Gio.ListStore({item_type: Gtk.FileFilter});
+            filters.append(filter);
+            fileDialog.set_filters(filters);
+
+            fileDialog.save(window, null, (_dlg, result) => {
+                try {
+                    const file = fileDialog.save_finish(result);
+                    if (!file)
+                        return;
+                    const bytes = new GLib.Bytes(new TextEncoder().encode(payload));
+                    file.replace_contents_bytes_async(
+                        bytes,
+                        null,
+                        false,
+                        Gio.FileCreateFlags.REPLACE_DESTINATION,
+                        null,
+                        (source, res) => {
+                            try {
+                                source.replace_contents_finish(res);
+                                showToast(`Exported to ${file.get_basename()}`);
+                            } catch (e) {
+                                showToast(`Export failed: ${e.message}`);
+                            }
+                        }
+                    );
+                } catch (e) {
+                    if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                        showToast(`Export failed: ${e.message}`);
+                }
+            });
+        });
+
+        importBtn.connect('clicked', () => {
+            if (destroyed)
+                return;
+            const fileDialog = new Gtk.FileDialog({
+                title: 'Import Bytey Configuration',
+            });
+            const filter = new Gtk.FileFilter();
+            filter.set_name('JSON files');
+            filter.add_mime_type('application/json');
+            filter.add_pattern('*.json');
+            const filters = new Gio.ListStore({item_type: Gtk.FileFilter});
+            filters.append(filter);
+            fileDialog.set_filters(filters);
+
+            fileDialog.open(window, null, (_dlg, result) => {
+                try {
+                    const file = fileDialog.open_finish(result);
+                    if (!file)
+                        return;
+                    file.load_contents_async(null, (source, res) => {
+                        try {
+                            const [ok, contents] = source.load_contents_finish(res);
+                            if (!ok) {
+                                showToast('Failed to read selected file');
+                                return;
+                            }
+                            const text = new TextDecoder().decode(contents);
+                            const parsed = JSON.parse(text);
+                            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                                showToast('Invalid JSON: expected a configuration object');
+                                return;
+                            }
+                            confirmReplaceImport(parsed);
+                        } catch (e) {
+                            showToast(`Import failed: ${e.message}`);
+                        }
+                    });
+                } catch (e) {
+                    if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                        showToast(`Import failed: ${e.message}`);
+                }
+            });
+        });
 
         animModeRow.connect('notify::selected', () => onUserChange(() => {
             patchConfig({visuals: {animation_mode: comboText(animModeRow)}}, 'Saved animation mode');

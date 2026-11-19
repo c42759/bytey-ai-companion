@@ -34,3 +34,6 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["bytey_ai_companion*"]
+
+[tool.setuptools.package-data]
+bytey_ai_companion = ["llm/*.md"]

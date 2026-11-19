@@ -3835,5 +3835,108 @@ class TestPiperDaemonAPI(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cfg2["voice_output"]["piper_speaker_id"], 0)
 
 
+class TestSystemPromptAndConfigReplace(unittest.IsolatedAsyncioTestCase):
+    def test_default_system_prompt_loaded_from_markdown(self) -> None:
+        from bytey_ai_companion.llm.emotions import DEFAULT_SYSTEM_PROMPT, load_default_system_prompt
+
+        md_path = (
+            REPO_ROOT
+            / "core-daemon"
+            / "bytey_ai_companion"
+            / "llm"
+            / "default_system_prompt.md"
+        )
+        self.assertTrue(md_path.is_file())
+        md_text = md_path.read_text(encoding="utf-8").strip()
+        self.assertEqual(DEFAULT_SYSTEM_PROMPT, md_text)
+        self.assertEqual(load_default_system_prompt(), md_text)
+        self.assertIn("[emotion:happy]", md_text)
+
+        sys.path.insert(0, str(REPO_ROOT / "settings-ui"))
+        try:
+            from bytey_settings.api_client import DEFAULT_SYSTEM_PROMPT as UI_DEFAULT_PROMPT
+
+            self.assertEqual(UI_DEFAULT_PROMPT, md_text)
+        finally:
+            if str(REPO_ROOT / "settings-ui") in sys.path:
+                sys.path.remove(str(REPO_ROOT / "settings-ui"))
+
+    def test_config_manager_replace_config_replaces_all_sections(self) -> None:
+        from bytey_ai_companion.config import ConfigManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cm = ConfigManager(config_dir=Path(tmp))
+            cm.update_config(
+                {
+                    "general": {"pet_name": "OldName", "wake_phrase": "Hey Old", "system_prompt": "Old prompt"},
+                    "visuals": {"eye_color": "#112233"},
+                    "mcp_servers": {"old_srv": {"transport": "stdio", "command": "echo"}},
+                }
+            )
+            replaced = cm.replace_config(
+                {
+                    "general": {"pet_name": "NewName", "system_prompt": "New prompt"},
+                    "provider": {"active_provider": "openai", "model": "gpt-4o-mini"},
+                }
+            )
+            self.assertEqual(replaced.general.pet_name, "NewName")
+            self.assertEqual(replaced.general.system_prompt, "New prompt")
+            self.assertEqual(replaced.general.wake_phrase, "Hey Bytey")
+            self.assertEqual(replaced.visuals.eye_color, "#F7FAFF")
+            self.assertEqual(replaced.mcp_servers, {})
+            self.assertEqual(replaced.provider.active_provider, "openai")
+
+            with self.assertRaises(ValueError):
+                cm.replace_config({"unrelated": 123})
+
+    async def test_put_config_replaces_full_config_and_exposes_default_prompt(self) -> None:
+        from bytey_ai_companion.llm.emotions import DEFAULT_SYSTEM_PROMPT
+        from bytey_ai_companion.main import ByteyDaemon
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=tmp_path / "cfg",
+                data_dir=tmp_path / "data",
+                enable_voice_capture=False,
+            )
+            await daemon.start()
+            try:
+                base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+                async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
+                    r_patch = await client.patch(
+                        "/api/v1/config",
+                        json={
+                            "general": {"pet_name": "CustomBot", "wake_phrase": "Hey Custom"},
+                            "visuals": {"eye_color": "#ABCDEF"},
+                        },
+                    )
+                    self.assertEqual(r_patch.status_code, 200)
+
+                    r_put = await client.put(
+                        "/api/v1/config",
+                        json={
+                            "general": {"pet_name": "ImportedBot", "system_prompt": "Imported prompt"},
+                            "provider": {"active_provider": "ollama", "model": "llama3.2"},
+                        },
+                    )
+                    self.assertEqual(r_put.status_code, 200)
+                    body = r_put.json()
+                    self.assertEqual(body["general"]["pet_name"], "ImportedBot")
+                    self.assertEqual(body["general"]["system_prompt"], "Imported prompt")
+                    self.assertEqual(body["general"]["wake_phrase"], "Hey Bytey")
+                    self.assertEqual(body["visuals"]["eye_color"], "#F7FAFF")
+                    self.assertEqual(body["default_system_prompt"], DEFAULT_SYSTEM_PROMPT)
+
+                    r_get = await client.get("/api/v1/config")
+                    self.assertEqual(r_get.status_code, 200)
+                    self.assertEqual(r_get.json()["general"]["pet_name"], "ImportedBot")
+                    self.assertEqual(r_get.json()["default_system_prompt"], DEFAULT_SYSTEM_PROMPT)
+            finally:
+                await daemon.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

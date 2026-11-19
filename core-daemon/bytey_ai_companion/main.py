@@ -18,7 +18,7 @@ from .audio import VoiceInputService
 from .config import PIPER_VOICE_PRESETS, ConfigManager, MCPServerConfig, SecretStore
 from .ipc import IPCRequest, IPCResponse, IPCServer
 from .llm import LLMRouter
-from .llm.emotions import parse_emotion_prefix
+from .llm.emotions import DEFAULT_SYSTEM_PROMPT, parse_emotion_prefix
 from .mcp_host import MCPClientManager, from_mcp_servers_json, to_mcp_servers_json
 from .tts import (
     ElevenLabsTTSClient,
@@ -352,6 +352,7 @@ class ByteyDaemon:
             "elevenlabs_model_id": cfg.voice_out.elevenlabs_model_id,
         }
         data["mcpServers"] = mcp_ui
+        data["default_system_prompt"] = DEFAULT_SYSTEM_PROMPT
         return data
 
     def _normalize_patch(self, raw_patch: dict[str, Any]) -> tuple[dict[str, Any], bool | None]:
@@ -947,6 +948,7 @@ class ByteyDaemon:
 
         self.ipc.register_route("GET", "/api/v1/config", self._route_get_config)
         self.ipc.register_route("PATCH", "/api/v1/config", self._route_patch_config)
+        self.ipc.register_route("PUT", "/api/v1/config", self._route_put_config)
         self.ipc.register_route("PUT", "/api/v1/secrets", self._route_put_secrets)
 
         self.ipc.register_route("GET", "/api/v1/providers/{provider}/models", self._route_list_models)
@@ -988,13 +990,16 @@ class ByteyDaemon:
     async def _route_get_config(self, _req: IPCRequest) -> dict[str, Any]:
         return self._serialize_config()
 
-    async def _route_patch_config(self, req: IPCRequest) -> dict[str, Any]:
-        raw_patch = req.json()
-        prev_muted = self.config_manager.config.voice_in.mic_muted
-        canonical_patch, tools_hint = self._normalize_patch(raw_patch)
-        updated = self.config_manager.update_config(canonical_patch)
-
-        if "provider" in canonical_patch:
+    async def _finalize_config_change(
+        self,
+        updated: Any,
+        prev_muted: bool,
+        *,
+        refresh_provider: bool,
+        broadcast_visuals: bool,
+        tools_hint: bool | None,
+    ) -> dict[str, Any]:
+        if refresh_provider:
             detected_tools, detected_ctx = await self._detect_active_model_capabilities(
                 updated,
                 self._get_provider_api_key(updated.provider.active_provider),
@@ -1013,11 +1018,37 @@ class ByteyDaemon:
         await self.ipc.connection_manager.broadcast(
             {"type": "config_updated", "config": serialized}
         )
-        if "visuals" in canonical_patch:
+        if broadcast_visuals:
             await self.ipc.connection_manager.broadcast(
                 {"type": "position_updated", "visuals": serialized["visuals"]}
             )
         return serialized
+
+    async def _route_patch_config(self, req: IPCRequest) -> dict[str, Any]:
+        raw_patch = req.json()
+        prev_muted = self.config_manager.config.voice_in.mic_muted
+        canonical_patch, tools_hint = self._normalize_patch(raw_patch)
+        updated = self.config_manager.update_config(canonical_patch)
+        return await self._finalize_config_change(
+            updated,
+            prev_muted,
+            refresh_provider="provider" in canonical_patch,
+            broadcast_visuals="visuals" in canonical_patch,
+            tools_hint=tools_hint,
+        )
+
+    async def _route_put_config(self, req: IPCRequest) -> dict[str, Any]:
+        raw_config = req.json()
+        prev_muted = self.config_manager.config.voice_in.mic_muted
+        canonical_config, tools_hint = self._normalize_patch(raw_config)
+        updated = self.config_manager.replace_config(canonical_config)
+        return await self._finalize_config_change(
+            updated,
+            prev_muted,
+            refresh_provider=True,
+            broadcast_visuals=True,
+            tools_hint=tools_hint,
+        )
 
     async def _route_put_secrets(self, req: IPCRequest) -> dict[str, Any]:
         body = req.json()
