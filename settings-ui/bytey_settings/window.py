@@ -36,7 +36,12 @@ PROVIDER_DEFAULT_URLS = {
 STT_BACKENDS = ("local_whisper", "openai_whisper", "custom_whisper")
 TTS_PROVIDERS = ("kokoro", "elevenlabs", "disabled")
 ANIMATION_MODES = ("full", "state_only", "disabled")
-POSITION_MODES = ("fixed", "floating")
+POSITION_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Fixed", "fixed"),
+    ("Floating", "floating"),
+    ("Notch", "notch"),
+)
+POSITION_MODES = tuple(value for _, value in POSITION_MODE_OPTIONS)
 CHAT_DENSITIES = ("compact", "comfortable", "spacious")
 FIXED_ALIGNMENTS = (
     "top-left",
@@ -1640,6 +1645,70 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         banner_group.add(self._create_offline_banner())
         page.add(banner_group)
 
+        pos_group = Adw.PreferencesGroup(title="Island Placement")
+        self.position_mode_row = _make_string_combo(
+            "Mode", "", [label for label, _ in POSITION_MODE_OPTIONS]
+        )
+        self.position_mode_row.connect("notify::selected", self._on_position_mode_changed)
+        pos_group.add(self.position_mode_row)
+
+        self.monitor_index_row = Adw.SpinRow.new_with_range(0, 15, 1)
+        self.monitor_index_row.set_title("Monitor Index")
+        self.monitor_index_row.connect(
+            "notify::value",
+            lambda *_: self._patch_debounced(
+                "monitor_index",
+                lambda: {"monitor_index": int(self.monitor_index_row.get_value())},
+            ),
+        )
+        pos_group.add(self.monitor_index_row)
+        page.add(pos_group)
+
+        self.fixed_group = Adw.PreferencesGroup(title="Fixed Alignment")
+        self.fixed_alignment_row = _make_string_combo("Fixed Alignment", "", FIXED_ALIGNMENTS)
+        self.fixed_alignment_row.connect(
+            "notify::selected",
+            lambda *_: self._patch_fields(
+                {"fixed_alignment": _combo_selected_text(self.fixed_alignment_row)}, "Saved alignment"
+            ),
+        )
+        self.fixed_group.add(self.fixed_alignment_row)
+
+        self.offset_x_row = Adw.SpinRow.new_with_range(-4000, 4000, 4)
+        self.offset_x_row.set_title("Offset X")
+        self.offset_x_row.connect(
+            "notify::value",
+            lambda *_: self._patch_debounced("offset_x", lambda: {"offset_x": int(self.offset_x_row.get_value())}),
+        )
+        self.fixed_group.add(self.offset_x_row)
+
+        self.offset_y_row = Adw.SpinRow.new_with_range(-4000, 4000, 4)
+        self.offset_y_row.set_title("Offset Y")
+        self.offset_y_row.connect(
+            "notify::value",
+            lambda *_: self._patch_debounced("offset_y", lambda: {"offset_y": int(self.offset_y_row.get_value())}),
+        )
+        self.fixed_group.add(self.offset_y_row)
+        page.add(self.fixed_group)
+
+        self.floating_group = Adw.PreferencesGroup(title="Floating Coordinates")
+        self.float_x_row = Adw.SpinRow.new_with_range(0, 10000, 10)
+        self.float_x_row.set_title("Floating X")
+        self.float_x_row.connect(
+            "notify::value",
+            lambda *_: self._patch_debounced("float_x", lambda: {"float_x": int(self.float_x_row.get_value())}),
+        )
+        self.floating_group.add(self.float_x_row)
+
+        self.float_y_row = Adw.SpinRow.new_with_range(0, 10000, 10)
+        self.float_y_row.set_title("Floating Y")
+        self.float_y_row.connect(
+            "notify::value",
+            lambda *_: self._patch_debounced("float_y", lambda: {"float_y": int(self.float_y_row.get_value())}),
+        )
+        self.floating_group.add(self.float_y_row)
+        page.add(self.floating_group)
+
         eye_group = Adw.PreferencesGroup(title="Eye Animations")
         self.anim_mode_row = _make_string_combo("Animation Mode", "", ANIMATION_MODES)
         self.anim_mode_row.connect(
@@ -1708,68 +1777,6 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         chat_group.add(self.chat_height_row)
         page.add(chat_group)
 
-        pos_group = Adw.PreferencesGroup(title="Island Placement")
-        self.position_mode_row = _make_string_combo("Position Mode", "", POSITION_MODES)
-        self.position_mode_row.connect("notify::selected", self._on_position_mode_changed)
-        pos_group.add(self.position_mode_row)
-
-        self.monitor_index_row = Adw.SpinRow.new_with_range(0, 15, 1)
-        self.monitor_index_row.set_title("Monitor Index")
-        self.monitor_index_row.connect(
-            "notify::value",
-            lambda *_: self._patch_debounced(
-                "monitor_index",
-                lambda: {"monitor_index": int(self.monitor_index_row.get_value())},
-            ),
-        )
-        pos_group.add(self.monitor_index_row)
-        page.add(pos_group)
-
-        self.fixed_group = Adw.PreferencesGroup(title="Fixed Alignment")
-        self.fixed_alignment_row = _make_string_combo("Fixed Alignment", "", FIXED_ALIGNMENTS)
-        self.fixed_alignment_row.connect(
-            "notify::selected",
-            lambda *_: self._patch_fields(
-                {"fixed_alignment": _combo_selected_text(self.fixed_alignment_row)}, "Saved alignment"
-            ),
-        )
-        self.fixed_group.add(self.fixed_alignment_row)
-
-        self.offset_x_row = Adw.SpinRow.new_with_range(-4000, 4000, 4)
-        self.offset_x_row.set_title("Offset X")
-        self.offset_x_row.connect(
-            "notify::value",
-            lambda *_: self._patch_debounced("offset_x", lambda: {"offset_x": int(self.offset_x_row.get_value())}),
-        )
-        self.fixed_group.add(self.offset_x_row)
-
-        self.offset_y_row = Adw.SpinRow.new_with_range(-4000, 4000, 4)
-        self.offset_y_row.set_title("Offset Y")
-        self.offset_y_row.connect(
-            "notify::value",
-            lambda *_: self._patch_debounced("offset_y", lambda: {"offset_y": int(self.offset_y_row.get_value())}),
-        )
-        self.fixed_group.add(self.offset_y_row)
-        page.add(self.fixed_group)
-
-        self.floating_group = Adw.PreferencesGroup(title="Floating Coordinates")
-        self.float_x_row = Adw.SpinRow.new_with_range(0, 10000, 10)
-        self.float_x_row.set_title("Floating X")
-        self.float_x_row.connect(
-            "notify::value",
-            lambda *_: self._patch_debounced("float_x", lambda: {"float_x": int(self.float_x_row.get_value())}),
-        )
-        self.floating_group.add(self.float_x_row)
-
-        self.float_y_row = Adw.SpinRow.new_with_range(0, 10000, 10)
-        self.float_y_row.set_title("Floating Y")
-        self.float_y_row.connect(
-            "notify::value",
-            lambda *_: self._patch_debounced("float_y", lambda: {"float_y": int(self.float_y_row.get_value())}),
-        )
-        self.floating_group.add(self.float_y_row)
-        page.add(self.floating_group)
-
         self.add(page)
 
     def _make_color_row(self, title: str, field_key: str, default_hex: str) -> Adw.ActionRow:
@@ -1811,16 +1818,32 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             "Reset colors to defaults",
         )
 
+    def _selected_position_mode(self) -> str:
+        """Return the config position_mode value for the selected Mode row."""
+        idx = self.position_mode_row.get_selected()
+        if 0 <= idx < len(POSITION_MODE_OPTIONS):
+            return POSITION_MODE_OPTIONS[idx][1]
+        return "fixed"
+
+    def _set_position_mode_selection(self, mode: str) -> None:
+        """Select the Mode dropdown option matching the normalized position_mode."""
+        norm = str(mode or "fixed").strip().lower()
+        for idx, (_, value) in enumerate(POSITION_MODE_OPTIONS):
+            if value == norm:
+                self.position_mode_row.set_selected(idx)
+                return
+        self.position_mode_row.set_selected(0)
+
     def _on_position_mode_changed(self, *_: object) -> None:
-        mode = _combo_selected_text(self.position_mode_row)
+        mode = self._selected_position_mode()
         self._sync_position_groups(mode)
         if not self._loading:
-            self._patch_fields({"position_mode": mode}, f"Position mode: {mode}")
+            self._patch_fields({"position_mode": mode}, f"Mode: {mode.capitalize()}")
 
     def _sync_position_groups(self, mode: str) -> None:
-        is_fixed = mode == "fixed"
-        self.fixed_group.set_sensitive(is_fixed)
-        self.floating_group.set_sensitive(not is_fixed)
+        norm = str(mode or "fixed").strip().lower()
+        self.fixed_group.set_sensitive(norm == "fixed")
+        self.floating_group.set_sensitive(norm == "floating")
 
     # ------------------------------------------------------------------
     # Initial Load & Population
@@ -1956,7 +1979,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self.chat_width_row.set_value(float(self._read_field("chat_width", 380)))
             self.chat_height_row.set_value(float(self._read_field("chat_height", 420)))
             pos_mode = str(self._read_field("position_mode", "fixed"))
-            _set_combo_text(self.position_mode_row, pos_mode)
+            self._set_position_mode_selection(pos_mode)
             self._sync_position_groups(pos_mode)
             self.monitor_index_row.set_value(float(self._read_field("monitor_index", 0)))
             _set_combo_text(self.fixed_alignment_row, str(self._read_field("fixed_alignment", "top-center")))

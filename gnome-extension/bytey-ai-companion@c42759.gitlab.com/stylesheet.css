@@ -57,6 +57,40 @@
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.75);
 }
 
+.bytey-island-notch {
+  background-color: transparent;
+  border-radius: 0px;
+  box-shadow: none;
+  min-width: 136px;
+  min-height: 36px;
+}
+
+.bytey-island-notch:hover {
+  box-shadow: none;
+}
+
+.bytey-island-notch .bytey-island-content {
+  padding: 2px 20px 6px 20px;
+}
+
+.bytey-island-notch.bytey-island-expanded {
+  min-width: 188px;
+  min-height: 40px;
+}
+
+.bytey-island-notch.bytey-island-expanded .bytey-island-content {
+  padding: 2px 22px 6px 22px;
+}
+
+.bytey-island-notch.bytey-island-listening,
+.bytey-island-notch.bytey-island-thinking,
+.bytey-island-notch.bytey-island-tool,
+.bytey-island-notch.bytey-island-speaking,
+.bytey-island-notch.bytey-island-error,
+.bytey-island-notch.bytey-island-dragging {
+  box-shadow: none;
+}
+
 .bytey-island-label {
   color: rgba(244, 244, 247, 0.88);
   font-size: 10pt;

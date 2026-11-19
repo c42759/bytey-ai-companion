@@ -14,7 +14,11 @@ const DEFAULT_BG_COLOR = '#0A0A0C';
 const DEFAULT_BORDER_COLOR = '#2A2C34';
 const ANIMATION_MODES = ['full', 'state_only', 'disabled'];
 const CHAT_DENSITIES = ['compact', 'comfortable', 'spacious'];
-const POSITION_MODES = ['fixed', 'floating'];
+const POSITION_MODE_OPTIONS = [
+    {label: 'Fixed', value: 'fixed'},
+    {label: 'Floating', value: 'floating'},
+    {label: 'Notch', value: 'notch'},
+];
 const FIXED_ALIGNMENTS = [
     'top-left',
     'top-center',
@@ -80,6 +84,16 @@ function setComboText(row, value) {
             return;
         }
     }
+}
+
+function positionModeValueForIndex(idx) {
+    return (POSITION_MODE_OPTIONS[idx] ?? POSITION_MODE_OPTIONS[0]).value;
+}
+
+function positionModeIndexForValue(mode) {
+    const normalized = String(mode ?? 'fixed').toLowerCase().trim();
+    const idx = POSITION_MODE_OPTIONS.findIndex(o => o.value === normalized);
+    return idx >= 0 ? idx : 0;
 }
 
 function makeSpinRow(title, min, max, step) {
@@ -459,6 +473,23 @@ export default class ByteyPreferences extends ExtensionPreferences {
             icon_name: 'preferences-desktop-display-symbolic',
         });
 
+        const placementGroup = new Adw.PreferencesGroup({title: 'Island Placement'});
+        const posModeRow = makeComboRow('Mode', POSITION_MODE_OPTIONS.map(o => o.label));
+        const monitorRow = makeSpinRow('Monitor Index', 0, 15, 1);
+        const fixedAlignRow = makeComboRow('Fixed Alignment', FIXED_ALIGNMENTS);
+        const offsetXRow = makeSpinRow('Offset X', -4000, 4000, 4);
+        const offsetYRow = makeSpinRow('Offset Y', -4000, 4000, 4);
+        const floatXRow = makeSpinRow('Floating X', 0, 10000, 10);
+        const floatYRow = makeSpinRow('Floating Y', 0, 10000, 10);
+        placementGroup.add(posModeRow);
+        placementGroup.add(monitorRow);
+        placementGroup.add(fixedAlignRow);
+        placementGroup.add(offsetXRow);
+        placementGroup.add(offsetYRow);
+        placementGroup.add(floatXRow);
+        placementGroup.add(floatYRow);
+        visualsPage.add(placementGroup);
+
         const eyesGroup = new Adw.PreferencesGroup({title: 'Eye Animations'});
         const animModeRow = makeComboRow('Animation Mode', ANIMATION_MODES);
         const cursorTrackRow = new Adw.SwitchRow({
@@ -513,23 +544,6 @@ export default class ByteyPreferences extends ExtensionPreferences {
         drawerGroup.add(chatWidthRow);
         drawerGroup.add(chatHeightRow);
         visualsPage.add(drawerGroup);
-
-        const placementGroup = new Adw.PreferencesGroup({title: 'Island Placement'});
-        const posModeRow = makeComboRow('Position Mode', POSITION_MODES);
-        const monitorRow = makeSpinRow('Monitor Index', 0, 15, 1);
-        const fixedAlignRow = makeComboRow('Fixed Alignment', FIXED_ALIGNMENTS);
-        const offsetXRow = makeSpinRow('Offset X', -4000, 4000, 4);
-        const offsetYRow = makeSpinRow('Offset Y', -4000, 4000, 4);
-        const floatXRow = makeSpinRow('Floating X', 0, 10000, 10);
-        const floatYRow = makeSpinRow('Floating Y', 0, 10000, 10);
-        placementGroup.add(posModeRow);
-        placementGroup.add(monitorRow);
-        placementGroup.add(fixedAlignRow);
-        placementGroup.add(offsetXRow);
-        placementGroup.add(offsetYRow);
-        placementGroup.add(floatXRow);
-        placementGroup.add(floatYRow);
-        visualsPage.add(placementGroup);
 
         // 3. Voice & AI Page
         const voicePage = new Adw.PreferencesPage({
@@ -674,10 +688,12 @@ export default class ByteyPreferences extends ExtensionPreferences {
         window.add(voicePage);
 
         const syncPlacementSensitivity = () => {
-            const isFloating = comboText(posModeRow) === 'floating';
-            fixedAlignRow.set_sensitive(!isFloating);
-            offsetXRow.set_sensitive(!isFloating);
-            offsetYRow.set_sensitive(!isFloating);
+            const mode = positionModeValueForIndex(posModeRow.get_selected());
+            const isFixed = mode === 'fixed';
+            const isFloating = mode === 'floating';
+            fixedAlignRow.set_sensitive(isFixed);
+            offsetXRow.set_sensitive(isFixed);
+            offsetYRow.set_sensitive(isFixed);
             floatXRow.set_sensitive(isFloating);
             floatYRow.set_sensitive(isFloating);
         };
@@ -1377,7 +1393,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 chatWidthRow.set_value(Number(visuals.chat_width ?? 380));
                 chatHeightRow.set_value(Number(visuals.chat_height ?? 420));
 
-                setComboText(posModeRow, visuals.position_mode ?? 'fixed');
+                posModeRow.set_selected(positionModeIndexForValue(visuals.position_mode ?? 'fixed'));
                 monitorRow.set_value(Number(visuals.monitor_index ?? 0));
                 setComboText(fixedAlignRow, visuals.fixed_alignment ?? 'top-center');
                 offsetXRow.set_value(Number(visuals.offset_x ?? 0));
@@ -1628,7 +1644,8 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         posModeRow.connect('notify::selected', () => onUserChange(() => {
             syncPlacementSensitivity();
-            patchConfig({visuals: {position_mode: comboText(posModeRow)}}, 'Saved position mode');
+            const mode = positionModeValueForIndex(posModeRow.get_selected());
+            patchConfig({visuals: {position_mode: mode}}, 'Saved mode');
         }));
 
         monitorRow.connect('notify::value', () => onUserChange(() => {

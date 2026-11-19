@@ -134,6 +134,12 @@ export default class ByteyExtension extends Extension {
             this._islandWidget?.reposition();
             this._syncDrawerPosition();
         });
+        this._workareasChangedId = global.display.connect('workareas-changed', () => {
+            if (this._disabled)
+                return;
+            this._islandWidget?.reposition();
+            this._syncDrawerPosition();
+        });
 
         this._applyConfig(this._config);
         this._connectWebSocket();
@@ -169,6 +175,10 @@ export default class ByteyExtension extends Extension {
         if (this._monitorsChangedId) {
             Main.layoutManager.disconnect(this._monitorsChangedId);
             this._monitorsChangedId = 0;
+        }
+        if (this._workareasChangedId) {
+            global.display.disconnect(this._workareasChangedId);
+            this._workareasChangedId = 0;
         }
 
         if (this._contextMenu) {
@@ -331,6 +341,8 @@ export default class ByteyExtension extends Extension {
     }
 
     _toggleFloatingMode(floating) {
+        if (String(this._config?.visuals?.position_mode ?? 'fixed').toLowerCase().trim() === 'notch')
+            return;
         const bounds = this._islandWidget?.getBounds() ?? {x: 500, y: 40};
         const visualsPatch = {
             position_mode: floating ? 'floating' : 'fixed',

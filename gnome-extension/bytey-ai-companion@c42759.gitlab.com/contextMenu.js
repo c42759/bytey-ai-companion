@@ -107,13 +107,16 @@ export class IslandContextMenu {
 
         const micMuted = Boolean(config.voice_in?.mic_muted ?? config.voice_input?.mic_muted ?? false);
         const ttsMuted = Boolean(config.voice_out?.tts_muted ?? config.voice_output?.tts_muted ?? false);
-        const isFloating = (config.visuals?.position_mode ?? 'fixed') === 'floating';
+        const mode = String(config.visuals?.position_mode ?? 'fixed').toLowerCase().trim();
+        const isNotch = mode === 'notch';
+        const isFloating = mode === 'floating';
 
         this._syncing = true;
         try {
             this._micMuteItem.setToggleState(micMuted);
             this._ttsMuteItem.setToggleState(ttsMuted);
             this._floatingItem.setToggleState(isFloating);
+            this._floatingItem.setSensitive(!isNotch);
         } finally {
             this._syncing = false;
         }

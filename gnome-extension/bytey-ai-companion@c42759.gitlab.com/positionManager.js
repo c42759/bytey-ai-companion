@@ -114,7 +114,19 @@ export class PositionManager {
         const w = Math.max(1, widgetWidth || 120);
         const h = Math.max(1, widgetHeight || 38);
 
-        if (cfg.position_mode === 'floating') {
+        const mode = typeof cfg.position_mode === 'string'
+            ? cfg.position_mode.toLowerCase().trim()
+            : 'fixed';
+
+        if (mode === 'notch') {
+            const mon = this.getMonitorGeometry(monitorIndex);
+            const area = this.getWorkArea(monitorIndex);
+            const x = mon.x + (mon.width - w) / 2;
+            const y = area.y;
+            return this.clampToMonitor(x, y, w, h, monitorIndex);
+        }
+
+        if (mode === 'floating') {
             const floatX = Number.isFinite(cfg.float_x) ? cfg.float_x : this._defaultCenterX(monitorIndex, w);
             const floatY = Number.isFinite(cfg.float_y) ? cfg.float_y : this.getWorkArea(monitorIndex).y + 12;
             return this.clampToMonitor(floatX, floatY, w, h, monitorIndex);

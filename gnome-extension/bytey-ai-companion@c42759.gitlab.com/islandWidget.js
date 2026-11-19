@@ -13,6 +13,8 @@ const DRAG_THRESHOLD_PX = 5;
 const EXPANDED_STATES = new Set(['LISTENING', 'THINKING', 'TOOL_CALLING', 'SPEAKING']);
 const DEFAULT_BG_RGBA = [10 / 255, 10 / 255, 12 / 255, 1.0];
 const DEFAULT_BORDER_RGBA = [42 / 255, 44 / 255, 52 / 255, 1.0];
+const NOTCH_TOP_FLARE_PX = 12;
+const NOTCH_BOTTOM_RADIUS_PX = 16;
 
 /**
  * Parse `#RGB`, `#RRGGBB`, or `#RRGGBBAA` into normalized `[r, g, b, a]` in `0..1`.
@@ -172,6 +174,106 @@ function _capsulePoint(s, x0, y0, w, h, r) {
 }
 
 /**
+ * Compute MacBook-notch top flare and bottom corner radii for a given box size.
+ *
+ * @param {number} width
+ * @param {number} height
+ * @returns {{ flare: number, botR: number, bodyWidth: number }}
+ */
+function _computeNotchGeometry(width, height) {
+    const w = Math.max(1, width);
+    const h = Math.max(1, height);
+    const flare = Math.max(4, Math.min(NOTCH_TOP_FLARE_PX, Math.floor(h * 0.38), Math.floor(w * 0.14)));
+    const bodyWidth = Math.max(4, w - 2 * flare);
+    const botR = Math.max(4, Math.min(NOTCH_BOTTOM_RADIUS_PX, Math.floor(h - flare), Math.floor(bodyWidth / 2)));
+    return {flare, botR, bodyWidth};
+}
+
+/**
+ * Compute arc-length and segment metrics for the inset open U-contour of a notch.
+ *
+ * @param {number} width
+ * @param {number} height
+ * @param {number} inset
+ * @returns {object}
+ */
+function _notchBorderMetrics(width, height, inset) {
+    const {flare, botR} = _computeNotchGeometry(width, height);
+    const d = Math.max(0, inset);
+    const fOut = flare + d;
+    const rIn = Math.max(1, botR - d);
+    const thetaTop = Math.asin(Math.min(1, flare / fOut));
+    const topArcLen = fOut * thetaTop;
+    const vert = Math.max(0, height - flare - botR);
+    const botArcLen = 0.5 * Math.PI * rIn;
+    const horiz = Math.max(0, width - 2 * flare - 2 * botR);
+    const totalLength = 2 * topArcLen + 2 * vert + 2 * botArcLen + horiz;
+    return {flare, botR, d, fOut, rIn, thetaTop, topArcLen, vert, botArcLen, horiz, totalLength};
+}
+
+/**
+ * Sample `[px, py]` at arc-length `s` along the open 7-segment notch U-contour.
+ *
+ * @param {number} s
+ * @param {number} width
+ * @param {number} height
+ * @param {number} inset
+ * @returns {number[]}
+ */
+function _notchBorderPoint(s, width, height, inset) {
+    const {
+        flare,
+        botR,
+        d,
+        fOut,
+        rIn,
+        thetaTop,
+        topArcLen,
+        vert,
+        botArcLen,
+        horiz,
+        totalLength,
+    } = _notchBorderMetrics(width, height, inset);
+    if (totalLength <= 0)
+        return [width / 2, height / 2];
+
+    let u = Math.max(0, Math.min(totalLength, s));
+
+    if (u <= topArcLen) {
+        const angle = -thetaTop + (fOut > 0 ? u / fOut : 0);
+        return [fOut * Math.cos(angle), flare + fOut * Math.sin(angle)];
+    }
+    u -= topArcLen;
+
+    if (u <= vert)
+        return [flare + d, flare + u];
+    u -= vert;
+
+    if (u <= botArcLen) {
+        const angle = Math.PI - (rIn > 0 ? u / rIn : 0);
+        return [flare + botR + rIn * Math.cos(angle), height - botR + rIn * Math.sin(angle)];
+    }
+    u -= botArcLen;
+
+    if (u <= horiz)
+        return [flare + botR + u, height - d];
+    u -= horiz;
+
+    if (u <= botArcLen) {
+        const angle = Math.PI / 2 - (rIn > 0 ? u / rIn : 0);
+        return [width - flare - botR + rIn * Math.cos(angle), height - botR + rIn * Math.sin(angle)];
+    }
+    u -= botArcLen;
+
+    if (u <= vert)
+        return [width - flare - d, height - botR - u];
+    u -= vert;
+
+    const angle = Math.PI + (fOut > 0 ? Math.min(topArcLen, u) / fOut : 0);
+    return [width + fOut * Math.cos(angle), flare + fOut * Math.sin(angle)];
+}
+
+/**
  * Always-on-top Dynamic Island pill widget placed via `Main.layoutManager.addTopChrome`.
  */
 export class IslandWidget {
@@ -250,6 +352,15 @@ export class IslandWidget {
         this._statusLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
         this._contentBox.add_child(this._statusLabel);
 
+        this._bgCanvas = new St.DrawingArea({
+            reactive: false,
+            visible: false,
+            x_expand: true,
+            y_expand: true,
+            x_align: Clutter.ActorAlign.FILL,
+            y_align: Clutter.ActorAlign.FILL,
+        });
+
         this._borderCanvas = new St.DrawingArea({
             reactive: false,
             x_expand: true,
@@ -258,9 +369,11 @@ export class IslandWidget {
             y_align: Clutter.ActorAlign.FILL,
         });
 
+        this._island.add_child(this._bgCanvas);
         this._island.add_child(this._contentBox);
         this._island.add_child(this._borderCanvas);
 
+        this._connect(this._bgCanvas, 'repaint', area => this._onBgRepaint(area));
         this._connect(this._borderCanvas, 'repaint', area => this._onBorderRepaint(area));
         this._connect(this._island, 'notify::hover', () => {
             this._hovered = Boolean(this._island.hover);
@@ -270,6 +383,7 @@ export class IslandWidget {
         this._connect(this._island, 'motion-event', (_a, event) => this._onMotion(event));
         this._connect(this._island, 'button-release-event', (_a, event) => this._onButtonRelease(event));
 
+        this._syncNotchMode();
         this._syncCustomColors();
         Main.layoutManager.addTopChrome(this._island);
         this.reposition();
@@ -359,6 +473,7 @@ export class IslandWidget {
         this._eyeRenderer.setState(normState, emotion);
         this._syncStateStyles();
         this._syncRainbowTimer();
+        this._bgCanvas?.queue_repaint();
         this._borderCanvas?.queue_repaint();
         this.reposition();
     }
@@ -398,8 +513,10 @@ export class IslandWidget {
         );
         this._eyeRenderer.setEyeColor(this._visualsConfig.eye_color ?? '#F7FAFF');
 
+        this._syncNotchMode();
         this._syncCustomColors();
         this._syncRainbowTimer();
+        this._bgCanvas?.queue_repaint();
         this._borderCanvas?.queue_repaint();
 
         if (!this._dragging)
@@ -452,6 +569,7 @@ export class IslandWidget {
             this._island.destroy();
             this._island = null;
         }
+        this._bgCanvas = null;
         this._borderCanvas = null;
         this._contentBox = null;
         this._statusLabel = null;
@@ -465,10 +583,38 @@ export class IslandWidget {
         return id;
     }
 
+    _isNotchMode() {
+        return String(this._visualsConfig.position_mode ?? 'fixed').toLowerCase().trim() === 'notch';
+    }
+
+    _syncNotchMode() {
+        if (this._destroyed || !this._island)
+            return;
+
+        const isNotch = this._isNotchMode();
+        if (isNotch)
+            this._island.add_style_class_name('bytey-island-notch');
+        else
+            this._island.remove_style_class_name('bytey-island-notch');
+
+        if (this._bgCanvas)
+            this._bgCanvas.visible = isNotch;
+
+        if (isNotch && (this._dragging || this._pressActive)) {
+            this._dragging = false;
+            this._pressActive = false;
+            this._releaseDragGrab();
+            this._island.remove_style_class_name('bytey-island-dragging');
+        }
+    }
+
     _syncCustomColors() {
         if (this._destroyed || !this._island)
             return;
-        this._island.set_style(`background-color: ${_rgbaCss(this._bgColor)};`);
+        if (this._isNotchMode())
+            this._island.set_style('background-color: transparent;');
+        else
+            this._island.set_style(`background-color: ${_rgbaCss(this._bgColor)};`);
     }
 
     _syncRainbowTimer() {
@@ -543,6 +689,89 @@ export class IslandWidget {
         cr.restore();
     }
 
+    _onBgRepaint(area) {
+        const [width, height] = area.get_surface_size();
+        if (width <= 2 || height <= 2)
+            return;
+
+        const cr = area.get_context();
+        try {
+            cr.setOperator(Cairo.Operator.CLEAR);
+            cr.paint();
+            if (!this._isNotchMode())
+                return;
+
+            cr.setOperator(Cairo.Operator.OVER);
+            const {flare, botR} = _computeNotchGeometry(width, height);
+            const [r, g, b, a] = this._bgColor;
+
+            cr.save();
+            cr.newSubPath();
+            cr.moveTo(0, 0);
+            cr.lineTo(width, 0);
+            cr.arcNegative(width, flare, flare, -Math.PI / 2, -Math.PI);
+            cr.lineTo(width - flare, height - botR);
+            cr.arc(width - flare - botR, height - botR, botR, 0, Math.PI / 2);
+            cr.lineTo(flare + botR, height);
+            cr.arc(flare + botR, height - botR, botR, Math.PI / 2, Math.PI);
+            cr.lineTo(flare, flare);
+            cr.arcNegative(0, flare, flare, 0, -Math.PI / 2);
+            cr.closePath();
+            cr.setSourceRGBA(r, g, b, a);
+            cr.fill();
+            cr.restore();
+        } finally {
+            cr.$dispose();
+        }
+    }
+
+    _strokeStaticNotch(cr, width, height, border) {
+        const {flare, botR, d, fOut, rIn, thetaTop, totalLength} = _notchBorderMetrics(width, height, 0.75);
+        if (totalLength <= 0)
+            return;
+
+        cr.save();
+        cr.setSourceRGBA(border[0], border[1], border[2], border[3]);
+        cr.setLineWidth(1.5);
+        cr.setLineCap(Cairo.LineCap.BUTT);
+        cr.setLineJoin(Cairo.LineJoin.ROUND);
+        cr.newSubPath();
+        cr.arc(0, flare, fOut, -thetaTop, 0);
+        cr.lineTo(flare + d, height - botR);
+        cr.arcNegative(flare + botR, height - botR, rIn, Math.PI, Math.PI / 2);
+        cr.lineTo(width - flare - botR, height - d);
+        cr.arcNegative(width - flare - botR, height - botR, rIn, Math.PI / 2, 0);
+        cr.lineTo(width - flare - d, flare);
+        cr.arc(width, flare, fOut, Math.PI, Math.PI + thetaTop);
+        cr.stroke();
+        cr.restore();
+    }
+
+    _strokeRainbowNotch(cr, width, height, inset, lineWidth, sat, light, alpha) {
+        const {totalLength} = _notchBorderMetrics(width, height, inset);
+        if (totalLength <= 0)
+            return;
+
+        const N = 72;
+        cr.save();
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setLineWidth(lineWidth);
+        for (let i = 0; i < N; i++) {
+            const s0 = (i / N) * totalLength;
+            const s1 = Math.min(totalLength, ((i + 1.18) / N) * totalLength);
+            const [x1, y1] = _notchBorderPoint(s0, width, height, inset);
+            const [x2, y2] = _notchBorderPoint(s1, width, height, inset);
+            const hue = ((i / N) - this._rainbowPhase + 1) % 1.0;
+            const [crR, crG, crB] = _hslToRgb(hue, sat, light);
+            cr.setSourceRGBA(crR, crG, crB, alpha);
+            cr.newSubPath();
+            cr.moveTo(x1, y1);
+            cr.lineTo(x2, y2);
+            cr.stroke();
+        }
+        cr.restore();
+    }
+
     _onBorderRepaint(area) {
         const [width, height] = area.get_surface_size();
         if (width <= 2 || height <= 2)
@@ -555,9 +784,15 @@ export class IslandWidget {
             cr.setOperator(Cairo.Operator.OVER);
 
             const mode = this._visualsConfig.animation_mode ?? 'full';
+            const isNotch = this._isNotchMode();
             if (this._state === 'THINKING' && mode !== 'disabled') {
-                this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24);
-                this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96);
+                if (isNotch) {
+                    this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24);
+                    this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96);
+                } else {
+                    this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24);
+                    this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96);
+                }
                 return;
             }
 
@@ -600,6 +835,11 @@ export class IslandWidget {
                 }
                 break;
             }
+            }
+
+            if (isNotch) {
+                this._strokeStaticNotch(cr, width, height, border);
+                return;
             }
 
             const inset = 1.0;

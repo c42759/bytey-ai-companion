@@ -27,6 +27,7 @@ from unittest.mock import patch
 import httpx
 import websockets
 from google.genai import types as genai_types
+from pydantic import ValidationError
 
 os.environ["BYTEY_DISABLE_KEYRING"] = "1"
 
@@ -45,6 +46,7 @@ from bytey_ai_companion.audio.vad import VADProcessor  # noqa: E402
 from bytey_ai_companion.audio.wakeword import WakeWordMatcher  # noqa: E402
 from bytey_ai_companion.config import (  # noqa: E402
     ConfigManager,
+    ProviderConfig,
     SecretStore,
     VisualsConfig,
     resolve_config_dir,
@@ -66,6 +68,12 @@ from bytey_ai_companion.storage import (  # noqa: E402
 )
 from bytey_ai_companion.tts.chunker import SentenceChunker  # noqa: E402
 from bytey_settings.api_client import DaemonClient, resolve_local_config_path  # noqa: E402
+from bytey_settings.window import (  # noqa: E402
+    POSITION_MODE_OPTIONS as SETTINGS_POSITION_MODE_OPTIONS,
+    ByteyPreferencesWindow,
+    build_context_size_presets,
+    clamp_context_size,
+)
 
 
 MOCK_MCP_SERVER_SCRIPT = '''\
@@ -207,6 +215,7 @@ class _MockLLMRouter:
         tools: list[dict[str, Any]] | None = None,
         on_text_chunk: Any = None,
         on_emotion: Any = None,
+        context_size: int | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -214,6 +223,7 @@ class _MockLLMRouter:
                 "provider": provider,
                 "model": model,
                 "tools": tools,
+                "context_size": context_size,
             }
         )
         last_msg = messages[-1] if messages else {}
@@ -280,6 +290,27 @@ class _MockLLMRouter:
 
     async def close(self) -> None:
         return None
+
+
+class _CapabilitiesMockLLMRouter(_MockLLMRouter):
+    """Mock LLMRouter exposing detect_model_capabilities for context clamping tests."""
+
+    def __init__(self, *, supports_tools: bool = True, max_context_size: int | None = 8192) -> None:
+        super().__init__()
+        self.supports_tools = supports_tools
+        self.max_context_size = max_context_size
+
+    async def detect_model_capabilities(
+        self,
+        provider: str,
+        model: str,
+        override: bool | None = None,
+        base_url: str = "",
+        api_key: str | None = None,
+    ) -> tuple[bool, int | None]:
+        del provider, model, base_url, api_key
+        tools = bool(override) if override is not None else self.supports_tools
+        return tools, self.max_context_size
 
 
 class TestConfigAndSecrets(unittest.TestCase):
@@ -436,6 +467,53 @@ class TestConfigAndSecrets(unittest.TestCase):
         self.assertEqual(reloaded.config.visuals.eye_color, "#00FF88")
         self.assertEqual(reloaded.config.visuals.background_color, "#101218")
         self.assertEqual(reloaded.config.visuals.border_color, "#FF00AA80")
+
+    def test_visuals_position_mode_validation_and_patch_roundtrip(self) -> None:
+        self.assertEqual(VisualsConfig().position_mode, "fixed")
+        for raw, expected in (
+            ("fixed", "fixed"),
+            ("floating", "floating"),
+            ("notch", "notch"),
+            ("Notch", "notch"),
+            ("  NOTCH  ", "notch"),
+            ("invalid", "fixed"),
+            (None, "fixed"),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(VisualsConfig(position_mode=raw).position_mode, expected)
+
+        store = SecretStore(config_dir=self.cfg_dir)
+        mgr = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+        updated = mgr.update_config({"visuals": {"position_mode": "notch"}})
+        self.assertEqual(updated.visuals.position_mode, "notch")
+
+        reloaded = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+        self.assertEqual(reloaded.config.visuals.position_mode, "notch")
+
+    def test_provider_context_size_validation_and_patch_roundtrip(self) -> None:
+        self.assertIsNone(ProviderConfig().context_size)
+        for raw in (None, "", "   ", 0, "0", "auto", "Auto", "default", "none", True, False, -1, "-1"):
+            with self.subTest(raw=raw):
+                self.assertIsNone(ProviderConfig(context_size=raw).context_size)
+
+        self.assertEqual(ProviderConfig(context_size="16384").context_size, 16384)
+        self.assertEqual(ProviderConfig(context_size=16384).context_size, 16384)
+        self.assertEqual(ProviderConfig(context_size=" 32768 ").context_size, 32768)
+        with self.assertRaises(ValidationError):
+            ProviderConfig(context_size="not-an-int")
+
+        store = SecretStore(config_dir=self.cfg_dir)
+        mgr = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+        updated = mgr.update_config({"provider": {"context_size": 16384}})
+        self.assertEqual(updated.provider.context_size, 16384)
+
+        reloaded = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+        self.assertEqual(reloaded.config.provider.context_size, 16384)
+
+        cleared = mgr.update_config({"provider": {"context_size": None}})
+        self.assertIsNone(cleared.provider.context_size)
+        reloaded_cleared = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+        self.assertIsNone(reloaded_cleared.config.provider.context_size)
 
 
 class TestStorageManager(unittest.IsolatedAsyncioTestCase):
@@ -947,6 +1025,110 @@ class TestGeminiToolThoughtSignature(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("[emotion:", "".join(r2_streamed))
 
 
+class TestLLMRouterContextSize(unittest.IsolatedAsyncioTestCase):
+    """Test Ollama context_length extraction, capability detection, and options.num_ctx."""
+
+    async def test_ollama_discovery_capabilities_and_num_ctx(self) -> None:
+        chat_payloads: list[dict[str, Any]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if request.method == "GET" and path == "/api/tags":
+                return httpx.Response(
+                    200,
+                    json={
+                        "models": [
+                            {"name": "gemma4:latest"},
+                            {"name": "llama3.2:latest"},
+                        ]
+                    },
+                )
+            if request.method == "POST" and path == "/api/show":
+                body = json.loads(request.content.decode("utf-8"))
+                model_name = body.get("model")
+                if model_name == "gemma4:latest":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "capabilities": ["completion", "tools"],
+                            "model_info": {
+                                "general.architecture": "gemma4",
+                                "gemma4.context_length": 262144,
+                            },
+                        },
+                    )
+                if model_name == "llama3.2:latest":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "capabilities": ["completion"],
+                            "model_info": {
+                                "general.architecture": "llama",
+                                "llama.context_length": 8192,
+                            },
+                        },
+                    )
+                return httpx.Response(404, json={"error": "not found"})
+            if request.method == "POST" and path == "/api/chat":
+                chat_payloads.append(json.loads(request.content.decode("utf-8")))
+                ndjson = (
+                    '{"message":{"content":"[emotion:happy] Ready!"},"done":false}\n'
+                    '{"done":true,"prompt_eval_count":42,"eval_count":5,"done_reason":"stop"}\n'
+                ).encode("utf-8")
+                return httpx.Response(200, content=ndjson)
+            return httpx.Response(404, json={"error": f"Unhandled route {request.method} {path}"})
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            router = LLMRouter(http_client=client)
+
+            discovered = await router._discover_ollama_models("http://localhost:11434")
+            self.assertIsNone(discovered["error"])
+            by_id = {m["id"]: m for m in discovered["models"]}
+            self.assertEqual(by_id["gemma4:latest"]["context_length"], 262144)
+            self.assertTrue(by_id["gemma4:latest"]["supports_tools"])
+            self.assertEqual(by_id["llama3.2:latest"]["context_length"], 8192)
+            self.assertFalse(by_id["llama3.2:latest"]["supports_tools"])
+
+            self.assertEqual(
+                await router.detect_model_capabilities(
+                    "ollama", "gemma4:latest", base_url="http://localhost:11434"
+                ),
+                (True, 262144),
+            )
+            self.assertEqual(
+                await router.detect_model_capabilities(
+                    "ollama", "llama3.2:latest", base_url="http://localhost:11434"
+                ),
+                (False, 8192),
+            )
+
+            res_with_ctx = await router.generate_chat(
+                messages=[{"role": "user", "content": "Hello"}],
+                system_prompt="You are Bytey.",
+                provider="ollama",
+                model="gemma4:latest",
+                base_url="http://localhost:11434",
+                context_size=16384,
+            )
+            self.assertEqual(res_with_ctx["content"], "Ready!")
+            self.assertEqual(res_with_ctx["emotion"], "happy")
+
+            res_auto_ctx = await router.generate_chat(
+                messages=[{"role": "user", "content": "Hello again"}],
+                system_prompt="You are Bytey.",
+                provider="ollama",
+                model="gemma4:latest",
+                base_url="http://localhost:11434",
+                context_size=None,
+            )
+            self.assertEqual(res_auto_ctx["content"], "Ready!")
+
+        self.assertEqual(len(chat_payloads), 2)
+        self.assertEqual(chat_payloads[0]["options"].get("num_ctx"), 16384)
+        self.assertNotIn("num_ctx", chat_payloads[1]["options"])
+
+
 class TestLiveDaemonIntegration(unittest.IsolatedAsyncioTestCase):
     """End-to-end tests against a live ByteyDaemon on ephemeral localhost port."""
 
@@ -1006,6 +1188,8 @@ class TestLiveDaemonIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cfg_after_ui["llm"]["model"], "gemini-2.5-flash")
             self.assertTrue(cfg_after_ui["llm"]["force_enable_tools"])
             self.assertTrue(cfg_after_ui["llm"]["supports_tools"])
+            self.assertIn("context_size", cfg_after_ui["llm"])
+            self.assertIn("max_context_size", cfg_after_ui["llm"])
 
             r = await client.patch(
                 "/api/v1/config",
@@ -1211,6 +1395,57 @@ asyncio.run(main())
             f"POST /api/v1/system/exit failed (rc={proc.returncode}):\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}",
         )
         self.assertNotIn("RecursionError", stderr)
+
+    async def test_context_size_config_patch_and_clamping(self) -> None:
+        """Verify ByteyDaemon exposes max_context_size, resets context_size, and clamps on prompt."""
+        cap_router = _CapabilitiesMockLLMRouter(supports_tools=True, max_context_size=8192)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=root / "cfg",
+                data_dir=root / "data",
+                enable_voice_capture=False,
+                llm_router=cap_router,  # type: ignore[arg-type]
+            )
+            daemon.config_manager.update_config(
+                {"voice_out": {"tts_muted": True, "tts_provider": "disabled"}}
+            )
+            await daemon.start()
+            try:
+                base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+                async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+                    cfg0 = (await client.get("/api/v1/config")).json()
+                    self.assertIsNone(cfg0["llm"]["context_size"])
+                    self.assertEqual(cfg0["llm"]["max_context_size"], 8192)
+
+                    r1 = await client.patch("/api/v1/config", json={"llm": {"context_size": 16384}})
+                    self.assertEqual(r1.status_code, 200)
+                    self.assertEqual(r1.json()["llm"]["context_size"], 16384)
+                    self.assertEqual(r1.json()["llm"]["max_context_size"], 8192)
+
+                    r2 = await client.patch("/api/v1/config", json={"llm": {"context_size": None}})
+                    self.assertEqual(r2.status_code, 200)
+                    self.assertIsNone(r2.json()["llm"]["context_size"])
+                    self.assertEqual(r2.json()["llm"]["max_context_size"], 8192)
+
+                    r3 = await client.patch("/api/v1/config", json={"llm": {"context_size": 65536}})
+                    self.assertEqual(r3.status_code, 200)
+                    self.assertEqual(r3.json()["llm"]["context_size"], 65536)
+
+                await daemon.handle_user_prompt("Clamp context please", input_mode="text")
+                self.assertEqual(cap_router.calls[-1]["context_size"], 8192)
+
+                daemon.config_manager.update_config({"provider": {"context_size": 4096}})
+                await daemon.handle_user_prompt("Keep smaller context", input_mode="text")
+                self.assertEqual(cap_router.calls[-1]["context_size"], 4096)
+
+                daemon.config_manager.update_config({"provider": {"context_size": None}})
+                await daemon.handle_user_prompt("Auto context", input_mode="text")
+                self.assertIsNone(cap_router.calls[-1]["context_size"])
+            finally:
+                await daemon.stop()
 
 
 class TestSettingsClientAndSyntax(unittest.TestCase):
@@ -1791,15 +2026,7 @@ assertState('disconnected', false, 'Disconnected');
         self.assertRegex(prefs_js, r"const\s+modelRow\s*=\s*new\s+Adw\.ComboRow\(")
         self.assertNotRegex(prefs_js, r"new\s+Adw\.EntryRow\(\{\s*title:\s*'Model'")
         self.assertIn("enable_search: true", prefs_js)
-        self.assertNotIn("GLib.source_remove(", prefs_js)
-        for forbidden_import in (
-            "gi://St",
-            "gi://Clutter",
-            "gi://Meta",
-            "gi://Shell",
-            "resource:///org/gnome/shell/",
-        ):
-            self.assertNotIn(forbidden_import, prefs_js)
+        self._assert_prefs_ego_constraints(prefs_js)
 
         mask_decl = re.search(r"const\s+SECRET_MASK_PLACEHOLDER\s*=\s*[^;]+;", prefs_js)
         self.assertIsNotNone(mask_decl)
@@ -1821,6 +2048,19 @@ assert.strictEqual(fn('sk-live-secret'), false);
             failure_context="node prefs.js isMaskedPlaceholder test failed",
         )
 
+    def _assert_prefs_ego_constraints(self, prefs_js: str) -> None:
+        """Verify EGO preferences constraints (no shell imports, subprocesses, or GLib.source_remove)."""
+        self.assertNotIn("GLib.source_remove(", prefs_js)
+        self.assertNotIn("Gio.Subprocess", prefs_js)
+        for forbidden_import in (
+            "gi://St",
+            "gi://Clutter",
+            "gi://Meta",
+            "gi://Shell",
+            "resource:///org/gnome/shell/",
+        ):
+            self.assertNotIn(forbidden_import, prefs_js)
+
     def test_prefs_tools_support_and_mcp_configuration(self) -> None:
         prefs_js = (GNOME_EXT_DIR / "prefs.js").read_text(encoding="utf-8")
 
@@ -1839,16 +2079,517 @@ assert.strictEqual(fn('sk-live-secret'), false);
         ):
             self.assertIn(expected, prefs_js)
 
-        self.assertNotIn("GLib.source_remove(", prefs_js)
-        self.assertNotIn("Gio.Subprocess", prefs_js)
-        for forbidden_import in (
-            "gi://St",
-            "gi://Clutter",
-            "gi://Meta",
-            "gi://Shell",
-            "resource:///org/gnome/shell/",
+        self._assert_prefs_ego_constraints(prefs_js)
+
+    def test_notch_mode_position_manager_geometry_css_and_guards(self) -> None:
+        pm_js = (GNOME_EXT_DIR / "positionManager.js").read_text(encoding="utf-8")
+        pm_stripped = re.sub(r"^\s*import\b[^;]+;\s*$", "", pm_js, flags=re.MULTILINE)
+        pm_stripped = re.sub(r"^\s*export\s+", "", pm_stripped, flags=re.MULTILINE)
+        pm_node = """
+const assert = require('assert');
+const [pmSrc] = process.argv.slice(1);
+const Main = {
+    layoutManager: {
+        monitors: [
+            {x: 0, y: 0, width: 1920, height: 1080},
+            {x: 1920, y: 0, width: 2560, height: 1440},
+        ],
+        primaryIndex: 0,
+        getWorkAreaForMonitor: idx => idx === 1
+            ? ({x: 1920, y: 28, width: 2560, height: 1412})
+            : ({x: 0, y: 32, width: 1920, height: 1048}),
+    },
+};
+const PositionManager = new Function('Main', `${pmSrc}\nreturn PositionManager;`)(Main);
+const pm = new PositionManager();
+
+assert.deepStrictEqual(
+    pm.computePosition(
+        {
+            position_mode: 'notch',
+            fixed_alignment: 'bottom-right',
+            offset_x: 200,
+            offset_y: 200,
+            float_x: 100,
+            float_y: 500,
+        },
+        140,
+        36
+    ),
+    {x: 890, y: 32}
+);
+assert.deepStrictEqual(
+    pm.computePosition({position_mode: 'Notch', monitor_index: 1, offset_x: 99, offset_y: 99}, 140, 36),
+    {x: 3130, y: 28}
+);
+assert.deepStrictEqual(
+    pm.computePosition({position_mode: 'fixed', fixed_alignment: 'top-center', offset_x: 0, offset_y: 12}, 140, 36),
+    {x: 890, y: 44}
+);
+assert.deepStrictEqual(
+    pm.computePosition({position_mode: 'floating', float_x: 100, float_y: 500}, 140, 36),
+    {x: 100, y: 500}
+);
+"""
+        self._run_node_script(
+            pm_node,
+            pm_stripped,
+            failure_context="node positionManager notch test failed",
+        )
+
+        island_js = (GNOME_EXT_DIR / "islandWidget.js").read_text(encoding="utf-8")
+        flare_decl = re.search(r"const\s+NOTCH_TOP_FLARE_PX\s*=\s*[^;]+;", island_js)
+        bot_r_decl = re.search(r"const\s+NOTCH_BOTTOM_RADIUS_PX\s*=\s*[^;]+;", island_js)
+        self.assertIsNotNone(flare_decl)
+        self.assertIsNotNone(bot_r_decl)
+        compute_geo_fn = self._extract_js_method(
+            island_js, "function _computeNotchGeometry(width, height) {"
+        )
+        metrics_fn = self._extract_js_method(
+            island_js, "function _notchBorderMetrics(width, height, inset) {"
+        )
+        point_fn = self._extract_js_method(
+            island_js, "function _notchBorderPoint(s, width, height, inset) {"
+        )
+        notch_node = """
+const assert = require('assert');
+const [flareDecl, botRDecl, geoFn, metricsFn, pointFn] = process.argv.slice(1);
+const {
+    NOTCH_TOP_FLARE_PX,
+    NOTCH_BOTTOM_RADIUS_PX,
+    _computeNotchGeometry,
+    _notchBorderMetrics,
+    _notchBorderPoint,
+} = new Function(
+    `${flareDecl}\n${botRDecl}\n${geoFn}\n${metricsFn}\n${pointFn}\n` +
+    `return {NOTCH_TOP_FLARE_PX, NOTCH_BOTTOM_RADIUS_PX, _computeNotchGeometry, _notchBorderMetrics, _notchBorderPoint};`
+)();
+
+assert.strictEqual(NOTCH_TOP_FLARE_PX, 12);
+assert.strictEqual(NOTCH_BOTTOM_RADIUS_PX, 16);
+assert.deepStrictEqual(_computeNotchGeometry(140, 36), {flare: 12, botR: 16, bodyWidth: 116});
+
+const small60 = _computeNotchGeometry(60, 20);
+assert.strictEqual(small60.flare, 7);
+assert.strictEqual(small60.botR, 13);
+assert.strictEqual(small60.bodyWidth, 46);
+
+const tiny10 = _computeNotchGeometry(10, 10);
+assert.ok(tiny10.flare >= 4 && tiny10.botR >= 4 && tiny10.bodyWidth >= 4);
+
+const metrics = _notchBorderMetrics(140, 36, 0.75);
+assert.ok(metrics.totalLength > 0);
+const [startX, startY] = _notchBorderPoint(0, 140, 36, 0.75);
+const [endX, endY] = _notchBorderPoint(metrics.totalLength, 140, 36, 0.75);
+assert.ok(Math.abs(startY) < 1e-9, `Expected startY ≈ 0, got ${startY}`);
+assert.ok(Math.abs(endY) < 1e-9, `Expected endY ≈ 0, got ${endY}`);
+assert.ok(Math.abs(endX - (140 - startX)) < 1e-9, `Expected endX ≈ ${140 - startX}, got ${endX}`);
+const [midX, midY] = _notchBorderPoint(metrics.totalLength / 2, 140, 36, 0.75);
+assert.ok(Math.abs(midX - 70) < 1e-6);
+assert.ok(Math.abs(midY - (36 - 0.75)) < 1e-6);
+"""
+        self._run_node_script(
+            notch_node,
+            flare_decl.group(0),  # type: ignore[union-attr]
+            bot_r_decl.group(0),  # type: ignore[union-attr]
+            compute_geo_fn,
+            metrics_fn,
+            point_fn,
+            failure_context="node islandWidget notch geometry test failed",
+        )
+
+        self.assertIn("this._bgCanvas = new St.DrawingArea(", island_js)
+        self.assertIn("this._bgCanvas.visible = isNotch;", island_js)
+        self.assertIn("this._island.add_style_class_name('bytey-island-notch')", island_js)
+        self.assertIn("this._island.remove_style_class_name('bytey-island-notch')", island_js)
+        self.assertIn("cr.arcNegative(width, flare, flare, -Math.PI / 2, -Math.PI)", island_js)
+        self.assertIn("cr.arcNegative(0, flare, flare, 0, -Math.PI / 2)", island_js)
+
+        css_text = (GNOME_EXT_DIR / "stylesheet.css").read_text(encoding="utf-8")
+        notch_rule = re.search(r"(?:^|\n)\.bytey-island-notch\s*\{([^}]*)\}", css_text)
+        self.assertIsNotNone(notch_rule)
+        notch_body = notch_rule.group(1)  # type: ignore[union-attr]
+        self.assertIn("background-color: transparent;", notch_body)
+        self.assertIn("border-radius: 0px;", notch_body)
+        self.assertIn("box-shadow: none;", notch_body)
+
+        notch_hover = re.search(r"\.bytey-island-notch:hover\s*\{([^}]*)\}", css_text)
+        self.assertIsNotNone(notch_hover)
+        self.assertIn("box-shadow: none;", notch_hover.group(1))  # type: ignore[union-attr]
+
+        state_override_match = re.search(
+            r"([^{}]*\.bytey-island-notch\.bytey-island-listening[^{}]*)\{([^}]*)\}",
+            css_text,
+        )
+        self.assertIsNotNone(state_override_match)
+        state_selectors = state_override_match.group(1)  # type: ignore[union-attr]
+        state_body = state_override_match.group(2)  # type: ignore[union-attr]
+        for cls_name in (
+            "listening",
+            "thinking",
+            "tool",
+            "speaking",
+            "error",
+            "dragging",
         ):
-            self.assertNotIn(forbidden_import, prefs_js)
+            self.assertIn(f".bytey-island-notch.bytey-island-{cls_name}", state_selectors)
+        self.assertIn("box-shadow: none;", state_body)
+
+        menu_js = (GNOME_EXT_DIR / "contextMenu.js").read_text(encoding="utf-8")
+        self.assertIn("this._floatingItem.setSensitive(!isNotch);", menu_js)
+        sync_cfg_method = self._extract_js_method(menu_js, "syncFromConfig(config) {")
+
+        ext_js = (GNOME_EXT_DIR / "extension.js").read_text(encoding="utf-8")
+        toggle_floating_method = self._extract_js_method(ext_js, "_toggleFloatingMode(floating) {")
+        enable_body = self._extract_js_method(ext_js, "enable() {")
+        disable_body = self._extract_js_method(ext_js, "disable() {")
+        self.assertIn("global.display.connect('workareas-changed'", enable_body)
+        self.assertIn("global.display.disconnect(this._workareasChangedId)", disable_body)
+
+        guard_node = """
+const assert = require('assert');
+const [syncMethod, toggleMethod] = process.argv.slice(1);
+const {syncFromConfig, _toggleFloatingMode} = new Function(
+    `return ({ ${syncMethod}, ${toggleMethod} });`
+)();
+
+const makeItem = () => ({toggled: false, sensitive: true, setToggleState(v) { this.toggled = v; }, setSensitive(v) { this.sensitive = v; }});
+const menu = {
+    _destroyed: false,
+    _syncing: false,
+    _micMuteItem: makeItem(),
+    _ttsMuteItem: makeItem(),
+    _floatingItem: makeItem(),
+    syncFromConfig,
+};
+menu.syncFromConfig({visuals: {position_mode: 'notch'}});
+assert.strictEqual(menu._floatingItem.toggled, false);
+assert.strictEqual(menu._floatingItem.sensitive, false);
+
+menu.syncFromConfig({visuals: {position_mode: 'floating'}});
+assert.strictEqual(menu._floatingItem.toggled, true);
+assert.strictEqual(menu._floatingItem.sensitive, true);
+
+menu.syncFromConfig({visuals: {position_mode: 'fixed'}});
+assert.strictEqual(menu._floatingItem.toggled, false);
+assert.strictEqual(menu._floatingItem.sensitive, true);
+
+const patches = [];
+const ext = {
+    _config: {visuals: {position_mode: 'notch'}},
+    _islandWidget: {getBounds: () => ({x: 100, y: 200})},
+    _patchConfig(p) { patches.push(p); return Promise.resolve(); },
+    _toggleFloatingMode,
+};
+ext._toggleFloatingMode(true);
+assert.strictEqual(patches.length, 0);
+
+ext._config.visuals.position_mode = 'fixed';
+ext._toggleFloatingMode(true);
+assert.deepStrictEqual(patches, [{visuals: {position_mode: 'floating', float_x: 100, float_y: 200}}]);
+"""
+        self._run_node_script(
+            guard_node,
+            sync_cfg_method,
+            toggle_floating_method,
+            failure_context="node contextMenu/extension notch guard test failed",
+        )
+
+    def test_prefs_and_window_placement_order_and_mode_controls(self) -> None:
+        prefs_js = (GNOME_EXT_DIR / "prefs.js").read_text(encoding="utf-8")
+        window_py = (SETTINGS_UI_DIR / "bytey_settings" / "window.py").read_text(encoding="utf-8")
+
+        self._assert_prefs_ego_constraints(prefs_js)
+
+        self.assertIn("makeComboRow('Mode',", prefs_js)
+        self.assertNotIn("'Position Mode'", prefs_js)
+        self.assertIn('"Mode"', window_py)
+        self.assertNotIn('"Position Mode"', window_py)
+
+        self.assertEqual(
+            SETTINGS_POSITION_MODE_OPTIONS,
+            (("Fixed", "fixed"), ("Floating", "floating"), ("Notch", "notch")),
+        )
+
+        # Island Placement appears before Eye Animations / Colors / Chat Drawer in prefs.js
+        self.assertLess(
+            prefs_js.index("title: 'Island Placement'"),
+            prefs_js.index("title: 'Eye Animations'"),
+        )
+        self.assertLess(
+            prefs_js.index("title: 'Eye Animations'"),
+            prefs_js.index("title: 'Colors'"),
+        )
+        self.assertLess(
+            prefs_js.index("title: 'Colors'"),
+            prefs_js.index("title: 'Chat Drawer'"),
+        )
+        self.assertLess(
+            prefs_js.index("visualsPage.add(placementGroup);"),
+            prefs_js.index("visualsPage.add(eyesGroup);"),
+        )
+        self.assertLess(
+            prefs_js.index("visualsPage.add(eyesGroup);"),
+            prefs_js.index("visualsPage.add(colorsGroup);"),
+        )
+        self.assertLess(
+            prefs_js.index("visualsPage.add(colorsGroup);"),
+            prefs_js.index("visualsPage.add(drawerGroup);"),
+        )
+
+        # Island Placement appears before Eye Animations / Colors / Chat Window & Density in window.py
+        self.assertLess(
+            window_py.index('title="Island Placement"'),
+            window_py.index('title="Eye Animations"'),
+        )
+        self.assertLess(
+            window_py.index('title="Eye Animations"'),
+            window_py.index('title="Colors"'),
+        )
+        self.assertLess(
+            window_py.index('title="Colors"'),
+            window_py.index('title="Chat Window & Density"'),
+        )
+        self.assertLess(
+            window_py.index("page.add(pos_group)"),
+            window_py.index("page.add(eye_group)"),
+        )
+        self.assertLess(
+            window_py.index("page.add(eye_group)"),
+            window_py.index("page.add(colors_group)"),
+        )
+        self.assertLess(
+            window_py.index("page.add(colors_group)"),
+            window_py.index("page.add(chat_group)"),
+        )
+
+        # Verify window.py _sync_position_groups disables both fixed_group and floating_group in notch mode
+        class _DummyGroup:
+            def __init__(self) -> None:
+                self.sensitive = True
+
+            def set_sensitive(self, val: bool) -> None:
+                self.sensitive = val
+
+        dummy_win = SimpleNamespace(fixed_group=_DummyGroup(), floating_group=_DummyGroup())
+        ByteyPreferencesWindow._sync_position_groups(dummy_win, "fixed")  # type: ignore[arg-type]
+        self.assertTrue(dummy_win.fixed_group.sensitive)
+        self.assertFalse(dummy_win.floating_group.sensitive)
+
+        ByteyPreferencesWindow._sync_position_groups(dummy_win, "floating")  # type: ignore[arg-type]
+        self.assertFalse(dummy_win.fixed_group.sensitive)
+        self.assertTrue(dummy_win.floating_group.sensitive)
+
+        ByteyPreferencesWindow._sync_position_groups(dummy_win, "notch")  # type: ignore[arg-type]
+        self.assertFalse(dummy_win.fixed_group.sensitive)
+        self.assertFalse(dummy_win.floating_group.sensitive)
+
+        # Extract prefs.js mode helpers and syncPlacementSensitivity
+        opts_match = re.search(
+            r"const\s+POSITION_MODE_OPTIONS\s*=\s*\[[\s\S]*?\];",
+            prefs_js,
+        )
+        self.assertIsNotNone(opts_match)
+        val_for_idx_fn = self._extract_js_method(
+            prefs_js, "function positionModeValueForIndex(idx) {"
+        )
+        idx_for_val_fn = self._extract_js_method(
+            prefs_js, "function positionModeIndexForValue(mode) {"
+        )
+        sync_placement_fn = self._extract_js_method(
+            prefs_js, "const syncPlacementSensitivity = () => {"
+        )
+
+        prefs_mode_node = """
+const assert = require('assert');
+const [optsDecl, valFn, idxFn, syncDecl] = process.argv.slice(1);
+const makeCtrl = () => ({sensitive: true, set_sensitive(v) { this.sensitive = v; }});
+const posModeRow = {selected: 0, get_selected() { return this.selected; }};
+const fixedAlignRow = makeCtrl();
+const offsetXRow = makeCtrl();
+const offsetYRow = makeCtrl();
+const floatXRow = makeCtrl();
+const floatYRow = makeCtrl();
+
+const {
+    POSITION_MODE_OPTIONS,
+    positionModeValueForIndex,
+    positionModeIndexForValue,
+    syncPlacementSensitivity,
+} = new Function(
+    'posModeRow', 'fixedAlignRow', 'offsetXRow', 'offsetYRow', 'floatXRow', 'floatYRow',
+    `${optsDecl}\n${valFn}\n${idxFn}\n${syncDecl}\n` +
+    `return {POSITION_MODE_OPTIONS, positionModeValueForIndex, positionModeIndexForValue, syncPlacementSensitivity};`
+)(posModeRow, fixedAlignRow, offsetXRow, offsetYRow, floatXRow, floatYRow);
+
+assert.deepStrictEqual(POSITION_MODE_OPTIONS, [
+    {label: 'Fixed', value: 'fixed'},
+    {label: 'Floating', value: 'floating'},
+    {label: 'Notch', value: 'notch'},
+]);
+assert.strictEqual(positionModeValueForIndex(0), 'fixed');
+assert.strictEqual(positionModeValueForIndex(1), 'floating');
+assert.strictEqual(positionModeValueForIndex(2), 'notch');
+assert.strictEqual(positionModeValueForIndex(99), 'fixed');
+
+assert.strictEqual(positionModeIndexForValue('fixed'), 0);
+assert.strictEqual(positionModeIndexForValue('floating'), 1);
+assert.strictEqual(positionModeIndexForValue('notch'), 2);
+assert.strictEqual(positionModeIndexForValue('Notch'), 2);
+assert.strictEqual(positionModeIndexForValue('invalid'), 0);
+
+posModeRow.selected = 0;
+syncPlacementSensitivity();
+assert.strictEqual(fixedAlignRow.sensitive, true);
+assert.strictEqual(offsetXRow.sensitive, true);
+assert.strictEqual(offsetYRow.sensitive, true);
+assert.strictEqual(floatXRow.sensitive, false);
+assert.strictEqual(floatYRow.sensitive, false);
+
+posModeRow.selected = 1;
+syncPlacementSensitivity();
+assert.strictEqual(fixedAlignRow.sensitive, false);
+assert.strictEqual(offsetXRow.sensitive, false);
+assert.strictEqual(offsetYRow.sensitive, false);
+assert.strictEqual(floatXRow.sensitive, true);
+assert.strictEqual(floatYRow.sensitive, true);
+
+posModeRow.selected = 2;
+syncPlacementSensitivity();
+assert.strictEqual(fixedAlignRow.sensitive, false);
+assert.strictEqual(offsetXRow.sensitive, false);
+assert.strictEqual(offsetYRow.sensitive, false);
+assert.strictEqual(floatXRow.sensitive, false);
+assert.strictEqual(floatYRow.sensitive, false);
+"""
+        self._run_node_script(
+            prefs_mode_node,
+            opts_match.group(0),  # type: ignore[union-attr]
+            val_for_idx_fn,
+            idx_for_val_fn,
+            sync_placement_fn,
+            failure_context="node prefs.js mode options and sensitivity test failed",
+        )
+
+    def test_context_size_presets_clamping_and_ui_placement(self) -> None:
+        # Python settings-ui presets & clamping
+        self.assertEqual(
+            [v for _, v in build_context_size_presets(262144)],
+            [None, 4096, 8192, 16384, 32768, 65536, 131072, 262144],
+        )
+        presets_128k = build_context_size_presets(128000)
+        vals_128k = [v for _, v in presets_128k]
+        self.assertEqual(vals_128k, [None, 4096, 8192, 16384, 32768, 65536])
+        self.assertLessEqual(max(v for v in vals_128k if v is not None), 128000)
+
+        presets_8k = build_context_size_presets(8192)
+        self.assertEqual([v for _, v in presets_8k], [None, 4096, 8192])
+        self.assertEqual(
+            [v for _, v in build_context_size_presets(2048)],
+            [None, 512, 1024, 2048],
+        )
+        self.assertEqual(
+            [v for _, v in build_context_size_presets(None)],
+            [None, 4096, 8192, 16384, 32768, 65536, 131072],
+        )
+        self.assertEqual(clamp_context_size(65536, presets_8k), 8192)
+        self.assertEqual(clamp_context_size(4096, presets_8k), 4096)
+        self.assertIsNone(clamp_context_size(None, presets_8k))
+
+        prefs_js = (GNOME_EXT_DIR / "prefs.js").read_text(encoding="utf-8")
+        window_py = (SETTINGS_UI_DIR / "bytey_settings" / "window.py").read_text(encoding="utf-8")
+        self._assert_prefs_ego_constraints(prefs_js)
+
+        # Structural placement: Context Size strictly below Model and strictly above Tools Support
+        self.assertLess(
+            prefs_js.index("title: 'Model'"),
+            prefs_js.index("title: 'Context Size'"),
+        )
+        self.assertLess(
+            prefs_js.index("title: 'Context Size'"),
+            prefs_js.index("title: 'Tools Support'"),
+        )
+        self.assertLess(
+            prefs_js.index("aiGroup.add(modelRow);"),
+            prefs_js.index("aiGroup.add(contextSizeRow);"),
+        )
+        self.assertLess(
+            prefs_js.index("aiGroup.add(contextSizeRow);"),
+            prefs_js.index("aiGroup.add(toolsStatusRow);"),
+        )
+
+        self.assertLess(
+            window_py.index('title="Active Model"'),
+            window_py.index('"Context Size"'),
+        )
+        self.assertLess(
+            window_py.index('"Context Size"'),
+            window_py.index('title="Tools Support"'),
+        )
+        self.assertLess(
+            window_py.index("ai_group.add(self.model_entry_row)"),
+            window_py.index("ai_group.add(self.context_size_row)"),
+        )
+        self.assertLess(
+            window_py.index("ai_group.add(self.context_size_row)"),
+            window_py.index("ai_group.add(self.tools_status_row)"),
+        )
+
+        fallback_decl = re.search(
+            r"const\s+DEFAULT_CONTEXT_FALLBACK_MAX\s*=\s*[^;]+;",
+            prefs_js,
+        )
+        self.assertIsNotNone(fallback_decl)
+        fmt_commas_fn = self._extract_js_method(prefs_js, "function formatNumberCommas(n) {")
+        fmt_tokens_fn = self._extract_js_method(
+            prefs_js, "function formatContextTokens(tokens) {"
+        )
+        norm_int_fn = self._extract_js_method(prefs_js, "function normalizePositiveInt(value) {")
+        build_ctx_fn = self._extract_js_method(
+            prefs_js, "function buildContextPresets(maxContext, currentValue = null) {"
+        )
+        clamp_ctx_fn = self._extract_js_method(
+            prefs_js, "function clampContextValue(value, presets) {"
+        )
+
+        prefs_ctx_node = """
+const assert = require('assert');
+const [fallbackDecl, fmtCommas, fmtTokens, normInt, buildFn, clampFn] = process.argv.slice(1);
+const {buildContextPresets, clampContextValue} = new Function(
+    `${fallbackDecl}\n${fmtCommas}\n${fmtTokens}\n${normInt}\n${buildFn}\n${clampFn}\n` +
+    `return {buildContextPresets, clampContextValue};`
+)();
+
+assert.deepStrictEqual(
+    buildContextPresets(262144).map(o => o.value),
+    [null, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
+);
+const presets128k = buildContextPresets(128000);
+const vals128k = presets128k.map(o => o.value);
+assert.deepStrictEqual(vals128k, [null, 4096, 8192, 16384, 32768, 65536]);
+assert.ok(Math.max(...vals128k.filter(v => v !== null)) <= 128000);
+
+const presets8k = buildContextPresets(8192);
+assert.deepStrictEqual(presets8k.map(o => o.value), [null, 4096, 8192]);
+assert.deepStrictEqual(buildContextPresets(2048).map(o => o.value), [null, 2048]);
+assert.deepStrictEqual(
+    buildContextPresets(null).map(o => o.value),
+    [null, 4096, 8192, 16384, 32768, 65536, 131072]
+);
+assert.strictEqual(clampContextValue(65536, presets8k), 8192);
+assert.strictEqual(clampContextValue(4096, presets8k), 4096);
+assert.strictEqual(clampContextValue(null, presets8k), null);
+"""
+        self._run_node_script(
+            prefs_ctx_node,
+            fallback_decl.group(0),  # type: ignore[union-attr]
+            fmt_commas_fn,
+            fmt_tokens_fn,
+            norm_int_fn,
+            build_ctx_fn,
+            clamp_ctx_fn,
+            failure_context="node prefs.js buildContextPresets/clampContextValue test failed",
+        )
 
 
 class TestSTTBackendPrecedence(unittest.IsolatedAsyncioTestCase):

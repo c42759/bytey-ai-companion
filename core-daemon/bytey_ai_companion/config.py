@@ -39,6 +39,7 @@ _VISUAL_COLOR_DEFAULTS: dict[str, str] = {
     "background_color": DEFAULT_BG_COLOR,
     "border_color": DEFAULT_BORDER_COLOR,
 }
+VALID_POSITION_MODES: tuple[str, ...] = ("fixed", "floating", "notch")
 
 
 def _normalize_hex_color(value: Any, default: str) -> str:
@@ -171,6 +172,15 @@ class VisualsConfig(BaseModel):
     eye_color: str = DEFAULT_EYE_COLOR
     background_color: str = DEFAULT_BG_COLOR
     border_color: str = DEFAULT_BORDER_COLOR
+
+    @field_validator("position_mode", mode="before")
+    @classmethod
+    def _validate_position_mode(cls, value: Any) -> str:
+        """Normalize position_mode to a supported mode or fall back to 'fixed'."""
+        if value is None:
+            return "fixed"
+        normalized = str(value).strip().lower()
+        return normalized if normalized in VALID_POSITION_MODES else "fixed"
 
     @field_validator("eye_color", "background_color", "border_color", mode="before")
     @classmethod
