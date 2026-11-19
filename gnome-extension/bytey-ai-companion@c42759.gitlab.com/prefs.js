@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Adw from 'gi://Adw';
+import Gdk from 'gi://Gdk';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
@@ -8,6 +9,9 @@ import Soup from 'gi://Soup?version=3.0';
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 const DEFAULT_DAEMON_URL = 'http://127.0.0.1:8765';
+const DEFAULT_EYE_COLOR = '#F7FAFF';
+const DEFAULT_BG_COLOR = '#0A0A0C';
+const DEFAULT_BORDER_COLOR = '#2A2C34';
 const ANIMATION_MODES = ['full', 'state_only', 'disabled'];
 const CHAT_DENSITIES = ['compact', 'comfortable', 'spacious'];
 const POSITION_MODES = ['fixed', 'floating'];
@@ -74,6 +78,47 @@ function makeSpinRow(title, min, max, step) {
             value: min,
         }),
     });
+}
+
+function parseHexChannels(hexStr) {
+    if (typeof hexStr !== 'string')
+        return null;
+    const cleaned = hexStr.trim();
+    if (!cleaned.startsWith('#'))
+        return null;
+    let raw = cleaned.slice(1);
+    if (!/^[0-9a-fA-F]+$/.test(raw))
+        return null;
+    if (raw.length === 3)
+        raw = `${raw[0]}${raw[0]}${raw[1]}${raw[1]}${raw[2]}${raw[2]}FF`;
+    else if (raw.length === 6)
+        raw = `${raw}FF`;
+    else if (raw.length !== 8)
+        return null;
+    return [
+        parseInt(raw.slice(0, 2), 16) / 255.0,
+        parseInt(raw.slice(2, 4), 16) / 255.0,
+        parseInt(raw.slice(4, 6), 16) / 255.0,
+        parseInt(raw.slice(6, 8), 16) / 255.0,
+    ];
+}
+
+function hexToRgba(hexStr, fallback = '#FFFFFFFF') {
+    const channels = parseHexChannels(hexStr) ?? parseHexChannels(fallback) ?? [1.0, 1.0, 1.0, 1.0];
+    const [red, green, blue, alpha] = channels;
+    return new Gdk.RGBA({red, green, blue, alpha});
+}
+
+function rgbaToHex(rgba) {
+    const toByte = val => Math.max(0, Math.min(255, Math.round(val * 255)));
+    const hexByte = n => n.toString(16).padStart(2, '0').toUpperCase();
+    const r = toByte(rgba.red);
+    const g = toByte(rgba.green);
+    const b = toByte(rgba.blue);
+    const a = toByte(rgba.alpha);
+    if (a >= 255)
+        return `#${hexByte(r)}${hexByte(g)}${hexByte(b)}`;
+    return `#${hexByte(r)}${hexByte(g)}${hexByte(b)}${hexByte(a)}`;
 }
 
 /**
@@ -251,6 +296,42 @@ export default class ByteyPreferences extends ExtensionPreferences {
         eyesGroup.add(cursorTrackRow);
         visualsPage.add(eyesGroup);
 
+        const colorControls = {};
+        const makeColorRow = (title, fieldKey, defaultHex) => {
+            const row = new Adw.ActionRow({
+                title,
+                subtitle: defaultHex,
+            });
+            const btn = new Gtk.ColorDialogButton({
+                dialog: new Gtk.ColorDialog({with_alpha: true}),
+                valign: Gtk.Align.CENTER,
+            });
+            btn.set_rgba(hexToRgba(defaultHex, defaultHex));
+            btn.connect('notify::rgba', () => onUserChange(() => {
+                const hexVal = rgbaToHex(btn.get_rgba());
+                row.set_subtitle(hexVal);
+                patchConfig({visuals: {[fieldKey]: hexVal}}, `Saved ${title.toLowerCase()}`);
+            }));
+            row.add_suffix(btn);
+            colorControls[fieldKey] = {row, btn, defaultHex};
+            return row;
+        };
+
+        const colorsGroup = new Adw.PreferencesGroup({
+            title: 'Colors',
+            description: 'Customize eye, island background, and border colors.',
+        });
+        const resetColorsBtn = new Gtk.Button({
+            label: 'Reset Defaults',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        colorsGroup.set_header_suffix(resetColorsBtn);
+        colorsGroup.add(makeColorRow('Eye Color', 'eye_color', DEFAULT_EYE_COLOR));
+        colorsGroup.add(makeColorRow('Background Color', 'background_color', DEFAULT_BG_COLOR));
+        colorsGroup.add(makeColorRow('Border Color', 'border_color', DEFAULT_BORDER_COLOR));
+        visualsPage.add(colorsGroup);
+
         const drawerGroup = new Adw.PreferencesGroup({title: 'Chat Drawer'});
         const densityRow = makeComboRow('Chat Density', CHAT_DENSITIES);
         const chatWidthRow = makeSpinRow('Chat Width (px)', 260, 900, 10);
@@ -349,6 +430,12 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
                 setComboText(animModeRow, visuals.animation_mode ?? 'full');
                 cursorTrackRow.set_active(Boolean(visuals.cursor_tracking ?? true));
+                for (const [key, {row, btn, defaultHex}] of Object.entries(colorControls)) {
+                    const rawVal = visuals[key] ?? defaultHex;
+                    const rgba = hexToRgba(String(rawVal), defaultHex);
+                    btn.set_rgba(rgba);
+                    row.set_subtitle(rgbaToHex(rgba));
+                }
 
                 setComboText(densityRow, visuals.chat_density ?? 'comfortable');
                 chatWidthRow.set_value(Number(visuals.chat_width ?? 380));
@@ -492,6 +579,28 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         cursorTrackRow.connect('notify::active', () => onUserChange(() => {
             patchConfig({visuals: {cursor_tracking: cursorTrackRow.get_active()}}, 'Saved cursor tracking');
+        }));
+
+        resetColorsBtn.connect('clicked', () => onUserChange(() => {
+            loading = true;
+            try {
+                for (const {row, btn, defaultHex} of Object.values(colorControls)) {
+                    btn.set_rgba(hexToRgba(defaultHex, defaultHex));
+                    row.set_subtitle(defaultHex);
+                }
+            } finally {
+                loading = false;
+            }
+            patchConfig(
+                {
+                    visuals: {
+                        eye_color: DEFAULT_EYE_COLOR,
+                        background_color: DEFAULT_BG_COLOR,
+                        border_color: DEFAULT_BORDER_COLOR,
+                    },
+                },
+                'Reset colors to defaults'
+            );
         }));
 
         densityRow.connect('notify::selected', () => onUserChange(() => {

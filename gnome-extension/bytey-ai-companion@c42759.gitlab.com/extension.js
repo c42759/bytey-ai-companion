@@ -193,6 +193,7 @@ export default class ByteyExtension extends Extension {
         this._wsUrl = null;
         this._wsSignalIds = [];
         this._exitedByUser = false;
+        this._wsHadError = false;
         this._wsBackoffMs = WS_BACKOFF_MIN_MS;
     }
 

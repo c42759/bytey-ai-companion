@@ -504,7 +504,7 @@ export class IslandWidget {
 
     _stopRainbowTimer() {
         if (this._rainbowTimerId) {
-            GLib.source_remove(this._rainbowTimerId);
+            GLib.Source.remove(this._rainbowTimerId);
             this._rainbowTimerId = 0;
         }
     }

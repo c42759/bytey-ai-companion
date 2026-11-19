@@ -865,7 +865,6 @@ export class TranscriptDrawer {
         this._scrollView = null;
         this._entry = null;
         this._providerLabel = null;
-        this._statusLabel = null;
         this._densityBtn = null;
         this._closeIcon = null;
         this._micBtn = null;
