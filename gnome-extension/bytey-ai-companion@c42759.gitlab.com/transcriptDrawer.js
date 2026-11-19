@@ -25,6 +25,12 @@ const DENSITY_ICON_SIZES = {
     comfortable: {close: 14, mic: 15, replay: 13},
     spacious: {close: 16, mic: 17, replay: 15},
 };
+const DENSITY_ENTRY_METRICS = {
+    compact: {minHeight: 28, lineHeight: 16},
+    comfortable: {minHeight: 34, lineHeight: 18},
+    spacious: {minHeight: 40, lineHeight: 20},
+};
+const ENTRY_MAX_LINES = 5;
 
 const CONNECTION_STATES = ['connected', 'error', 'disconnected'];
 const CONNECTION_STATUS_LABELS = {
@@ -251,33 +257,71 @@ export class TranscriptDrawer {
             can_focus: true,
             reactive: true,
             x_expand: true,
-            y_align: Clutter.ActorAlign.CENTER,
         });
+        this._entry.clutter_text.set_single_line_mode(false);
+        this._entry.clutter_text.set_line_wrap(true);
+        this._entry.clutter_text.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR);
 
-        this._connect(this._entry, 'button-press-event', () => {
+        this._entryScroll = new St.ScrollView({
+            style_class: 'bytey-entry-scroll',
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.NEVER,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.END,
+        });
+        const entryBox = new St.BoxLayout({
+            vertical: true,
+            x_expand: true,
+        });
+        entryBox.add_child(this._entry);
+        this._entryScroll.set_child(entryBox);
+
+        this._connect(this._entryScroll, 'button-press-event', () => {
             this._entry.clutter_text.grab_key_focus();
             return Clutter.EVENT_PROPAGATE;
         });
 
-        this._connect(this._entry.clutter_text, 'activate', () => {
-            this._submitEntry();
+        this._connect(this._entry.clutter_text, 'key-focus-in', () => {
+            this._entryScroll?.add_style_pseudo_class('focus');
+        });
+        this._connect(this._entry.clutter_text, 'key-focus-out', () => {
+            this._entryScroll?.remove_style_pseudo_class('focus');
+        });
+
+        this._connect(this._entry.clutter_text, 'text-changed', () => {
+            this._syncEntryHeight();
         });
 
         this._connect(this._entry.clutter_text, 'key-press-event', (_actor, event) => {
-            if (event.get_key_symbol() === Clutter.KEY_Escape) {
+            const sym = event.get_key_symbol();
+            if (sym === Clutter.KEY_Escape) {
                 this.close();
+                return Clutter.EVENT_STOP;
+            }
+            if (sym === Clutter.KEY_Return || sym === Clutter.KEY_KP_Enter) {
+                if (event.get_state() & Clutter.ModifierType.SHIFT_MASK) {
+                    const ct = this._entry.clutter_text;
+                    ct.delete_selection();
+                    ct.insert_unichar(0x0A);
+                    return Clutter.EVENT_STOP;
+                }
+                this._submitEntry();
                 return Clutter.EVENT_STOP;
             }
             return Clutter.EVENT_PROPAGATE;
         });
 
-        footer.add_child(this._entry);
+        footer.add_child(this._entryScroll);
 
+        this._sendIcon = new St.Icon({
+            icon_name: 'mail-send-symbolic',
+            icon_size: DENSITY_ICON_SIZES[this._density].mic,
+        });
         const sendBtn = new St.Button({
             style_class: 'bytey-send-btn',
-            label: 'Send',
             can_focus: true,
-            y_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.END,
+            child: this._sendIcon,
         });
         this._connect(sendBtn, 'clicked', () => this._submitEntry());
         footer.add_child(sendBtn);
@@ -289,7 +333,7 @@ export class TranscriptDrawer {
         this._micBtn = new St.Button({
             style_class: 'bytey-mic-btn',
             can_focus: true,
-            y_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.END,
             child: this._micIcon,
         });
         this._connect(this._micBtn, 'clicked', () => {
@@ -317,6 +361,25 @@ export class TranscriptDrawer {
         footer.add_child(this._resizeHandle);
 
         this._container.add_child(footer);
+        this._syncEntryHeight();
+    }
+
+    _syncEntryHeight() {
+        if (this._destroyed || !this._entry || !this._entryScroll)
+            return;
+        const metrics = DENSITY_ENTRY_METRICS[this._density] ?? DENSITY_ENTRY_METRICS.comfortable;
+        const minH = metrics.minHeight;
+        const maxH = minH + (ENTRY_MAX_LINES - 1) * metrics.lineHeight;
+        const scrollW = this._entryScroll.width;
+        const availW = scrollW > 20
+            ? scrollW - 4
+            : Math.max(120, (this._drawerWidth || DRAWER_WIDTH_FALLBACK) - 130);
+        const [, natH] = this._entry.get_preferred_height(availW);
+        const targetH = Math.min(maxH, Math.max(minH, Math.ceil(natH)));
+        this._entryScroll.height = targetH;
+        this._entryScroll.vscrollbar_policy = natH > maxH
+            ? St.PolicyType.AUTOMATIC
+            : St.PolicyType.NEVER;
     }
 
     _submitEntry() {
@@ -324,6 +387,7 @@ export class TranscriptDrawer {
         if (!text)
             return;
         this._entry.text = '';
+        this._syncEntryHeight();
         this._callbacks.onSendText?.(text);
     }
 
@@ -487,8 +551,11 @@ export class TranscriptDrawer {
         const sizes = DENSITY_ICON_SIZES[density] ?? DENSITY_ICON_SIZES.comfortable;
         if (this._closeIcon)
             this._closeIcon.icon_size = sizes.close;
+        if (this._sendIcon)
+            this._sendIcon.icon_size = sizes.mic;
         if (this._micIcon)
             this._micIcon.icon_size = sizes.mic;
+        this._syncEntryHeight();
         for (const rec of this._messageWidgets.values()) {
             if (rec.replayIcon)
                 rec.replayIcon.icon_size = sizes.replay;
@@ -864,6 +931,8 @@ export class TranscriptDrawer {
         this._messagesBox = null;
         this._scrollView = null;
         this._entry = null;
+        this._entryScroll = null;
+        this._sendIcon = null;
         this._providerLabel = null;
         this._densityBtn = null;
         this._closeIcon = null;

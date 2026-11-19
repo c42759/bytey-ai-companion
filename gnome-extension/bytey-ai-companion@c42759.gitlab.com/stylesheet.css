@@ -396,20 +396,25 @@
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.bytey-entry {
+.bytey-entry-scroll {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 10px;
-  height: 34px;
-  padding: 0 10px;
+  min-height: 34px;
+}
+
+.bytey-entry-scroll:focus {
+  border-color: rgba(56, 189, 248, 0.65);
+  background-color: rgba(255, 255, 255, 0.11);
+}
+
+.bytey-entry {
+  background-color: transparent;
+  border: none;
+  padding: 6px 10px;
   color: #ffffff;
   caret-color: #38bdf8;
   font-size: 9.5pt;
-}
-
-.bytey-entry:focus {
-  border-color: rgba(56, 189, 248, 0.65);
-  background-color: rgba(255, 255, 255, 0.11);
 }
 
 .bytey-send-btn,
@@ -417,22 +422,16 @@
   background-color: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 10px;
+  width: 34px;
   height: 34px;
-  padding: 0 12px;
+  padding: 0;
   color: #f8fafc;
-  font-size: 9.5pt;
-  font-weight: 600;
   transition: 120ms ease;
 }
 
 .bytey-send-btn:hover,
 .bytey-mic-btn:hover {
   background-color: rgba(255, 255, 255, 0.18);
-}
-
-.bytey-mic-btn {
-  width: 34px;
-  padding: 0;
 }
 
 .bytey-mic-btn-active {
@@ -540,17 +539,22 @@
   padding-top: 5px;
 }
 
-.bytey-density-compact .bytey-entry,
-.bytey-density-compact .bytey-send-btn,
-.bytey-density-compact .bytey-mic-btn {
-  height: 28px;
+.bytey-density-compact .bytey-entry-scroll {
+  min-height: 28px;
   border-radius: 8px;
+}
+
+.bytey-density-compact .bytey-entry {
+  padding: 4px 8px;
   font-size: 8.5pt;
 }
 
+.bytey-density-compact .bytey-send-btn,
 .bytey-density-compact .bytey-mic-btn {
   width: 28px;
+  height: 28px;
   padding: 0;
+  border-radius: 8px;
 }
 
 .bytey-density-spacious {
@@ -635,17 +639,22 @@
   padding-top: 10px;
 }
 
-.bytey-density-spacious .bytey-entry,
-.bytey-density-spacious .bytey-send-btn,
-.bytey-density-spacious .bytey-mic-btn {
-  height: 40px;
+.bytey-density-spacious .bytey-entry-scroll {
+  min-height: 40px;
   border-radius: 12px;
+}
+
+.bytey-density-spacious .bytey-entry {
+  padding: 8px 12px;
   font-size: 10.5pt;
 }
 
+.bytey-density-spacious .bytey-send-btn,
 .bytey-density-spacious .bytey-mic-btn {
   width: 40px;
+  height: 40px;
   padding: 0;
+  border-radius: 12px;
 }
 
 /* Right-Click Context Menu */
