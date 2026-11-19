@@ -33,6 +33,11 @@ const FIXED_ALIGNMENTS = [
 const STT_BACKENDS = ['local_whisper', 'openai_whisper', 'custom_whisper'];
 const TTS_PROVIDERS = ['kokoro', 'piper', 'elevenlabs', 'disabled'];
 const DEFAULT_PIPER_MODEL = 'en_US-lessac-medium';
+const DEFAULT_ELEVENLABS_VOICES = [
+    {id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George (premade)'},
+    {id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel (premade)'},
+    {id: 'pNInz6obpgDQGcFmaJgB', name: 'Adam (premade)'},
+];
 const PIPER_VOICE_PRESETS = [
     {id: 'normal', label: 'Normal', speed: 1.0, pitch: 0.0, noise_scale: 0.667},
     {id: 'chipmunk', label: 'Chipmunk', speed: 1.25, pitch: 8.0, noise_scale: 0.8},
@@ -777,6 +782,28 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
         const {row: kokoroApiKeyRow, badge: kokoroApiKeyBadge} = makeSecretRow('Kokoro API Key');
         const {row: elevenlabsApiKeyRow, badge: elevenlabsApiKeyBadge} = makeSecretRow('ElevenLabs API Key');
+        const elevenlabsVoiceRow = new Adw.ComboRow({
+            title: 'ElevenLabs Voice',
+            subtitle: 'Select a voice or refresh from your ElevenLabs account',
+            enable_search: true,
+            model: Gtk.StringList.new(DEFAULT_ELEVENLABS_VOICES.map(v => `${v.name} — ${v.id}`)),
+        });
+        const elevenlabsRefreshBtn = new Gtk.Button({
+            icon_name: 'view-refresh-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: 'Refresh ElevenLabs voices',
+            css_classes: ['flat'],
+        });
+        elevenlabsVoiceRow.add_suffix(elevenlabsRefreshBtn);
+        const elevenlabsVoiceIdRow = new Adw.EntryRow({
+            title: 'ElevenLabs Voice ID',
+            show_apply_button: true,
+        });
+        const elevenlabsModelRow = new Adw.EntryRow({
+            title: 'ElevenLabs Model ID',
+            show_apply_button: true,
+        });
+        elevenlabsModelRow.set_text('eleven_flash_v2_5');
 
         const piperLangRow = new Adw.ComboRow({
             title: 'Piper Language',
@@ -856,6 +883,9 @@ export default class ByteyPreferences extends ExtensionPreferences {
         ttsGroup.add(kokoroBaseUrlRow);
         ttsGroup.add(kokoroApiKeyRow);
         ttsGroup.add(elevenlabsApiKeyRow);
+        ttsGroup.add(elevenlabsVoiceRow);
+        ttsGroup.add(elevenlabsVoiceIdRow);
+        ttsGroup.add(elevenlabsModelRow);
         ttsGroup.add(piperLangRow);
         ttsGroup.add(piperModelRow);
         ttsGroup.add(piperCustomModelRow);
@@ -1026,7 +1056,11 @@ export default class ByteyPreferences extends ExtensionPreferences {
             const isKokoro = ttsProvider === 'kokoro';
             kokoroBaseUrlRow.set_visible(isKokoro);
             kokoroApiKeyRow.set_visible(isKokoro);
-            elevenlabsApiKeyRow.set_visible(ttsProvider === 'elevenlabs');
+            const isElevenLabs = ttsProvider === 'elevenlabs';
+            elevenlabsApiKeyRow.set_visible(isElevenLabs);
+            elevenlabsVoiceRow.set_visible(isElevenLabs);
+            elevenlabsVoiceIdRow.set_visible(isElevenLabs);
+            elevenlabsModelRow.set_visible(isElevenLabs);
             const isPiper = ttsProvider === 'piper';
             piperLangRow.set_visible(isPiper);
             piperModelRow.set_visible(isPiper);
@@ -1950,6 +1984,11 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 kokoroBaseUrlRow.set_text(String(voiceOut.kokoro_base_url ?? 'http://localhost:8880/v1'));
                 setSecretRowState(kokoroApiKeyRow, kokoroApiKeyBadge, Boolean(secretsConfigured.KOKORO_API_KEY));
                 setSecretRowState(elevenlabsApiKeyRow, elevenlabsApiKeyBadge, Boolean(secretsConfigured.ELEVENLABS_API_KEY));
+                const elVoiceId = String(voiceOut.elevenlabs_voice_id ?? '21m00Tcm4TlvDq8ikWAM').trim();
+                const elModelId = String(voiceOut.elevenlabs_model_id ?? 'eleven_flash_v2_5').trim() || 'eleven_flash_v2_5';
+                elevenlabsVoiceIdRow.set_text(elVoiceId);
+                elevenlabsModelRow.set_text(elModelId);
+                rebuildElevenLabsVoiceCombo(elVoiceId);
 
                 const piperModel = String(voiceOut.piper_model ?? DEFAULT_PIPER_MODEL).trim() || DEFAULT_PIPER_MODEL;
                 const rawPiperSpeed = Number(voiceOut.piper_speed ?? 1.0);
@@ -2447,8 +2486,95 @@ export default class ByteyPreferences extends ExtensionPreferences {
             saveSecret('KOKORO_API_KEY', kokoroApiKeyRow, kokoroApiKeyBadge).catch(() => {});
         }));
 
+        let elevenlabsVoices = [...DEFAULT_ELEVENLABS_VOICES];
+
+        const rebuildElevenLabsVoiceCombo = (selectedId = '') => {
+            const targetId = String(selectedId || elevenlabsVoiceIdRow.get_text() || '').trim();
+            const prevLoading = loading;
+            loading = true;
+            try {
+                const labels = elevenlabsVoices.map(v => `${v.name} — ${v.id}`);
+                elevenlabsVoiceRow.set_model(Gtk.StringList.new(labels.length > 0 ? labels : ['No voices available']));
+                const idx = targetId ? elevenlabsVoices.findIndex(v => v.id === targetId) : -1;
+                if (idx >= 0)
+                    elevenlabsVoiceRow.set_selected(idx);
+            } finally {
+                loading = prevLoading;
+            }
+        };
+
+        const refreshElevenLabsVoices = async ({silent = false} = {}) => {
+            if (destroyed)
+                return;
+            const resp = await httpJson('GET', '/api/v1/tts/voices?provider=elevenlabs');
+            if (destroyed)
+                return;
+            if (!resp.ok || !resp.data || !Array.isArray(resp.data.voices)) {
+                if (!silent)
+                    showToast(resp.data?.detail || resp.data?.error || 'Failed to fetch ElevenLabs voices');
+                return;
+            }
+            const parsed = resp.data.voices
+                .filter(v => v && typeof v === 'object' && String(v.id || v.voice_id || '').trim())
+                .map(v => {
+                    const id = String(v.id || v.voice_id).trim();
+                    const rawName = String(v.name || id).trim();
+                    const category = String(v.category || '').trim();
+                    const name = category && !rawName.includes(`(${category})`) ? `${rawName} (${category})` : rawName;
+                    return {id, name};
+                });
+            if (parsed.length > 0)
+                elevenlabsVoices = parsed;
+            rebuildElevenLabsVoiceCombo();
+            if (!silent)
+                showToast(`Loaded ${parsed.length} ElevenLabs voices`);
+        };
+
         elevenlabsApiKeyRow.connect('apply', () => onUserChange(() => {
-            saveSecret('ELEVENLABS_API_KEY', elevenlabsApiKeyRow, elevenlabsApiKeyBadge).catch(() => {});
+            saveSecret('ELEVENLABS_API_KEY', elevenlabsApiKeyRow, elevenlabsApiKeyBadge)
+                .then(saved => {
+                    if (saved)
+                        refreshElevenLabsVoices({silent: true}).catch(() => {});
+                })
+                .catch(() => {});
+        }));
+
+        elevenlabsRefreshBtn.connect('clicked', () => {
+            refreshElevenLabsVoices({silent: false}).catch(() => {});
+        });
+
+        elevenlabsVoiceRow.connect('notify::selected', () => onUserChange(() => {
+            const idx = elevenlabsVoiceRow.get_selected();
+            const chosen = elevenlabsVoices[idx];
+            if (!chosen)
+                return;
+            const prevLoading = loading;
+            loading = true;
+            try {
+                elevenlabsVoiceIdRow.set_text(chosen.id);
+            } finally {
+                loading = prevLoading;
+            }
+            patchConfig({voice_out: {elevenlabs_voice_id: chosen.id}}, `Saved ElevenLabs voice: ${chosen.name}`);
+        }));
+
+        elevenlabsVoiceIdRow.connect('apply', () => onUserChange(() => {
+            const voiceId = elevenlabsVoiceIdRow.get_text().trim();
+            if (!voiceId) {
+                showToast('Voice ID cannot be empty');
+                return;
+            }
+            rebuildElevenLabsVoiceCombo(voiceId);
+            patchConfig({voice_out: {elevenlabs_voice_id: voiceId}}, `Saved ElevenLabs voice ID: ${voiceId}`);
+        }));
+
+        elevenlabsModelRow.connect('apply', () => onUserChange(() => {
+            const modelId = elevenlabsModelRow.get_text().trim();
+            if (!modelId) {
+                showToast('Model ID cannot be empty');
+                return;
+            }
+            patchConfig({voice_out: {elevenlabs_model_id: modelId}}, `Saved ElevenLabs model: ${modelId}`);
         }));
 
         piperLangRow.connect('notify::selected', () => onUserChange(() => {
