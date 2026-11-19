@@ -29,6 +29,21 @@ const FIXED_ALIGNMENTS = [
 const STT_BACKENDS = ['local_whisper', 'openai_whisper', 'custom_whisper'];
 const TTS_PROVIDERS = ['kokoro', 'elevenlabs', 'disabled'];
 const AI_PROVIDERS = ['ollama', 'gemini', 'openai', 'anthropic', 'custom'];
+const MCP_TRANSPORTS = ['stdio', 'http', 'sse'];
+const SECRET_MASK_PLACEHOLDER = '••••••••••••••••';
+const PROVIDER_SECRET_MAP = {
+    gemini: 'GEMINI_API_KEY',
+    openai: 'OPENAI_API_KEY',
+    anthropic: 'ANTHROPIC_API_KEY',
+    custom: 'CUSTOM_LLM_API_KEY',
+};
+const PROVIDER_DEFAULT_URLS = {
+    ollama: 'http://localhost:11434',
+    gemini: '',
+    openai: 'https://api.openai.com/v1',
+    anthropic: 'https://api.anthropic.com',
+    custom: 'http://localhost:8000/v1',
+};
 
 function normalizeUrl(raw) {
     if (typeof raw !== 'string')
@@ -121,6 +136,70 @@ function rgbaToHex(rgba) {
     return `#${hexByte(r)}${hexByte(g)}${hexByte(b)}${hexByte(a)}`;
 }
 
+function isMaskedPlaceholder(value) {
+    const cleaned = String(value ?? '').trim();
+    return cleaned.length > 0 && (cleaned === SECRET_MASK_PLACEHOLDER || /^[•]+$/.test(cleaned));
+}
+
+function makeSecretRow(title) {
+    const row = new Adw.PasswordEntryRow({
+        title,
+        show_apply_button: true,
+    });
+    const badge = new Gtk.Label({
+        label: 'Not set',
+        valign: Gtk.Align.CENTER,
+        css_classes: ['dim-label', 'caption'],
+    });
+    row.add_suffix(badge);
+    return {row, badge};
+}
+
+function setSecretRowState(row, badge, configured) {
+    if (configured) {
+        badge.set_label('Configured');
+        badge.remove_css_class('dim-label');
+        badge.add_css_class('success');
+        row.set_text(SECRET_MASK_PLACEHOLDER);
+    } else {
+        badge.set_label('Not set');
+        badge.remove_css_class('success');
+        badge.add_css_class('dim-label');
+        row.set_text('');
+    }
+}
+
+function readTextBuffer(view) {
+    const buf = view.get_buffer();
+    const [start, end] = buf.get_bounds();
+    return buf.get_text(start, end, true).trim();
+}
+
+function makeTextViewBox(labelText, view, minHeight = 96) {
+    const box = new Gtk.Box({
+        orientation: Gtk.Orientation.VERTICAL,
+        spacing: 6,
+        margin_top: 6,
+        margin_bottom: 6,
+    });
+    const lbl = new Gtk.Label({
+        label: labelText,
+        xalign: 0,
+        css_classes: ['caption', 'dim-label'],
+    });
+    const scroll = new Gtk.ScrolledWindow({min_content_height: minHeight});
+    scroll.set_child(view);
+    const frame = new Gtk.Frame();
+    frame.set_child(scroll);
+    box.append(lbl);
+    box.append(frame);
+    return box;
+}
+
+function cloneJson(obj) {
+    return JSON.parse(JSON.stringify(obj ?? {}));
+}
+
 /**
  * Libadwaita preferences window for Bytey AI Companion.
  */
@@ -135,6 +214,14 @@ export default class ByteyPreferences extends ExtensionPreferences {
         let destroyed = false;
         let loading = false;
         let settingsChangedId = 0;
+        let secretsConfigured = {};
+        let availableModels = [];
+        let currentConfiguredModel = '';
+        let modelFetchSeq = 0;
+        let detectedToolsSupport = false;
+        const modelToolMap = new Map();
+        let mcpServers = {};
+        let mcpRows = [];
 
         const getDaemonUrl = () => normalizeUrl(settings.get_string('daemon-url')) ?? DEFAULT_DAEMON_URL;
 
@@ -364,34 +451,131 @@ export default class ByteyPreferences extends ExtensionPreferences {
             icon_name: 'audio-input-microphone-symbolic',
         });
 
-        const voiceGroup = new Adw.PreferencesGroup({title: 'Voice Controls'});
+        const sttGroup = new Adw.PreferencesGroup({
+            title: 'STT Controls',
+            description: 'Speech-to-text microphone and transcription backend settings.',
+        });
         const micMuteRow = new Adw.SwitchRow({title: 'Mute Microphone'});
-        const ttsMuteRow = new Adw.SwitchRow({title: 'Mute Voice (TTS)'});
         const sttBackendRow = makeComboRow('STT Backend', STT_BACKENDS);
+        const sttApiUrlRow = new Adw.EntryRow({
+            title: 'STT API URL',
+            show_apply_button: true,
+        });
+        const {row: sttApiKeyRow, badge: sttApiKeyBadge} = makeSecretRow('API Key');
+        sttGroup.add(micMuteRow);
+        sttGroup.add(sttBackendRow);
+        sttGroup.add(sttApiUrlRow);
+        sttGroup.add(sttApiKeyRow);
+        voicePage.add(sttGroup);
+
+        const ttsGroup = new Adw.PreferencesGroup({
+            title: 'TTS Controls',
+            description: 'Text-to-speech playback and provider settings.',
+        });
+        const ttsMuteRow = new Adw.SwitchRow({title: 'Mute Voice (TTS)'});
         const ttsProviderRow = makeComboRow('TTS Provider', TTS_PROVIDERS);
-        voiceGroup.add(micMuteRow);
-        voiceGroup.add(ttsMuteRow);
-        voiceGroup.add(sttBackendRow);
-        voiceGroup.add(ttsProviderRow);
-        voicePage.add(voiceGroup);
+        const kokoroBaseUrlRow = new Adw.EntryRow({
+            title: 'Kokoro Server URL',
+            show_apply_button: true,
+        });
+        const {row: kokoroApiKeyRow, badge: kokoroApiKeyBadge} = makeSecretRow('Kokoro API Key');
+        const {row: elevenlabsApiKeyRow, badge: elevenlabsApiKeyBadge} = makeSecretRow('ElevenLabs API Key');
+        ttsGroup.add(ttsMuteRow);
+        ttsGroup.add(ttsProviderRow);
+        ttsGroup.add(kokoroBaseUrlRow);
+        ttsGroup.add(kokoroApiKeyRow);
+        ttsGroup.add(elevenlabsApiKeyRow);
+        voicePage.add(ttsGroup);
 
         const aiGroup = new Adw.PreferencesGroup({
             title: 'AI Provider',
             description: 'API keys stay securely in your core daemon .env or OS keyring.',
         });
-        const providerRow = makeComboRow('Provider', AI_PROVIDERS);
-        const modelRow = new Adw.EntryRow({
-            title: 'Model',
-            show_apply_button: true,
+        const refreshModelsBtn = new Gtk.Button({
+            icon_name: 'view-refresh-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: 'Refresh available models',
+            css_classes: ['flat'],
         });
+        aiGroup.set_header_suffix(refreshModelsBtn);
+        const providerRow = makeComboRow('Provider', AI_PROVIDERS);
         const baseUrlRow = new Adw.EntryRow({
             title: 'Base URL',
             show_apply_button: true,
         });
+        const {row: aiApiKeyRow, badge: aiApiKeyBadge} = makeSecretRow('API Key');
+        const modelRow = new Adw.ComboRow({
+            title: 'Model',
+            subtitle: 'Select a model from the active provider',
+            enable_search: true,
+            model: Gtk.StringList.new(['No models available']),
+            sensitive: false,
+        });
         aiGroup.add(providerRow);
-        aiGroup.add(modelRow);
         aiGroup.add(baseUrlRow);
+        aiGroup.add(aiApiKeyRow);
+        aiGroup.add(modelRow);
+
+        const toolsStatusRow = new Adw.ActionRow({
+            title: 'Tools Support',
+            subtitle: 'Auto-detected capability for the selected model',
+        });
+        const toolsBadge = new Gtk.Label({
+            label: 'Unknown',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['caption', 'dim-label'],
+        });
+        toolsStatusRow.add_suffix(toolsBadge);
+        aiGroup.add(toolsStatusRow);
+
+        const forceToolsRow = new Adw.SwitchRow({
+            title: 'Force Enable Tools',
+            subtitle: 'Override detection and expose MCP tools to this model',
+        });
+        aiGroup.add(forceToolsRow);
         voicePage.add(aiGroup);
+
+        const mcpGroup = new Adw.PreferencesGroup({
+            title: 'MCP Servers',
+            description: 'Enabled when active model supports tools or Force Enable Tools is active.',
+        });
+        const addMcpBtn = new Gtk.Button({
+            label: 'Add MCP Server',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+        });
+        mcpGroup.set_header_suffix(addMcpBtn);
+        voicePage.add(mcpGroup);
+
+        const mcpJsonGroup = new Adw.PreferencesGroup({
+            title: 'Raw mcpServers JSON',
+            description: 'Two-way synchronized with the structured MCP server list above.',
+        });
+        const mcpJsonView = new Gtk.TextView({
+            wrap_mode: Gtk.WrapMode.NONE,
+            top_margin: 8,
+            bottom_margin: 8,
+            left_margin: 10,
+            right_margin: 10,
+            css_classes: ['monospace'],
+        });
+        const mcpJsonScroll = new Gtk.ScrolledWindow({min_content_height: 180});
+        mcpJsonScroll.set_child(mcpJsonView);
+        const mcpJsonFrame = new Gtk.Frame();
+        mcpJsonFrame.set_child(mcpJsonScroll);
+        mcpJsonGroup.add(mcpJsonFrame);
+
+        const applyMcpJsonBox = new Gtk.Box({
+            halign: Gtk.Align.END,
+            margin_top: 8,
+        });
+        const applyMcpJsonBtn = new Gtk.Button({
+            label: 'Validate & Apply JSON',
+            css_classes: ['suggested-action'],
+        });
+        applyMcpJsonBox.append(applyMcpJsonBtn);
+        mcpJsonGroup.add(applyMcpJsonBox);
+        voicePage.add(mcpJsonGroup);
 
         window.add(generalPage);
         window.add(visualsPage);
@@ -406,13 +590,620 @@ export default class ByteyPreferences extends ExtensionPreferences {
             floatYRow.set_sensitive(isFloating);
         };
 
+        const syncSttVisibility = () => {
+            const backend = comboText(sttBackendRow);
+            sttApiUrlRow.set_visible(backend === 'custom_whisper');
+            sttApiKeyRow.set_visible(backend !== 'local_whisper');
+            sttApiKeyRow.set_title(backend === 'openai_whisper' ? 'OpenAI Whisper API Key' : 'STT API Key');
+        };
+
+        const syncTtsVisibility = () => {
+            const ttsProvider = comboText(ttsProviderRow);
+            const isKokoro = ttsProvider === 'kokoro';
+            kokoroBaseUrlRow.set_visible(isKokoro);
+            kokoroApiKeyRow.set_visible(isKokoro);
+            elevenlabsApiKeyRow.set_visible(ttsProvider === 'elevenlabs');
+        };
+
         const syncProviderVisibility = () => {
-            baseUrlRow.set_visible(comboText(providerRow) !== 'gemini');
+            const prov = comboText(providerRow);
+            baseUrlRow.set_visible(prov !== 'gemini');
+            const secretKey = PROVIDER_SECRET_MAP[prov];
+            if (secretKey) {
+                aiApiKeyRow.set_visible(true);
+                setSecretRowState(aiApiKeyRow, aiApiKeyBadge, Boolean(secretsConfigured[secretKey]));
+            } else {
+                aiApiKeyRow.set_visible(false);
+            }
+        };
+
+        const updateToolsSensitivity = () => {
+            const detected = modelToolMap.has(currentConfiguredModel)
+                ? Boolean(modelToolMap.get(currentConfiguredModel))
+                : Boolean(detectedToolsSupport);
+            const forced = forceToolsRow.get_active();
+            const active = Boolean(detected || forced);
+
+            toolsBadge.remove_css_class('success');
+            toolsBadge.remove_css_class('warning');
+            toolsBadge.remove_css_class('dim-label');
+            if (detected) {
+                toolsBadge.set_label('Supported');
+                toolsBadge.add_css_class('success');
+            } else if (forced) {
+                toolsBadge.set_label('Forced On');
+                toolsBadge.add_css_class('warning');
+            } else {
+                toolsBadge.set_label('Not Supported');
+                toolsBadge.add_css_class('dim-label');
+            }
+
+            mcpGroup.set_sensitive(active);
+            mcpJsonGroup.set_sensitive(active);
+        };
+
+        const normalizeMcpMap = rawMap => {
+            const normalized = {};
+            if (!rawMap || typeof rawMap !== 'object' || Array.isArray(rawMap))
+                return normalized;
+            for (const [name, entry] of Object.entries(rawMap)) {
+                if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+                    continue;
+                const item = cloneJson(entry);
+                const disabled = Boolean(item.disabled ?? (item.enabled === false));
+                item.disabled = disabled;
+                item.enabled = !disabled;
+                normalized[String(name)] = item;
+            }
+            return normalized;
+        };
+
+        const syncMcpJsonText = (rawJsonOverride = null) => {
+            const text = rawJsonOverride !== null
+                ? String(rawJsonOverride)
+                : JSON.stringify({mcpServers}, null, 2);
+            mcpJsonView.get_buffer().set_text(text, -1);
         };
 
         const setOfflineState = offline => {
             offlineBanner.set_revealed(offline);
             statusRow.set_subtitle(offline ? 'Offline' : 'Connected');
+        };
+
+        const setEmptyModelsState = message => {
+            loading = true;
+            try {
+                availableModels = [];
+                modelToolMap.clear();
+                modelRow.set_model(Gtk.StringList.new(['No models available']));
+                modelRow.set_selected(0);
+                modelRow.set_sensitive(false);
+                modelRow.set_subtitle(message);
+            } finally {
+                loading = false;
+            }
+            updateToolsSensitivity();
+        };
+
+        const fetchModels = async (
+            provider,
+            baseUrl = '',
+            {autoSelectIfMissing = false, showResultToast = false} = {}
+        ) => {
+            if (destroyed)
+                return;
+            const seq = ++modelFetchSeq;
+            const prov = String(provider || '').trim().toLowerCase();
+            if (!prov)
+                return;
+
+            modelRow.set_sensitive(false);
+            modelRow.set_subtitle(`Loading models from ${prov}...`);
+
+            let path = `/api/v1/providers/${encodeURIComponent(prov)}/models`;
+            const cleanUrl = String(baseUrl || '').trim();
+            if (prov !== 'gemini' && cleanUrl)
+                path += `?base_url=${encodeURIComponent(cleanUrl)}`;
+
+            const resp = await httpJson('GET', path);
+            if (destroyed || seq !== modelFetchSeq)
+                return;
+
+            if (!resp.ok || !resp.data || typeof resp.data !== 'object') {
+                setOfflineState(true);
+                setEmptyModelsState('Daemon offline — unable to fetch models');
+                if (showResultToast)
+                    showToast('Unable to fetch models — daemon offline');
+                return;
+            }
+            setOfflineState(false);
+
+            const rawModels = Array.isArray(resp.data.models) ? resp.data.models : [];
+            const parsedModels = [];
+            const seenIds = new Set();
+            for (const entry of rawModels) {
+                let id = '';
+                let name = '';
+                let supportsTools;
+                if (typeof entry === 'string') {
+                    id = entry.trim();
+                    name = id;
+                } else if (entry && typeof entry === 'object') {
+                    id = String(entry.id ?? entry.name ?? '').trim();
+                    name = String(entry.name ?? id).trim();
+                    if (typeof entry.supports_tools === 'boolean')
+                        supportsTools = entry.supports_tools;
+                }
+                if (id && !seenIds.has(id)) {
+                    seenIds.add(id);
+                    parsedModels.push({id, name: name || id, supports_tools: supportsTools});
+                }
+            }
+
+            if (parsedModels.length === 0) {
+                const errMsg = resp.data.error
+                    ? String(resp.data.error)
+                    : `No models returned by ${prov}`;
+                setEmptyModelsState(errMsg);
+                if (showResultToast)
+                    showToast(errMsg);
+                return;
+            }
+
+            availableModels = parsedModels;
+            modelToolMap.clear();
+            for (const m of availableModels) {
+                if (typeof m.supports_tools === 'boolean')
+                    modelToolMap.set(m.id, m.supports_tools);
+            }
+            const modelIds = availableModels.map(m => m.id);
+            const matchIdx = currentConfiguredModel ? modelIds.indexOf(currentConfiguredModel) : -1;
+            const targetIdx = matchIdx >= 0 ? matchIdx : 0;
+            const chosen = availableModels[targetIdx];
+
+            loading = true;
+            try {
+                modelRow.set_model(Gtk.StringList.new(modelIds));
+                modelRow.set_selected(targetIdx);
+                modelRow.set_sensitive(true);
+                const errHint = resp.data.error ? ` (fallback: ${resp.data.error})` : '';
+                modelRow.set_subtitle(`${availableModels.length} model(s) available${errHint}`);
+            } finally {
+                loading = false;
+            }
+
+            if (matchIdx < 0 && autoSelectIfMissing && chosen) {
+                currentConfiguredModel = chosen.id;
+                updateToolsSensitivity();
+                const patch = {provider: {model: chosen.id}};
+                if (typeof chosen.supports_tools === 'boolean')
+                    patch.supports_tools = chosen.supports_tools;
+                await patchConfig(patch, `Selected model ${chosen.id}`);
+            } else {
+                updateToolsSensitivity();
+                if (showResultToast)
+                    showToast(`Loaded ${availableModels.length} model(s) from ${prov}`);
+            }
+        };
+
+        const rebuildMcpList = () => {
+            for (const widget of mcpRows)
+                mcpGroup.remove(widget);
+            mcpRows = [];
+
+            const names = Object.keys(mcpServers).sort();
+            if (names.length === 0) {
+                const emptyRow = new Adw.ActionRow({
+                    title: 'No MCP servers configured',
+                    subtitle: "Click 'Add MCP Server' or edit the raw mcpServers JSON below.",
+                });
+                mcpGroup.add(emptyRow);
+                mcpRows.push(emptyRow);
+                return;
+            }
+
+            for (const name of names) {
+                const cfg = mcpServers[name] ?? {};
+                const transport = String(cfg.transport || (cfg.url ? 'http' : 'stdio'));
+                const target = transport !== 'stdio'
+                    ? String(cfg.url ?? '')
+                    : [String(cfg.command ?? ''), ...(Array.isArray(cfg.args) ? cfg.args.map(a => String(a)) : [])]
+                        .join(' ')
+                        .trim();
+                const confirmTag = cfg.require_confirmation ? ' • Confirm required' : '';
+                const row = new Adw.ActionRow({
+                    title: name,
+                    subtitle: `${transport}: ${target || '(unconfigured)'}${confirmTag}`,
+                });
+
+                const enabledSwitch = new Gtk.Switch({
+                    active: !Boolean(cfg.disabled),
+                    valign: Gtk.Align.CENTER,
+                    tooltip_text: 'Enable or disable server',
+                });
+                enabledSwitch.connect('notify::active', () => onUserChange(() => {
+                    if (!mcpServers[name])
+                        return;
+                    const active = enabledSwitch.get_active();
+                    mcpServers[name].disabled = !active;
+                    mcpServers[name].enabled = active;
+                    pushMcpChanges(`${active ? 'Enabled' : 'Disabled'} ${name}`).catch(() => {});
+                }));
+
+                const testMcpBtn = new Gtk.Button({
+                    label: 'Test Connection',
+                    valign: Gtk.Align.CENTER,
+                });
+                testMcpBtn.connect('clicked', () => onUserChange(() => {
+                    testMcpServer(name).catch(() => {});
+                }));
+
+                const editMcpBtn = new Gtk.Button({
+                    icon_name: 'document-edit-symbolic',
+                    valign: Gtk.Align.CENTER,
+                    tooltip_text: 'Edit',
+                    css_classes: ['flat'],
+                });
+                editMcpBtn.connect('clicked', () => onUserChange(() => {
+                    openMcpDialog(name);
+                }));
+
+                const delMcpBtn = new Gtk.Button({
+                    icon_name: 'user-trash-symbolic',
+                    valign: Gtk.Align.CENTER,
+                    tooltip_text: 'Delete',
+                    css_classes: ['flat', 'destructive-action'],
+                });
+                delMcpBtn.connect('clicked', () => onUserChange(() => {
+                    if (!(name in mcpServers))
+                        return;
+                    delete mcpServers[name];
+                    pushMcpChanges(`Removed MCP server '${name}'`).catch(() => {});
+                }));
+
+                row.add_suffix(enabledSwitch);
+                row.add_suffix(testMcpBtn);
+                row.add_suffix(editMcpBtn);
+                row.add_suffix(delMcpBtn);
+                mcpGroup.add(row);
+                mcpRows.push(row);
+            }
+        };
+
+        const pushMcpChanges = async toastMsg => {
+            if (destroyed)
+                return;
+            const raw = JSON.stringify({mcpServers}, null, 2);
+            syncMcpJsonText(raw);
+            rebuildMcpList();
+
+            const resp = await httpJson('PUT', '/api/v1/mcp/json', {raw_json: raw});
+            if (destroyed)
+                return;
+            if (!resp.ok) {
+                if (resp.status === 0)
+                    setOfflineState(true);
+                const errDetail = resp.data?.error ? `: ${resp.data.error}` : '';
+                showToast(`MCP update failed${errDetail}`);
+                return;
+            }
+            setOfflineState(false);
+            if (resp.data?.mcpServers && typeof resp.data.mcpServers === 'object') {
+                mcpServers = normalizeMcpMap(resp.data.mcpServers);
+                rebuildMcpList();
+            }
+            syncMcpJsonText(resp.data?.raw_json ?? null);
+            showToast(toastMsg);
+        };
+
+        const applyRawMcpJson = async () => {
+            if (destroyed)
+                return;
+            const raw = readTextBuffer(mcpJsonView);
+            let parsed;
+            try {
+                parsed = JSON.parse(raw);
+            } catch (err) {
+                showToast(`Invalid JSON: ${err.message}`);
+                return;
+            }
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                showToast('Root JSON value must be an object');
+                return;
+            }
+            const servers = Object.prototype.hasOwnProperty.call(parsed, 'mcpServers')
+                ? parsed.mcpServers
+                : parsed;
+            if (!servers || typeof servers !== 'object' || Array.isArray(servers)) {
+                showToast('"mcpServers" must be a JSON object');
+                return;
+            }
+
+            const resp = await httpJson('PUT', '/api/v1/mcp/json', {raw_json: raw});
+            if (destroyed)
+                return;
+            if (!resp.ok) {
+                if (resp.status === 0)
+                    setOfflineState(true);
+                const errDetail = resp.data?.error ? `: ${resp.data.error}` : '';
+                showToast(`MCP apply failed${errDetail}`);
+                return;
+            }
+            setOfflineState(false);
+            mcpServers = normalizeMcpMap(resp.data?.mcpServers ?? servers);
+            syncMcpJsonText(resp.data?.raw_json ?? null);
+            rebuildMcpList();
+            showToast(`Applied mcpServers JSON (${Object.keys(mcpServers).length} server(s))`);
+        };
+
+        const testMcpServer = async name => {
+            const cfg = mcpServers[name];
+            if (!cfg || destroyed)
+                return;
+            showToast(`Testing MCP server '${name}'...`);
+            const resp = await httpJson('POST', '/api/v1/mcp/test', {name, config: cfg});
+            if (destroyed)
+                return;
+            if (!resp.ok) {
+                if (resp.status === 0)
+                    setOfflineState(true);
+                const errMsg = resp.data?.error
+                    ? String(resp.data.error)
+                    : `HTTP ${resp.status || 'offline'}`;
+                showToast(`Test failed for ${name}: ${errMsg}`);
+                const alert = Adw.AlertDialog.new(`MCP Test Failed: ${name}`, errMsg);
+                alert.add_response('close', 'Close');
+                alert.present(window);
+                return;
+            }
+            setOfflineState(false);
+            const payload = resp.data && typeof resp.data === 'object' ? resp.data : {};
+            if (payload.ok === false) {
+                const err = String(payload.error ?? 'Connection failed');
+                showToast(`${name}: ${err}`);
+                const alert = Adw.AlertDialog.new(`MCP Test Failed: ${name}`, err);
+                alert.add_response('close', 'Close');
+                alert.present(window);
+                return;
+            }
+            const tools = Array.isArray(payload.tools) ? payload.tools : [];
+            const lines = tools.map(t => {
+                if (t && typeof t === 'object') {
+                    const tName = String(t.name ?? 'unknown');
+                    const tDesc = t.description ? ` — ${t.description}` : '';
+                    return `• ${tName}${tDesc}`;
+                }
+                return `• ${String(t)}`;
+            });
+            const summary = lines.length > 0
+                ? lines.join('\n')
+                : 'Connected successfully (0 tools advertised).';
+            showToast(`${name}: discovered ${lines.length} tool(s)`);
+            const alert = Adw.AlertDialog.new(`MCP Connected: ${name}`, summary);
+            alert.add_response('close', 'Close');
+            alert.present(window);
+        };
+
+        const openMcpDialog = (existingName = null) => {
+            if (destroyed)
+                return;
+            const cfg = existingName ? cloneJson(mcpServers[existingName] ?? {}) : {};
+            const dialog = new Adw.Dialog({
+                title: existingName ? `Edit MCP Server: ${existingName}` : 'Add MCP Server',
+                content_width: 520,
+                content_height: 600,
+            });
+
+            const toolbar = new Adw.ToolbarView();
+            const header = new Adw.HeaderBar({
+                show_end_title_buttons: false,
+                show_start_title_buttons: false,
+            });
+            const cancelBtn = new Gtk.Button({label: 'Cancel'});
+            cancelBtn.connect('clicked', () => dialog.close());
+            const saveBtn = new Gtk.Button({
+                label: 'Save',
+                css_classes: ['suggested-action'],
+            });
+            header.pack_start(cancelBtn);
+            header.pack_end(saveBtn);
+            toolbar.add_top_bar(header);
+
+            const dlgPage = new Adw.PreferencesPage();
+            const coreGroup = new Adw.PreferencesGroup({title: 'Server Identity & Transport'});
+
+            const nameRow = new Adw.EntryRow({title: 'Server Name'});
+            if (existingName)
+                nameRow.set_text(existingName);
+            coreGroup.add(nameRow);
+
+            const transportRow = makeComboRow('Transport', MCP_TRANSPORTS);
+            let transport = String(cfg.transport || (cfg.url ? 'http' : 'stdio')).toLowerCase();
+            if (!MCP_TRANSPORTS.includes(transport))
+                transport = 'stdio';
+            setComboText(transportRow, transport);
+            coreGroup.add(transportRow);
+
+            const confirmRow = new Adw.SwitchRow({
+                title: 'Require Confirmation',
+                subtitle: 'Prompt in island drawer before executing tools on this server',
+                active: Boolean(cfg.require_confirmation ?? false),
+            });
+            coreGroup.add(confirmRow);
+            dlgPage.add(coreGroup);
+
+            const stdioGroup = new Adw.PreferencesGroup({title: 'Stdio Process'});
+            const commandRow = new Adw.EntryRow({title: 'Command'});
+            commandRow.set_text(String(cfg.command ?? ''));
+            stdioGroup.add(commandRow);
+
+            const argsRow = new Adw.EntryRow({title: 'Args (JSON array or space-separated)'});
+            const rawArgsCfg = cfg.args ?? [];
+            if (Array.isArray(rawArgsCfg))
+                argsRow.set_text(rawArgsCfg.length > 0 ? JSON.stringify(rawArgsCfg) : '');
+            else
+                argsRow.set_text(String(rawArgsCfg));
+            stdioGroup.add(argsRow);
+
+            const envView = new Gtk.TextView({
+                wrap_mode: Gtk.WrapMode.WORD_CHAR,
+                css_classes: ['monospace'],
+            });
+            const envObj = cfg.env && typeof cfg.env === 'object' && !Array.isArray(cfg.env) ? cfg.env : {};
+            envView.get_buffer().set_text(
+                Object.keys(envObj).length > 0 ? JSON.stringify(envObj, null, 2) : '{}',
+                -1
+            );
+            stdioGroup.add(makeTextViewBox('Environment Variables (JSON object)', envView, 96));
+            dlgPage.add(stdioGroup);
+
+            const httpGroup = new Adw.PreferencesGroup({title: 'HTTP / SSE Endpoint'});
+            const urlRow = new Adw.EntryRow({title: 'URL'});
+            urlRow.set_text(String(cfg.url ?? ''));
+            httpGroup.add(urlRow);
+
+            const headersView = new Gtk.TextView({
+                wrap_mode: Gtk.WrapMode.WORD_CHAR,
+                css_classes: ['monospace'],
+            });
+            const headersObj = cfg.headers && typeof cfg.headers === 'object' && !Array.isArray(cfg.headers)
+                ? cfg.headers
+                : {};
+            headersView.get_buffer().set_text(
+                Object.keys(headersObj).length > 0 ? JSON.stringify(headersObj, null, 2) : '{}',
+                -1
+            );
+            httpGroup.add(makeTextViewBox('HTTP Headers (JSON object)', headersView, 96));
+            dlgPage.add(httpGroup);
+
+            const errorLabel = new Gtk.Label({
+                xalign: 0,
+                wrap: true,
+                visible: false,
+                css_classes: ['error'],
+            });
+            const errGroup = new Adw.PreferencesGroup();
+            errGroup.add(errorLabel);
+            dlgPage.add(errGroup);
+
+            const syncDlgTransport = () => {
+                const isStdio = comboText(transportRow) === 'stdio';
+                stdioGroup.set_visible(isStdio);
+                httpGroup.set_visible(!isStdio);
+            };
+            transportRow.connect('notify::selected', syncDlgTransport);
+            syncDlgTransport();
+
+            const showDlgError = msg => {
+                errorLabel.set_text(msg);
+                errorLabel.set_visible(true);
+            };
+
+            saveBtn.connect('clicked', () => {
+                const name = nameRow.get_text().trim();
+                if (!name) {
+                    showDlgError('Server name is required.');
+                    return;
+                }
+                const nextTransport = comboText(transportRow);
+                const nextCfg = {
+                    transport: nextTransport,
+                    require_confirmation: confirmRow.get_active(),
+                };
+
+                if (nextTransport === 'stdio') {
+                    const command = commandRow.get_text().trim();
+                    if (!command) {
+                        showDlgError('Command is required for stdio transport.');
+                        return;
+                    }
+                    nextCfg.command = command;
+
+                    const rawArgs = argsRow.get_text().trim();
+                    if (rawArgs.startsWith('[')) {
+                        let parsedArgs;
+                        try {
+                            parsedArgs = JSON.parse(rawArgs);
+                        } catch (err) {
+                            showDlgError(`Invalid args JSON: ${err.message}`);
+                            return;
+                        }
+                        if (!Array.isArray(parsedArgs)) {
+                            showDlgError('Args JSON must be a list.');
+                            return;
+                        }
+                        nextCfg.args = parsedArgs.map(x => String(x));
+                    } else if (rawArgs) {
+                        nextCfg.args = rawArgs.split(/\s+/).filter(Boolean);
+                    } else {
+                        nextCfg.args = [];
+                    }
+
+                    const rawEnv = readTextBuffer(envView);
+                    if (rawEnv) {
+                        let parsedEnv;
+                        try {
+                            parsedEnv = JSON.parse(rawEnv);
+                        } catch (err) {
+                            showDlgError(`Invalid env JSON: ${err.message}`);
+                            return;
+                        }
+                        if (!parsedEnv || typeof parsedEnv !== 'object' || Array.isArray(parsedEnv)) {
+                            showDlgError('Environment variables must be a JSON object.');
+                            return;
+                        }
+                        if (Object.keys(parsedEnv).length > 0) {
+                            nextCfg.env = Object.fromEntries(
+                                Object.entries(parsedEnv).map(([k, v]) => [String(k), String(v)])
+                            );
+                        }
+                    }
+                } else {
+                    const url = urlRow.get_text().trim();
+                    if (!url) {
+                        showDlgError('URL is required for HTTP/SSE transport.');
+                        return;
+                    }
+                    nextCfg.url = url;
+
+                    const rawHeaders = readTextBuffer(headersView);
+                    if (rawHeaders) {
+                        let parsedHeaders;
+                        try {
+                            parsedHeaders = JSON.parse(rawHeaders);
+                        } catch (err) {
+                            showDlgError(`Invalid headers JSON: ${err.message}`);
+                            return;
+                        }
+                        if (!parsedHeaders || typeof parsedHeaders !== 'object' || Array.isArray(parsedHeaders)) {
+                            showDlgError('Headers must be a JSON object.');
+                            return;
+                        }
+                        if (Object.keys(parsedHeaders).length > 0) {
+                            nextCfg.headers = Object.fromEntries(
+                                Object.entries(parsedHeaders).map(([k, v]) => [String(k), String(v)])
+                            );
+                        }
+                    }
+                }
+
+                const prevDisabled = existingName && mcpServers[existingName]
+                    ? Boolean(mcpServers[existingName].disabled)
+                    : false;
+                if (existingName && existingName !== name)
+                    delete mcpServers[existingName];
+                nextCfg.disabled = prevDisabled;
+                nextCfg.enabled = !prevDisabled;
+                mcpServers[name] = nextCfg;
+                dialog.close();
+                pushMcpChanges(`Saved MCP server '${name}'`).catch(() => {});
+            });
+
+            const scrolled = new Gtk.ScrolledWindow({vexpand: true, hexpand: true});
+            scrolled.set_child(dlgPage);
+            toolbar.set_content(scrolled);
+            dialog.set_child(toolbar);
+            dialog.present(window);
         };
 
         const applyConfig = cfg => {
@@ -424,6 +1215,9 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 const voiceOut = cfg.voice_out ?? cfg.voice_output ?? {};
                 const provider = cfg.provider ?? {};
                 const llm = cfg.llm ?? {};
+                secretsConfigured = cfg.secrets_configured && typeof cfg.secrets_configured === 'object'
+                    ? {...cfg.secrets_configured}
+                    : {};
 
                 petNameRow.set_text(String(general.pet_name ?? cfg.pet_name ?? 'Bytey'));
                 wakePhraseRow.set_text(String(general.wake_phrase ?? cfg.wake_phrase ?? 'Hey Bytey'));
@@ -450,18 +1244,38 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 floatYRow.set_value(Number(visuals.float_y ?? 40));
 
                 micMuteRow.set_active(Boolean(voiceIn.mic_muted ?? false));
-                ttsMuteRow.set_active(Boolean(voiceOut.tts_muted ?? false));
                 setComboText(sttBackendRow, voiceIn.stt_backend ?? 'local_whisper');
+                sttApiUrlRow.set_text(String(voiceIn.stt_api_url ?? ''));
+                setSecretRowState(sttApiKeyRow, sttApiKeyBadge, Boolean(secretsConfigured.STT_API_KEY));
+
+                ttsMuteRow.set_active(Boolean(voiceOut.tts_muted ?? false));
                 setComboText(ttsProviderRow, voiceOut.tts_provider ?? voiceOut.provider ?? 'kokoro');
+                kokoroBaseUrlRow.set_text(String(voiceOut.kokoro_base_url ?? 'http://localhost:8880/v1'));
+                setSecretRowState(kokoroApiKeyRow, kokoroApiKeyBadge, Boolean(secretsConfigured.KOKORO_API_KEY));
+                setSecretRowState(elevenlabsApiKeyRow, elevenlabsApiKeyBadge, Boolean(secretsConfigured.ELEVENLABS_API_KEY));
 
                 setComboText(providerRow, provider.active_provider ?? llm.provider ?? 'ollama');
-                modelRow.set_text(String(provider.model ?? llm.model ?? ''));
+                currentConfiguredModel = String(provider.model ?? llm.model ?? '').trim();
                 baseUrlRow.set_text(String(provider.base_url ?? llm.base_url ?? ''));
+                detectedToolsSupport = Boolean(llm.supports_tools ?? false);
+                forceToolsRow.set_active(Boolean(
+                    llm.force_enable_tools ?? (provider.supports_tools_override === true)
+                ));
+                mcpServers = normalizeMcpMap(cfg.mcpServers ?? cfg.mcp_servers ?? {});
             } finally {
                 loading = false;
             }
             syncPlacementSensitivity();
+            syncSttVisibility();
+            syncTtsVisibility();
             syncProviderVisibility();
+            syncMcpJsonText();
+            rebuildMcpList();
+            updateToolsSensitivity();
+            fetchModels(comboText(providerRow), baseUrlRow.get_text().trim(), {
+                autoSelectIfMissing: false,
+                showResultToast: false,
+            }).catch(() => {});
         };
 
         const loadConfig = async () => {
@@ -503,11 +1317,50 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 return;
             if (resp.ok) {
                 setOfflineState(false);
+                if (typeof resp.data?.llm?.supports_tools === 'boolean' && !forceToolsRow.get_active()) {
+                    detectedToolsSupport = resp.data.llm.supports_tools;
+                    updateToolsSensitivity();
+                }
                 showToast(toastMsg);
             } else {
                 setOfflineState(true);
                 showToast('Daemon offline — changes not saved');
             }
+        };
+
+        const saveSecret = async (secretKey, row, badge) => {
+            if (destroyed || loading)
+                return false;
+            const value = row.get_text().trim();
+            if (!value) {
+                showToast('Enter an API key before applying');
+                return false;
+            }
+            if (isMaskedPlaceholder(value)) {
+                showToast(`${secretKey} already configured — enter a new key to replace`);
+                return false;
+            }
+            const resp = await httpJson('PUT', '/api/v1/secrets', {secrets: {[secretKey]: value}});
+            if (destroyed)
+                return false;
+            if (!resp.ok) {
+                setOfflineState(true);
+                showToast(`Failed to save ${secretKey}`);
+                return false;
+            }
+            setOfflineState(false);
+            if (resp.data?.secrets_configured && typeof resp.data.secrets_configured === 'object')
+                secretsConfigured = {...resp.data.secrets_configured};
+            else
+                secretsConfigured = {...secretsConfigured, [secretKey]: true};
+            loading = true;
+            try {
+                setSecretRowState(row, badge, true);
+            } finally {
+                loading = false;
+            }
+            showToast(`Saved ${secretKey}`);
+            return true;
         };
 
         const onUserChange = handler => {
@@ -648,33 +1501,120 @@ export default class ByteyPreferences extends ExtensionPreferences {
             patchConfig({voice_in: {mic_muted: micMuteRow.get_active()}}, 'Updated microphone mute');
         }));
 
+        sttBackendRow.connect('notify::selected', () => onUserChange(() => {
+            syncSttVisibility();
+            patchConfig({voice_in: {stt_backend: comboText(sttBackendRow)}}, 'Saved STT backend');
+        }));
+
+        sttApiUrlRow.connect('apply', () => onUserChange(() => {
+            patchConfig({voice_in: {stt_api_url: sttApiUrlRow.get_text().trim()}}, 'Saved STT API URL');
+        }));
+
+        sttApiKeyRow.connect('apply', () => onUserChange(() => {
+            saveSecret('STT_API_KEY', sttApiKeyRow, sttApiKeyBadge).catch(() => {});
+        }));
+
         ttsMuteRow.connect('notify::active', () => onUserChange(() => {
             patchConfig({voice_out: {tts_muted: ttsMuteRow.get_active()}}, 'Updated voice mute');
         }));
 
-        sttBackendRow.connect('notify::selected', () => onUserChange(() => {
-            patchConfig({voice_in: {stt_backend: comboText(sttBackendRow)}}, 'Saved STT backend');
-        }));
-
         ttsProviderRow.connect('notify::selected', () => onUserChange(() => {
+            syncTtsVisibility();
             patchConfig({voice_out: {tts_provider: comboText(ttsProviderRow)}}, 'Saved TTS provider');
         }));
 
-        providerRow.connect('notify::selected', () => onUserChange(() => {
-            syncProviderVisibility();
-            patchConfig({provider: {active_provider: comboText(providerRow)}}, 'Saved AI provider');
+        kokoroBaseUrlRow.connect('apply', () => onUserChange(() => {
+            patchConfig({voice_out: {kokoro_base_url: kokoroBaseUrlRow.get_text().trim()}}, 'Saved Kokoro server URL');
         }));
 
-        modelRow.connect('apply', () => onUserChange(() => {
-            patchConfig({provider: {model: modelRow.get_text().trim()}}, 'Saved model');
+        kokoroApiKeyRow.connect('apply', () => onUserChange(() => {
+            saveSecret('KOKORO_API_KEY', kokoroApiKeyRow, kokoroApiKeyBadge).catch(() => {});
         }));
 
-        baseUrlRow.connect('apply', () => onUserChange(() => {
-            patchConfig({provider: {base_url: baseUrlRow.get_text().trim()}}, 'Saved base URL');
+        elevenlabsApiKeyRow.connect('apply', () => onUserChange(() => {
+            saveSecret('ELEVENLABS_API_KEY', elevenlabsApiKeyRow, elevenlabsApiKeyBadge).catch(() => {});
+        }));
+
+        providerRow.connect('notify::selected', () => onUserChange(async () => {
+            const prov = comboText(providerRow);
+            const defaultUrl = PROVIDER_DEFAULT_URLS[prov] ?? '';
+            loading = true;
+            try {
+                baseUrlRow.set_text(defaultUrl);
+                syncProviderVisibility();
+            } finally {
+                loading = false;
+            }
+            await patchConfig({provider: {active_provider: prov, base_url: defaultUrl}}, 'Saved AI provider');
+            if (!destroyed && comboText(providerRow) === prov)
+                await fetchModels(prov, defaultUrl, {autoSelectIfMissing: true});
+        }));
+
+        baseUrlRow.connect('apply', () => onUserChange(async () => {
+            const prov = comboText(providerRow);
+            const nextUrl = baseUrlRow.get_text().trim();
+            await patchConfig({provider: {base_url: nextUrl}}, 'Saved base URL');
+            if (!destroyed && comboText(providerRow) === prov)
+                await fetchModels(prov, nextUrl, {autoSelectIfMissing: false});
+        }));
+
+        aiApiKeyRow.connect('apply', () => onUserChange(async () => {
+            const prov = comboText(providerRow);
+            const secretKey = PROVIDER_SECRET_MAP[prov];
+            if (!secretKey)
+                return;
+            const saved = await saveSecret(secretKey, aiApiKeyRow, aiApiKeyBadge);
+            if (saved && !destroyed && comboText(providerRow) === prov)
+                await fetchModels(prov, baseUrlRow.get_text().trim(), {autoSelectIfMissing: true});
+        }));
+
+        refreshModelsBtn.connect('clicked', () => onUserChange(() => {
+            fetchModels(comboText(providerRow), baseUrlRow.get_text().trim(), {
+                autoSelectIfMissing: false,
+                showResultToast: true,
+            }).catch(() => {});
+        }));
+
+        modelRow.connect('notify::selected', () => onUserChange(() => {
+            if (availableModels.length === 0)
+                return;
+            const idx = modelRow.get_selected();
+            if (idx < 0 || idx >= availableModels.length)
+                return;
+            const chosen = availableModels[idx];
+            if (!chosen || !chosen.id || chosen.id === currentConfiguredModel)
+                return;
+            currentConfiguredModel = chosen.id;
+            updateToolsSensitivity();
+            const patch = {provider: {model: chosen.id}};
+            if (typeof chosen.supports_tools === 'boolean')
+                patch.supports_tools = chosen.supports_tools;
+            patchConfig(patch, `Saved model: ${chosen.id}`);
+        }));
+
+        forceToolsRow.connect('notify::active', () => onUserChange(() => {
+            updateToolsSensitivity();
+            patchConfig(
+                {provider: {supports_tools_override: forceToolsRow.get_active() ? true : null}},
+                'Updated tool override'
+            );
+        }));
+
+        addMcpBtn.connect('clicked', () => onUserChange(() => {
+            openMcpDialog(null);
+        }));
+
+        applyMcpJsonBtn.connect('clicked', () => onUserChange(() => {
+            applyRawMcpJson().catch(() => {});
         }));
 
         syncPlacementSensitivity();
+        syncSttVisibility();
+        syncTtsVisibility();
         syncProviderVisibility();
+        syncMcpJsonText();
+        rebuildMcpList();
+        updateToolsSensitivity();
         loadConfig();
     }
 }

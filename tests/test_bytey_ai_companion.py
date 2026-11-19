@@ -39,6 +39,8 @@ for _p in (str(CORE_DAEMON_DIR), str(SETTINGS_UI_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from bytey_ai_companion.audio.capture import VoiceInputService  # noqa: E402
+from bytey_ai_companion.audio.stt import DEFAULT_OPENAI_STT_URL, STTEngine  # noqa: E402
 from bytey_ai_companion.audio.vad import VADProcessor  # noqa: E402
 from bytey_ai_companion.audio.wakeword import WakeWordMatcher  # noqa: E402
 from bytey_ai_companion.config import (  # noqa: E402
@@ -1758,6 +1760,160 @@ assertState('disconnected', false, 'Disconnected');
         extension_js = (GNOME_EXT_DIR / "extension.js").read_text(encoding="utf-8")
         for state in ("connected", "error", "disconnected"):
             self.assertIn(f"setConnectionStatus('{state}')", extension_js)
+
+    def test_prefs_stt_tts_split_and_provider_model_selector(self) -> None:
+        prefs_js = (GNOME_EXT_DIR / "prefs.js").read_text(encoding="utf-8")
+
+        self.assertIn("title: 'STT Controls'", prefs_js)
+        self.assertIn("title: 'TTS Controls'", prefs_js)
+        self.assertNotIn("title: 'Voice Controls'", prefs_js)
+
+        self.assertIn("Adw.PasswordEntryRow", prefs_js)
+        self.assertIn("'/api/v1/secrets'", prefs_js)
+        self.assertIn("/api/v1/providers/", prefs_js)
+        for secret_key in (
+            "STT_API_KEY",
+            "KOKORO_API_KEY",
+            "ELEVENLABS_API_KEY",
+            "GEMINI_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "CUSTOM_LLM_API_KEY",
+        ):
+            self.assertIn(secret_key, prefs_js)
+
+        self.assertIn("sttApiUrlRow.set_visible(backend === 'custom_whisper')", prefs_js)
+        self.assertIn("sttApiKeyRow.set_visible(backend !== 'local_whisper')", prefs_js)
+        self.assertIn("kokoroBaseUrlRow.set_visible(isKokoro)", prefs_js)
+        self.assertIn("kokoroApiKeyRow.set_visible(isKokoro)", prefs_js)
+        self.assertIn("elevenlabsApiKeyRow.set_visible(ttsProvider === 'elevenlabs')", prefs_js)
+
+        self.assertRegex(prefs_js, r"const\s+modelRow\s*=\s*new\s+Adw\.ComboRow\(")
+        self.assertNotRegex(prefs_js, r"new\s+Adw\.EntryRow\(\{\s*title:\s*'Model'")
+        self.assertIn("enable_search: true", prefs_js)
+        self.assertNotIn("GLib.source_remove(", prefs_js)
+        for forbidden_import in (
+            "gi://St",
+            "gi://Clutter",
+            "gi://Meta",
+            "gi://Shell",
+            "resource:///org/gnome/shell/",
+        ):
+            self.assertNotIn(forbidden_import, prefs_js)
+
+        mask_decl = re.search(r"const\s+SECRET_MASK_PLACEHOLDER\s*=\s*[^;]+;", prefs_js)
+        self.assertIsNotNone(mask_decl)
+        is_masked_fn = self._extract_js_method(prefs_js, "function isMaskedPlaceholder(value) {")
+        node_script = """
+const assert = require('assert');
+const [maskDecl, isMaskedFn] = process.argv.slice(1);
+const fn = new Function(`${maskDecl}\n${isMaskedFn}\nreturn isMaskedPlaceholder;`)();
+assert.strictEqual(fn('••••••••••••••••'), true);
+assert.strictEqual(fn('••••'), true);
+assert.strictEqual(fn(''), false);
+assert.strictEqual(fn('   '), false);
+assert.strictEqual(fn('sk-live-secret'), false);
+"""
+        self._run_node_script(
+            node_script,
+            mask_decl.group(0),  # type: ignore[union-attr]
+            is_masked_fn,
+            failure_context="node prefs.js isMaskedPlaceholder test failed",
+        )
+
+    def test_prefs_tools_support_and_mcp_configuration(self) -> None:
+        prefs_js = (GNOME_EXT_DIR / "prefs.js").read_text(encoding="utf-8")
+
+        for expected in (
+            "title: 'Tools Support'",
+            "title: 'Force Enable Tools'",
+            "title: 'MCP Servers'",
+            "title: 'Raw mcpServers JSON'",
+            "'/api/v1/mcp/json'",
+            "'/api/v1/mcp/test'",
+            "Adw.Dialog",
+            "Adw.AlertDialog",
+            "supports_tools_override",
+            "mcpGroup.set_sensitive(active)",
+            "mcpJsonGroup.set_sensitive(active)",
+        ):
+            self.assertIn(expected, prefs_js)
+
+        self.assertNotIn("GLib.source_remove(", prefs_js)
+        self.assertNotIn("Gio.Subprocess", prefs_js)
+        for forbidden_import in (
+            "gi://St",
+            "gi://Clutter",
+            "gi://Meta",
+            "gi://Shell",
+            "resource:///org/gnome/shell/",
+        ):
+            self.assertNotIn(forbidden_import, prefs_js)
+
+
+class TestSTTBackendPrecedence(unittest.IsolatedAsyncioTestCase):
+    """Test openai_whisper fixed endpoint URL and STT_API_KEY precedence."""
+
+    async def test_openai_whisper_fixed_url_and_stt_key_precedence(self) -> None:
+        seen_requests: list[tuple[str, str]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_requests.append(
+                (str(request.url), request.headers.get("authorization", ""))
+            )
+            text = (
+                "hello openai"
+                if str(request.url) == DEFAULT_OPENAI_STT_URL
+                else "hello custom"
+            )
+            return httpx.Response(200, json={"text": text})
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            engine = STTEngine(http_client=client)
+            pcm = b"\x01\x02" * 160
+
+            openai_text = await engine.transcribe(
+                pcm,
+                backend="openai_whisper",
+                model="whisper-1",
+                api_url="https://stale-custom.example.com/v1/audio/transcriptions",
+                api_key="stt-key-1",
+            )
+            custom_text = await engine.transcribe(
+                pcm,
+                backend="custom_whisper",
+                model="whisper-1",
+                api_url="https://custom.example.com/v1/audio/transcriptions",
+                api_key="stt-key-2",
+            )
+
+        self.assertEqual(openai_text, "hello openai")
+        self.assertEqual(custom_text, "hello custom")
+        self.assertEqual(
+            seen_requests,
+            [
+                (DEFAULT_OPENAI_STT_URL, "Bearer stt-key-1"),
+                ("https://custom.example.com/v1/audio/transcriptions", "Bearer stt-key-2"),
+            ],
+        )
+
+        secrets_both = {"OPENAI_API_KEY": "oa-key", "STT_API_KEY": "stt-key"}
+        svc_both = VoiceInputService(
+            get_config=lambda: {},
+            get_secret=secrets_both.get,
+            stt_engine=STTEngine(),
+        )
+        self.assertEqual(await svc_both._resolve_stt_secret("openai_whisper"), "stt-key")
+        self.assertEqual(await svc_both._resolve_stt_secret("custom_whisper"), "stt-key")
+
+        secrets_fallback = {"OPENAI_API_KEY": "oa-key"}
+        svc_fallback = VoiceInputService(
+            get_config=lambda: {},
+            get_secret=secrets_fallback.get,
+            stt_engine=STTEngine(),
+        )
+        self.assertEqual(await svc_fallback._resolve_stt_secret("openai_whisper"), "oa-key")
 
 
 if __name__ == "__main__":

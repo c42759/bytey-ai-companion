@@ -281,7 +281,7 @@ class VoiceInputService:
         if self._get_secret is None:
             return None
         key_names = (
-            ("OPENAI_API_KEY", "STT_API_KEY")
+            ("STT_API_KEY", "OPENAI_API_KEY")
             if backend == "openai_whisper"
             else ("STT_API_KEY", "CUSTOM_WHISPER_API_KEY", "OPENAI_API_KEY")
         )

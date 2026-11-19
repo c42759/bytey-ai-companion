@@ -167,9 +167,10 @@ class STTEngine:
                 return ""
 
         if backend in ("openai_whisper", "custom_whisper"):
-            url = api_url.strip() if api_url else ""
-            if not url and backend == "openai_whisper":
+            if backend == "openai_whisper":
                 url = DEFAULT_OPENAI_STT_URL
+            else:
+                url = api_url.strip() if api_url else ""
             if not url:
                 logger.warning("No api_url configured for STT backend '%s'", backend)
                 return ""
