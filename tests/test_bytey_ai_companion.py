@@ -207,6 +207,7 @@ class _MockLLMRouter:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.tool_trigger_phrase = "use_echo_tool"
+        self.tool_arguments: dict[str, Any] | None = None
 
     async def detect_tool_support(
         self,
@@ -280,7 +281,7 @@ class _MockLLMRouter:
             tc = {
                 "id": "call_mock_1",
                 "name": tool_name,
-                "arguments": {"text": "daemon-ok"},
+                "arguments": dict(self.tool_arguments) if self.tool_arguments is not None else {"text": "daemon-ok"},
             }
             return {
                 "content": "",
@@ -1632,6 +1633,72 @@ asyncio.run(main())
                 self.assertIsNone(cap_router.calls[-1]["context_size"])
             finally:
                 await daemon.stop()
+
+    async def test_tool_call_status_broadcast_untruncated_summary(self) -> None:
+        """Verify tool_call_status WS broadcast emits full >400 char MCP summary without truncation."""
+        long_text = "A" * 1000
+        expected_summary = f"echo:{long_text}"
+        self.mock_llm.tool_arguments = {"text": long_text}
+
+        mcp_payload = {
+            "mcpServers": {
+                "mock": {
+                    "command": sys.executable,
+                    "args": [str(self.server_script)],
+                    "require_confirmation": False,
+                }
+            }
+        }
+        events: list[dict[str, Any]] = []
+
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+            r_cfg = await client.patch(
+                "/api/v1/config",
+                json={
+                    "llm": {
+                        "provider": "gemini",
+                        "model": "gemini-2.5-flash",
+                        "force_enable_tools": True,
+                    }
+                },
+            )
+            self.assertEqual(r_cfg.status_code, 200)
+
+            r_mcp = await client.put(
+                "/api/v1/mcp/json",
+                json={"raw_json": json.dumps(mcp_payload)},
+            )
+            self.assertEqual(r_mcp.status_code, 200)
+
+            async with websockets.connect(self.ws_url) as ws:
+                async def _ws_reader() -> None:
+                    try:
+                        async for raw in ws:
+                            events.append(json.loads(raw))
+                    except websockets.ConnectionClosed:
+                        pass
+
+                reader_task = asyncio.create_task(_ws_reader())
+                try:
+                    r_chat = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Please use_echo_tool now", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_chat.status_code, 200)
+                    await asyncio.sleep(0.05)
+                finally:
+                    reader_task.cancel()
+                    await asyncio.gather(reader_task, return_exceptions=True)
+
+        ok_events = [
+            e
+            for e in events
+            if e.get("type") == "tool_call_status" and e.get("status") == "ok"
+        ]
+        self.assertEqual(len(ok_events), 1)
+        self.assertEqual(ok_events[0]["summary"], expected_summary)
+        self.assertGreater(len(ok_events[0]["summary"]), 400)
+
 
 
 class TestSettingsClientAndSyntax(unittest.TestCase):

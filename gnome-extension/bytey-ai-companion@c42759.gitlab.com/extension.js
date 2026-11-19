@@ -14,6 +14,8 @@ import {TranscriptDrawer} from './transcriptDrawer.js';
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8765';
 const WS_BACKOFF_MIN_MS = 1000;
 const WS_BACKOFF_MAX_MS = 30000;
+// Match daemon _MAX_BODY_BYTES so large MCP tool results are not rejected by libsoup (default 128 KiB).
+const WS_MAX_INCOMING_PAYLOAD = 16 * 1024 * 1024;
 
 /**
  * GNOME Shell 48-50 Extension entrypoint for Bytey AI Companion Dynamic Island.
@@ -550,6 +552,11 @@ export default class ByteyExtension extends Extension {
                 }
 
                 this._wsConn = conn;
+                try {
+                    conn.max_incoming_payload_size = WS_MAX_INCOMING_PAYLOAD;
+                } catch (_e) {
+                    // Older libsoup: keep default limit.
+                }
                 this._wsBackoffMs = WS_BACKOFF_MIN_MS;
                 this._wsHadError = false;
                 this._drawer?.setConnectionStatus('connected');

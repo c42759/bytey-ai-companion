@@ -835,7 +835,7 @@ class ByteyDaemon:
                                 "tool": tool_name,
                                 "arguments": args,
                                 "status": status_str,
-                                "summary": summary[:400],
+                                "summary": summary,
                             }
                         )
                         llm_messages.append(
