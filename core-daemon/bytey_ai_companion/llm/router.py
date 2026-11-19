@@ -114,7 +114,12 @@ def _extract_message_tool_calls(msg: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         args = _safe_json_loads(fn.get("arguments") if "arguments" in fn else tc.get("arguments"))
         tc_id = str(tc.get("id") or f"call_{idx}")
-        normalized.append({"id": tc_id, "name": name, "arguments": args})
+        entry: dict[str, Any] = {"id": tc_id, "name": name, "arguments": args}
+        if tc.get("thought_signature") is not None:
+            entry["thought_signature"] = tc["thought_signature"]
+        if "has_provider_id" in tc:
+            entry["has_provider_id"] = bool(tc["has_provider_id"])
+        normalized.append(entry)
     return normalized
 
 
@@ -157,11 +162,13 @@ def _heuristic_tool_support(provider: str, model: str) -> bool:
 def _build_raw_assistant_message(
     content: str,
     tool_calls: list[dict[str, Any]],
+    gemini_parts: list[Any] | None = None,
 ) -> dict[str, Any]:
     msg: dict[str, Any] = {"role": "assistant", "content": content}
     if tool_calls:
-        msg["tool_calls"] = [
-            {
+        raw_tcs: list[dict[str, Any]] = []
+        for tc in tool_calls:
+            entry: dict[str, Any] = {
                 "id": tc["id"],
                 "type": "function",
                 "function": {
@@ -169,9 +176,48 @@ def _build_raw_assistant_message(
                     "arguments": json.dumps(tc["arguments"], ensure_ascii=False),
                 },
             }
-            for tc in tool_calls
-        ]
+            if tc.get("thought_signature") is not None:
+                entry["thought_signature"] = tc["thought_signature"]
+            if "has_provider_id" in tc or tc.get("thought_signature") is not None:
+                entry["has_provider_id"] = bool(tc.get("has_provider_id"))
+            raw_tcs.append(entry)
+        msg["tool_calls"] = raw_tcs
+    if gemini_parts:
+        # Retained in-memory only for multi-round Gemini tool calls; never persisted to SQLite.
+        msg["_gemini_parts"] = list(gemini_parts)
     return msg
+
+
+def _is_plain_gemini_text_part(part: Any) -> bool:
+    return (
+        getattr(part, "text", None) is not None
+        and getattr(part, "function_call", None) is None
+        and getattr(part, "thought_signature", None) is None
+        and getattr(part, "executable_code", None) is None
+        and getattr(part, "code_execution_result", None) is None
+        and getattr(part, "inline_data", None) is None
+        and getattr(part, "file_data", None) is None
+        and getattr(part, "function_response", None) is None
+        and getattr(part, "video_metadata", None) is None
+    )
+
+
+def _append_gemini_part(parts_out: list[Any], part: Any) -> None:
+    """Append a Gemini Part, coalescing consecutive plain text or thought-text parts."""
+    if (
+        _genai_types is not None
+        and parts_out
+        and _is_plain_gemini_text_part(part)
+        and _is_plain_gemini_text_part(parts_out[-1])
+        and bool(getattr(part, "thought", False)) == bool(getattr(parts_out[-1], "thought", False))
+    ):
+        merged_text = f"{parts_out[-1].text}{part.text}"
+        if getattr(part, "thought", False):
+            parts_out[-1] = _genai_types.Part(text=merged_text, thought=True)
+        else:
+            parts_out[-1] = _genai_types.Part(text=merged_text)
+        return
+    parts_out.append(part)
 
 
 class LLMRouter:
@@ -472,6 +518,7 @@ class LLMRouter:
                 clean_parts.append(clean)
                 await _invoke_callback(on_text_chunk, clean)
 
+        gemini_parts: list[Any] | None = None
         if prov in ("openai", "custom"):
             tool_calls = await self._chat_openai_compat(
                 prov, messages, effective_prompt, model, base_url, api_key, temperature, tools, emit_delta
@@ -481,7 +528,7 @@ class LLMRouter:
                 messages, effective_prompt, model, base_url, temperature, tools, emit_delta
             )
         elif prov == "gemini":
-            tool_calls = await self._chat_gemini(
+            tool_calls, gemini_parts = await self._chat_gemini(
                 messages, effective_prompt, model, base_url, api_key, temperature, tools, emit_delta
             )
         elif prov == "anthropic":
@@ -503,7 +550,9 @@ class LLMRouter:
             "content": content,
             "emotion": emotion,
             "tool_calls": tool_calls,
-            "raw_assistant_message": _build_raw_assistant_message(content, tool_calls),
+            "raw_assistant_message": _build_raw_assistant_message(
+                content, tool_calls, gemini_parts=gemini_parts
+            ),
         }
 
     async def _chat_openai_compat(
@@ -769,7 +818,7 @@ class LLMRouter:
         temperature: float,
         tools: list[dict[str, Any]] | None,
         emit_delta: Callable[[str], Any],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[Any]]:
         del base_url  # Official google-genai SDK handles endpoint routing via API key only.
         if _google_genai is None or _genai_types is None:
             raise RuntimeError("google-genai package is not installed")
@@ -778,7 +827,7 @@ class LLMRouter:
 
         model_name = (model or "gemini-2.5-flash").strip().removeprefix("models/")
         contents: list[Any] = []
-        call_id_to_name: dict[str, str] = {}
+        call_id_to_meta: dict[str, tuple[str, bool]] = {}
 
         for msg in messages:
             role = msg.get("role", "user")
@@ -792,33 +841,62 @@ class LLMRouter:
                     )
                 )
             elif role == "assistant":
-                parts: list[Any] = []
-                text = _stringify_content(msg.get("content"))
-                if text:
-                    parts.append(_genai_types.Part.from_text(text=text))
-                for tc in _extract_message_tool_calls(msg):
-                    call_id_to_name[tc["id"]] = tc["name"]
-                    parts.append(
-                        _genai_types.Part.from_function_call(
-                            name=tc["name"],
-                            args=tc["arguments"] if isinstance(tc["arguments"], dict) else {},
-                        )
-                    )
-                if parts:
-                    contents.append(_genai_types.Content(role="model", parts=parts))
+                tcs = _extract_message_tool_calls(msg)
+                for tc in tcs:
+                    call_id_to_meta[tc["id"]] = (tc["name"], bool(tc.get("has_provider_id")))
+
+                gemini_parts = msg.get("_gemini_parts")
+                if gemini_parts:
+                    for part in gemini_parts:
+                        fc = getattr(part, "function_call", None)
+                        if fc is not None:
+                            fc_id = getattr(fc, "id", None)
+                            fc_name = getattr(fc, "name", None)
+                            if fc_id and fc_name:
+                                call_id_to_meta[str(fc_id)] = (str(fc_name), True)
+                    contents.append(_genai_types.Content(role="model", parts=list(gemini_parts)))
+                else:
+                    parts: list[Any] = []
+                    text = _stringify_content(msg.get("content"))
+                    if text:
+                        parts.append(_genai_types.Part.from_text(text=text))
+                    for tc in tcs:
+                        fc_kwargs: dict[str, Any] = {
+                            "name": tc["name"],
+                            "args": tc["arguments"] if isinstance(tc["arguments"], dict) else {},
+                        }
+                        if tc.get("has_provider_id") and tc.get("id"):
+                            fc_kwargs["id"] = tc["id"]
+                        part_kwargs: dict[str, Any] = {
+                            "function_call": _genai_types.FunctionCall(**fc_kwargs),
+                        }
+                        if tc.get("thought_signature") is not None:
+                            part_kwargs["thought_signature"] = tc["thought_signature"]
+                        parts.append(_genai_types.Part(**part_kwargs))
+                    if parts:
+                        contents.append(_genai_types.Content(role="model", parts=parts))
             elif role == "tool":
-                tool_name = str(
-                    msg.get("name") or call_id_to_name.get(str(msg.get("tool_call_id") or ""), "")
-                )
+                tc_id = str(msg.get("tool_call_id") or "")
+                mapped_name, has_provider_id = call_id_to_meta.get(tc_id, ("", False))
+                tool_name = str(msg.get("name") or mapped_name)
                 raw_val = msg.get("content")
                 if isinstance(raw_val, dict):
                     resp_obj: dict[str, Any] = raw_val
                 else:
                     resp_obj = {"result": _stringify_content(raw_val)}
-                part = _genai_types.Part.from_function_response(
-                    name=tool_name,
-                    response=resp_obj,
-                )
+                if has_provider_id and tc_id:
+                    part = _genai_types.Part(
+                        function_response=_genai_types.FunctionResponse(
+                            id=tc_id,
+                            name=tool_name,
+                            response=resp_obj,
+                        )
+                    )
+                else:
+                    part = _genai_types.Part.from_function_response(
+                        name=tool_name,
+                        response=resp_obj,
+                    )
                 if (
                     contents
                     and getattr(contents[-1], "role", None) == "user"
@@ -853,6 +931,7 @@ class LLMRouter:
 
         client = _google_genai.Client(api_key=api_key)
         tool_calls: list[dict[str, Any]] = []
+        raw_parts: list[Any] = []
         try:
             stream = await client.aio.models.generate_content_stream(
                 model=model_name,
@@ -863,10 +942,9 @@ class LLMRouter:
                 for cand in getattr(chunk, "candidates", None) or []:
                     content_obj = getattr(cand, "content", None)
                     for part in getattr(content_obj, "parts", None) or []:
-                        if getattr(part, "thought", False):
-                            continue
+                        _append_gemini_part(raw_parts, part)
                         part_text = getattr(part, "text", None)
-                        if part_text:
+                        if part_text and not getattr(part, "thought", False):
                             await emit_delta(str(part_text))
                         fc = getattr(part, "function_call", None)
                         if fc is not None:
@@ -874,11 +952,15 @@ class LLMRouter:
                             if fc_name:
                                 raw_args = getattr(fc, "args", None)
                                 args_dict = dict(raw_args) if isinstance(raw_args, dict) else {}
+                                raw_fc_id = getattr(fc, "id", None)
+                                thought_sig = getattr(part, "thought_signature", None)
                                 tool_calls.append(
                                     {
-                                        "id": str(getattr(fc, "id", None) or f"gemini_call_{len(tool_calls)}"),
+                                        "id": str(raw_fc_id or f"gemini_call_{len(tool_calls)}"),
                                         "name": fc_name,
                                         "arguments": args_dict,
+                                        "thought_signature": thought_sig,
+                                        "has_provider_id": bool(raw_fc_id),
                                     }
                                 )
         finally:
@@ -887,7 +969,7 @@ class LLMRouter:
             except Exception:
                 pass
 
-        return tool_calls
+        return tool_calls, raw_parts
 
     async def _chat_anthropic(
         self,

@@ -67,6 +67,9 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "chat_width": ("visuals", "chat_width"),
     "chat_height": ("visuals", "chat_height"),
     "chat_density": ("visuals", "chat_density"),
+    "eye_color": ("visuals", "eye_color"),
+    "background_color": ("visuals", "background_color"),
+    "border_color": ("visuals", "border_color"),
 }
 
 

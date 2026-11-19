@@ -113,6 +113,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "chat_width": 380,
         "chat_height": 420,
         "chat_density": "comfortable",
+        "eye_color": "#F7FAFF",
+        "background_color": "#0A0A0C",
+        "border_color": "#2A2C34",
     },
     "mcpServers": {},
 }

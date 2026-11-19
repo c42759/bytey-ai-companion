@@ -26,6 +26,13 @@ const DENSITY_ICON_SIZES = {
     spacious: {close: 16, mic: 17, replay: 15},
 };
 
+const CONNECTION_STATES = ['connected', 'error', 'disconnected'];
+const CONNECTION_STATUS_LABELS = {
+    connected: 'Connected',
+    error: 'Connection error',
+    disconnected: 'Disconnected',
+};
+
 /**
  * Anchored expandable conversation transcript and tool-confirmation drawer.
  */
@@ -48,6 +55,7 @@ export class TranscriptDrawer {
 
         this._isOpen = false;
         this._destroyed = false;
+        this._connectionState = 'disconnected';
         this._online = false;
         this._listening = false;
         this._petName = 'Bytey';
@@ -95,6 +103,13 @@ export class TranscriptDrawer {
         });
 
         Main.layoutManager.addTopChrome(this._container);
+        this._statusTooltip = new St.Label({
+            style_class: 'bytey-status-tooltip',
+            text: CONNECTION_STATUS_LABELS.disconnected,
+            reactive: false,
+            visible: false,
+        });
+        Main.layoutManager.addTopChrome(this._statusTooltip);
         this._renderEmptyState();
     }
 
@@ -126,21 +141,44 @@ export class TranscriptDrawer {
         });
 
         this._providerLabel = new St.Label({
-            style_class: 'bytey-provider-pill',
+            style_class: 'bytey-provider-pill-label',
             text: 'ollama',
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        this._providerLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-        header.add_child(this._providerLabel);
-
-        this._statusLabel = new St.Label({
-            style_class: 'bytey-status-dot',
-            text: 'Offline',
-            x_expand: true,
             x_align: Clutter.ActorAlign.START,
             y_align: Clutter.ActorAlign.CENTER,
         });
-        header.add_child(this._statusLabel);
+        this._providerLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+
+        this._providerPill = new St.Bin({
+            style_class: 'bytey-provider-pill',
+            y_align: Clutter.ActorAlign.CENTER,
+            child: this._providerLabel,
+        });
+        header.add_child(this._providerPill);
+
+        this._statusDot = new St.Widget({
+            style_class: 'bytey-status-dot bytey-status-disconnected',
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+
+        this._statusIndicator = new St.Bin({
+            style_class: 'bytey-status-indicator',
+            reactive: true,
+            track_hover: true,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+            accessible_name: CONNECTION_STATUS_LABELS.disconnected,
+            child: this._statusDot,
+        });
+        this._connect(this._statusIndicator, 'notify::hover', () => {
+            if (this._statusIndicator.hover)
+                this._showStatusTooltip();
+            else
+                this._hideStatusTooltip();
+        });
+        header.add_child(this._statusIndicator);
+
+        header.add_child(new St.Widget({x_expand: true}));
 
         this._densityBtn = new St.Button({
             style_class: 'bytey-density-btn',
@@ -292,17 +330,67 @@ export class TranscriptDrawer {
     /**
      * Update daemon connection status indicator.
      *
-     * @param {boolean} online
+     * @param {'connected'|'error'|'disconnected'|boolean} status
      */
-    setConnectionStatus(online) {
+    setConnectionStatus(status) {
         if (this._destroyed)
             return;
-        this._online = Boolean(online);
-        this._statusLabel.text = this._online ? 'Connected' : 'Offline';
-        if (this._online)
-            this._statusLabel.add_style_class_name('bytey-status-dot-online');
-        else
-            this._statusLabel.remove_style_class_name('bytey-status-dot-online');
+
+        let nextState = 'disconnected';
+        if (typeof status === 'boolean') {
+            nextState = status ? 'connected' : 'disconnected';
+        } else if (typeof status === 'string') {
+            const norm = status.toLowerCase().trim();
+            if (norm === 'connected' || norm === 'online')
+                nextState = 'connected';
+            else if (norm === 'error' || norm === 'connection_error')
+                nextState = 'error';
+            else
+                nextState = 'disconnected';
+        }
+
+        this._connectionState = nextState;
+        this._online = nextState === 'connected';
+
+        if (this._statusDot) {
+            for (const state of CONNECTION_STATES)
+                this._statusDot.remove_style_class_name(`bytey-status-${state}`);
+            this._statusDot.add_style_class_name(`bytey-status-${nextState}`);
+        }
+
+        const label = CONNECTION_STATUS_LABELS[nextState];
+        if (this._statusIndicator)
+            this._statusIndicator.accessible_name = label;
+        if (this._statusTooltip?.visible)
+            this._showStatusTooltip();
+    }
+
+    _showStatusTooltip() {
+        if (this._destroyed || !this._isOpen || !this._statusTooltip || !this._statusIndicator)
+            return;
+        const label = CONNECTION_STATUS_LABELS[this._connectionState] ?? CONNECTION_STATUS_LABELS.disconnected;
+        this._statusTooltip.text = label;
+        this._statusTooltip.visible = true;
+        this._statusTooltip.get_parent()?.set_child_above_sibling(this._statusTooltip, null);
+
+        const [ix, iy] = this._statusIndicator.get_transformed_position();
+        const [iw, ih] = this._statusIndicator.get_transformed_size();
+        const [, tipW] = this._statusTooltip.get_preferred_width(-1);
+        const [, tipH] = this._statusTooltip.get_preferred_height(-1);
+        const w = Math.max(1, Math.ceil(tipW || 72));
+        const h = Math.max(1, Math.ceil(tipH || 24));
+
+        const rawX = Math.round(ix + iw / 2 - w / 2);
+        const aboveY = Math.round(iy - h - 6);
+        const area = this._positionManager.getWorkArea(this._monitorIndex);
+        const targetY = aboveY < area.y ? Math.round(iy + ih + 6) : aboveY;
+        const clamped = this._positionManager.clampToMonitor(rawX, targetY, w, h, this._monitorIndex);
+        this._statusTooltip.set_position(clamped.x, clamped.y);
+    }
+
+    _hideStatusTooltip() {
+        if (this._statusTooltip)
+            this._statusTooltip.visible = false;
     }
 
     /**
@@ -414,6 +502,7 @@ export class TranscriptDrawer {
         if (event.get_button() !== Clutter.BUTTON_PRIMARY || this._destroyed || !this._container)
             return Clutter.EVENT_PROPAGATE;
 
+        this._hideStatusTooltip();
         this._resizing = true;
         this._resizeStartCoords = event.get_coords();
         this._resizeStartSize = [this._drawerWidth, this._drawerHeight];
@@ -572,6 +661,7 @@ export class TranscriptDrawer {
 
             record.msg.content = nextContent;
             record.bodyLabel.text = nextContent;
+            record.bodyLabel.visible = nextContent.length > 0;
             if (emotion)
                 this._updateEmotionBadge(record, emotion);
             if (record.replayBtn)
@@ -602,25 +692,23 @@ export class TranscriptDrawer {
             return;
         }
 
-        // Attach to specified message_id or latest assistant message (creating one if needed).
+        // Attach to specified message_id or trailing assistant message (creating one if needed).
         let msgRecord = tool.messageId ? this._messageWidgets.get(tool.messageId) : null;
-        if (!msgRecord) {
-            for (let i = this._messages.length - 1; i >= 0; i--) {
-                if (this._messages[i].role === 'assistant') {
-                    msgRecord = this._messageWidgets.get(this._messages[i].id);
-                    break;
-                }
-            }
+        if (!msgRecord && !tool.messageId) {
+            const lastMsg = this._messages[this._messages.length - 1];
+            if (lastMsg && lastMsg.role === 'assistant')
+                msgRecord = this._messageWidgets.get(lastMsg.id);
         }
         if (!msgRecord) {
+            const targetId = tool.messageId ?? `tool-msg-${tool.id}`;
             this.upsertMessageDelta({
-                message_id: tool.messageId ?? `tool-msg-${tool.id}`,
+                message_id: targetId,
                 role: 'assistant',
                 source: 'text',
                 text: '',
                 is_final: false,
             });
-            msgRecord = this._messageWidgets.get(tool.messageId ?? `tool-msg-${tool.id}`);
+            msgRecord = this._messageWidgets.get(targetId);
         }
 
         if (msgRecord) {
@@ -703,6 +791,7 @@ export class TranscriptDrawer {
         if (this._destroyed || !this._isOpen)
             return;
         this._isOpen = false;
+        this._hideStatusTooltip();
         if (this._focusIdleId) {
             GLib.Source.remove(this._focusIdleId);
             this._focusIdleId = 0;
@@ -761,6 +850,12 @@ export class TranscriptDrawer {
         this._messages = [];
         this._emptyStateActor = null;
 
+        if (this._statusTooltip) {
+            Main.layoutManager.removeChrome(this._statusTooltip);
+            this._statusTooltip.destroy();
+            this._statusTooltip = null;
+        }
+
         if (this._container) {
             Main.layoutManager.removeChrome(this._container);
             this._container.destroy();
@@ -778,6 +873,10 @@ export class TranscriptDrawer {
         this._resizeHandle = null;
         this._positionManager = null;
         this._callbacks = null;
+
+        this._statusIndicator = null;
+        this._statusDot = null;
+        this._providerPill = null;
     }
 
     _clearEmptyState() {
@@ -913,6 +1012,7 @@ export class TranscriptDrawer {
         const bodyLabel = new St.Label({
             style_class: 'bytey-msg-text',
             text: msg.content,
+            visible: msg.content.length > 0,
             x_expand: true,
         });
         bodyLabel.clutter_text.line_wrap = true;

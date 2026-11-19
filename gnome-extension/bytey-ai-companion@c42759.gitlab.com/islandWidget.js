@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import Cairo from 'cairo';
 import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -9,6 +11,165 @@ import {EyeRenderer} from './eyeRenderer.js';
 
 const DRAG_THRESHOLD_PX = 5;
 const EXPANDED_STATES = new Set(['LISTENING', 'THINKING', 'TOOL_CALLING', 'SPEAKING']);
+const DEFAULT_BG_RGBA = [10 / 255, 10 / 255, 12 / 255, 1.0];
+const DEFAULT_BORDER_RGBA = [42 / 255, 44 / 255, 52 / 255, 1.0];
+
+/**
+ * Parse `#RGB`, `#RRGGBB`, or `#RRGGBBAA` into normalized `[r, g, b, a]` in `0..1`.
+ *
+ * @param {string} hex
+ * @param {number[]} fallback
+ * @returns {number[]}
+ */
+function _parseHexColor(hex, fallback) {
+    if (typeof hex !== 'string')
+        return [...fallback];
+    const clean = hex.trim();
+    if (!clean.startsWith('#'))
+        return [...fallback];
+    const raw = clean.slice(1);
+    if (!/^[0-9a-fA-F]+$/.test(raw))
+        return [...fallback];
+
+    if (raw.length === 3) {
+        return [
+            parseInt(raw[0] + raw[0], 16) / 255,
+            parseInt(raw[1] + raw[1], 16) / 255,
+            parseInt(raw[2] + raw[2], 16) / 255,
+            1.0,
+        ];
+    }
+    if (raw.length === 6) {
+        return [
+            parseInt(raw.slice(0, 2), 16) / 255,
+            parseInt(raw.slice(2, 4), 16) / 255,
+            parseInt(raw.slice(4, 6), 16) / 255,
+            1.0,
+        ];
+    }
+    if (raw.length === 8) {
+        return [
+            parseInt(raw.slice(0, 2), 16) / 255,
+            parseInt(raw.slice(2, 4), 16) / 255,
+            parseInt(raw.slice(4, 6), 16) / 255,
+            parseInt(raw.slice(6, 8), 16) / 255,
+        ];
+    }
+    return [...fallback];
+}
+
+/**
+ * Format `[r, g, b, a]` (`0..1`) as CSS `rgba(R, G, B, A)`.
+ *
+ * @param {number[]} rgba
+ * @returns {string}
+ */
+function _rgbaCss(rgba) {
+    const r = Math.round(Math.max(0, Math.min(1, rgba[0] ?? 0)) * 255);
+    const g = Math.round(Math.max(0, Math.min(1, rgba[1] ?? 0)) * 255);
+    const b = Math.round(Math.max(0, Math.min(1, rgba[2] ?? 0)) * 255);
+    const a = Math.max(0, Math.min(1, rgba[3] ?? 1));
+    return `rgba(${r}, ${g}, ${b}, ${Number(a.toFixed(3))})`;
+}
+
+/**
+ * Convert HSL (`h, s, l` in `0..1`) to `[r, g, b]` (`0..1`).
+ *
+ * @param {number} h
+ * @param {number} s
+ * @param {number} l
+ * @returns {number[]}
+ */
+function _hslToRgb(h, s, l) {
+    const hn = ((h % 1) + 1) % 1;
+    if (s === 0)
+        return [l, l, l];
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    const hue2rgb = t => {
+        let tn = t;
+        if (tn < 0)
+            tn += 1;
+        if (tn > 1)
+            tn -= 1;
+        if (tn < 1 / 6)
+            return p + (q - p) * 6 * tn;
+        if (tn < 1 / 2)
+            return q;
+        if (tn < 2 / 3)
+            return p + (q - p) * (2 / 3 - tn) * 6;
+        return p;
+    };
+    return [hue2rgb(hn + 1 / 3), hue2rgb(hn), hue2rgb(hn - 1 / 3)];
+}
+
+/**
+ * Sample `[px, py]` at arc-length `s` along a closed rounded-pill perimeter.
+ *
+ * @param {number} s
+ * @param {number} x0
+ * @param {number} y0
+ * @param {number} w
+ * @param {number} h
+ * @param {number} r
+ * @returns {number[]}
+ */
+function _capsulePoint(s, x0, y0, w, h, r) {
+    const rc = Math.min(Math.max(0, r), w / 2, h / 2);
+    const horiz = Math.max(0, w - 2 * rc);
+    const vert = Math.max(0, h - 2 * rc);
+    const arcLen = 0.5 * Math.PI * rc;
+    const L = 2 * horiz + 2 * vert + 4 * arcLen;
+    if (L <= 0)
+        return [x0, y0];
+
+    let d = ((s % L) + L) % L;
+
+    // 1. Top straight
+    if (d < horiz)
+        return [x0 + rc + d, y0];
+    d -= horiz;
+
+    // 2. Top-right arc
+    if (d < arcLen) {
+        const angle = -Math.PI / 2 + (rc > 0 ? d / rc : 0);
+        return [x0 + w - rc + rc * Math.cos(angle), y0 + rc + rc * Math.sin(angle)];
+    }
+    d -= arcLen;
+
+    // 3. Right straight
+    if (d < vert)
+        return [x0 + w, y0 + rc + d];
+    d -= vert;
+
+    // 4. Bottom-right arc
+    if (d < arcLen) {
+        const angle = rc > 0 ? d / rc : 0;
+        return [x0 + w - rc + rc * Math.cos(angle), y0 + h - rc + rc * Math.sin(angle)];
+    }
+    d -= arcLen;
+
+    // 5. Bottom straight
+    if (d < horiz)
+        return [x0 + w - rc - d, y0 + h];
+    d -= horiz;
+
+    // 6. Bottom-left arc
+    if (d < arcLen) {
+        const angle = Math.PI / 2 + (rc > 0 ? d / rc : 0);
+        return [x0 + rc + rc * Math.cos(angle), y0 + h - rc + rc * Math.sin(angle)];
+    }
+    d -= arcLen;
+
+    // 7. Left straight
+    if (d < vert)
+        return [x0, y0 + h - rc - d];
+    d -= vert;
+
+    // 8. Top-left arc
+    const angle = Math.PI + (rc > 0 ? d / rc : 0);
+    return [x0 + rc + rc * Math.cos(angle), y0 + rc + rc * Math.sin(angle)];
+}
 
 /**
  * Always-on-top Dynamic Island pill widget placed via `Main.layoutManager.addTopChrome`.
@@ -39,7 +200,17 @@ export class IslandWidget {
             offset_y: 12,
             float_x: 500,
             float_y: 40,
+            eye_color: '#F7FAFF',
+            background_color: '#0A0A0C',
+            border_color: '#2A2C34',
         };
+
+        this._bgColor = _parseHexColor('#0A0A0C', DEFAULT_BG_RGBA);
+        this._borderColor = _parseHexColor('#2A2C34', DEFAULT_BORDER_RGBA);
+        this._rainbowPhase = 0;
+        this._rainbowTimerId = 0;
+        this._rainbowLastUs = 0;
+        this._hovered = false;
 
         this._pressActive = false;
         this._dragging = false;
@@ -49,8 +220,9 @@ export class IslandWidget {
         this._destroyed = false;
         this._signalIds = [];
 
-        this._island = new St.BoxLayout({
+        this._island = new St.Widget({
             style_class: 'bytey-island',
+            layout_manager: new Clutter.BinLayout(),
             reactive: true,
             track_hover: true,
             can_focus: false,
@@ -58,8 +230,16 @@ export class IslandWidget {
             y_align: Clutter.ActorAlign.CENTER,
         });
 
+        this._contentBox = new St.BoxLayout({
+            style_class: 'bytey-island-content',
+            x_expand: true,
+            y_expand: true,
+            x_align: Clutter.ActorAlign.FILL,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+
         this._eyeRenderer = new EyeRenderer({width: 96, height: 30});
-        this._island.add_child(this._eyeRenderer.actor);
+        this._contentBox.add_child(this._eyeRenderer.actor);
 
         this._statusLabel = new St.Label({
             style_class: 'bytey-island-label',
@@ -68,18 +248,35 @@ export class IslandWidget {
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._statusLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-        this._island.add_child(this._statusLabel);
+        this._contentBox.add_child(this._statusLabel);
 
+        this._borderCanvas = new St.DrawingArea({
+            reactive: false,
+            x_expand: true,
+            y_expand: true,
+            x_align: Clutter.ActorAlign.FILL,
+            y_align: Clutter.ActorAlign.FILL,
+        });
+
+        this._island.add_child(this._contentBox);
+        this._island.add_child(this._borderCanvas);
+
+        this._connect(this._borderCanvas, 'repaint', area => this._onBorderRepaint(area));
+        this._connect(this._island, 'notify::hover', () => {
+            this._hovered = Boolean(this._island.hover);
+            this._borderCanvas?.queue_repaint();
+        });
         this._connect(this._island, 'button-press-event', (_a, event) => this._onButtonPress(event));
         this._connect(this._island, 'motion-event', (_a, event) => this._onMotion(event));
         this._connect(this._island, 'button-release-event', (_a, event) => this._onButtonRelease(event));
 
+        this._syncCustomColors();
         Main.layoutManager.addTopChrome(this._island);
         this.reposition();
     }
 
     /**
-     * @returns {St.BoxLayout}
+     * @returns {St.Widget}
      */
     get actor() {
         return this._island;
@@ -161,6 +358,8 @@ export class IslandWidget {
 
         this._eyeRenderer.setState(normState, emotion);
         this._syncStateStyles();
+        this._syncRainbowTimer();
+        this._borderCanvas?.queue_repaint();
         this.reposition();
     }
 
@@ -177,7 +376,7 @@ export class IslandWidget {
     }
 
     /**
-     * Apply updated visuals config (animation mode, cursor tracking, fixed/float position).
+     * Apply updated visuals config (animation mode, cursor tracking, colors, position).
      *
      * @param {object} visualsConfig
      */
@@ -190,10 +389,18 @@ export class IslandWidget {
             ...visualsConfig,
         };
 
+        this._bgColor = _parseHexColor(this._visualsConfig.background_color, DEFAULT_BG_RGBA);
+        this._borderColor = _parseHexColor(this._visualsConfig.border_color, DEFAULT_BORDER_RGBA);
+
         this._eyeRenderer.setAnimationConfig(
             this._visualsConfig.animation_mode ?? 'full',
             this._visualsConfig.cursor_tracking ?? true
         );
+        this._eyeRenderer.setEyeColor(this._visualsConfig.eye_color ?? '#F7FAFF');
+
+        this._syncCustomColors();
+        this._syncRainbowTimer();
+        this._borderCanvas?.queue_repaint();
 
         if (!this._dragging)
             this.reposition();
@@ -223,6 +430,7 @@ export class IslandWidget {
         if (this._destroyed)
             return;
         this._destroyed = true;
+        this._stopRainbowTimer();
         this._releaseDragGrab();
 
         for (const [obj, id] of this._signalIds) {
@@ -244,6 +452,8 @@ export class IslandWidget {
             this._island.destroy();
             this._island = null;
         }
+        this._borderCanvas = null;
+        this._contentBox = null;
         this._statusLabel = null;
         this._positionManager = null;
         this._callbacks = null;
@@ -253,6 +463,166 @@ export class IslandWidget {
         const id = obj.connect(signal, handler);
         this._signalIds.push([obj, id]);
         return id;
+    }
+
+    _syncCustomColors() {
+        if (this._destroyed || !this._island)
+            return;
+        this._island.set_style(`background-color: ${_rgbaCss(this._bgColor)};`);
+    }
+
+    _syncRainbowTimer() {
+        const shouldRun = !this._destroyed &&
+            this._state === 'THINKING' &&
+            (this._visualsConfig.animation_mode ?? 'full') === 'full';
+
+        if (!shouldRun) {
+            this._stopRainbowTimer();
+            return;
+        }
+
+        if (this._rainbowTimerId)
+            return;
+
+        this._rainbowLastUs = GLib.get_monotonic_time();
+        this._rainbowTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
+            if (this._destroyed ||
+                this._state !== 'THINKING' ||
+                (this._visualsConfig.animation_mode ?? 'full') !== 'full') {
+                this._rainbowTimerId = 0;
+                return GLib.SOURCE_REMOVE;
+            }
+
+            const nowUs = GLib.get_monotonic_time();
+            const dt = Math.min(0.1, Math.max(0.001, (nowUs - this._rainbowLastUs) / 1_000_000));
+            this._rainbowLastUs = nowUs;
+            this._rainbowPhase = (this._rainbowPhase + dt * 0.65) % 1.0;
+            this._borderCanvas?.queue_repaint();
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _stopRainbowTimer() {
+        if (this._rainbowTimerId) {
+            GLib.source_remove(this._rainbowTimerId);
+            this._rainbowTimerId = 0;
+        }
+    }
+
+    _strokeRainbowCapsule(cr, width, height, inset, lineWidth, sat, light, alpha) {
+        const w = width - 2 * inset;
+        const h = height - 2 * inset;
+        if (w <= 0 || h <= 0)
+            return;
+
+        const r = Math.max(2, Math.min(w, h) / 2);
+        const rc = Math.min(r, w / 2, h / 2);
+        const horiz = Math.max(0, w - 2 * rc);
+        const vert = Math.max(0, h - 2 * rc);
+        const L = 2 * horiz + 2 * vert + 2 * Math.PI * rc;
+        if (L <= 0)
+            return;
+
+        const N = 96;
+        cr.save();
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setLineWidth(lineWidth);
+        for (let i = 0; i < N; i++) {
+            const s0 = (i / N) * L;
+            const s1 = ((i + 1.18) / N) * L;
+            const [x1, y1] = _capsulePoint(s0, inset, inset, w, h, rc);
+            const [x2, y2] = _capsulePoint(s1, inset, inset, w, h, rc);
+            const hue = ((i / N) - this._rainbowPhase + 1) % 1.0;
+            const [crR, crG, crB] = _hslToRgb(hue, sat, light);
+            cr.setSourceRGBA(crR, crG, crB, alpha);
+            cr.newSubPath();
+            cr.moveTo(x1, y1);
+            cr.lineTo(x2, y2);
+            cr.stroke();
+        }
+        cr.restore();
+    }
+
+    _onBorderRepaint(area) {
+        const [width, height] = area.get_surface_size();
+        if (width <= 2 || height <= 2)
+            return;
+
+        const cr = area.get_context();
+        try {
+            cr.setOperator(Cairo.Operator.CLEAR);
+            cr.paint();
+            cr.setOperator(Cairo.Operator.OVER);
+
+            const mode = this._visualsConfig.animation_mode ?? 'full';
+            if (this._state === 'THINKING' && mode !== 'disabled') {
+                this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24);
+                this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96);
+                return;
+            }
+
+            let border;
+            switch (this._state) {
+            case 'LISTENING':
+                border = [56 / 255, 189 / 255, 248 / 255, 0.78];
+                break;
+            case 'TOOL_CALLING':
+                border = [251 / 255, 191 / 255, 36 / 255, 0.78];
+                break;
+            case 'SPEAKING':
+                border = [96 / 255, 165 / 255, 250 / 255, 0.78];
+                break;
+            case 'ERROR':
+                border = [1.0, 90 / 255, 95 / 255, 0.92];
+                break;
+            case 'MUTED':
+                border = [
+                    this._borderColor[0],
+                    this._borderColor[1],
+                    this._borderColor[2],
+                    this._borderColor[3] * 0.55,
+                ];
+                break;
+            case 'IDLE':
+            default: {
+                const [r, g, b, a] = this._borderColor;
+                if (this._dragging) {
+                    border = [
+                        Math.min(1, r + 0.22),
+                        Math.min(1, g + 0.22),
+                        Math.min(1, b + 0.22),
+                        Math.min(1, a + 0.24),
+                    ];
+                } else if (this._hovered) {
+                    border = [r, g, b, Math.min(1, a + 0.14)];
+                } else {
+                    border = this._borderColor;
+                }
+                break;
+            }
+            }
+
+            const inset = 1.0;
+            const w = width - 2 * inset;
+            const h = height - 2 * inset;
+            if (w <= 2 || h <= 2)
+                return;
+            const r = Math.min(w / 2, h / 2);
+
+            cr.save();
+            cr.setSourceRGBA(border[0], border[1], border[2], border[3]);
+            cr.setLineWidth(1.5);
+            cr.newSubPath();
+            cr.arc(inset + w - r, inset + r, r, -Math.PI / 2, 0);
+            cr.arc(inset + w - r, inset + h - r, r, 0, Math.PI / 2);
+            cr.arc(inset + r, inset + h - r, r, Math.PI / 2, Math.PI);
+            cr.arc(inset + r, inset + r, r, Math.PI, (3 * Math.PI) / 2);
+            cr.closePath();
+            cr.stroke();
+            cr.restore();
+        } finally {
+            cr.$dispose();
+        }
     }
 
     _syncStateStyles() {
@@ -300,8 +670,13 @@ export class IslandWidget {
         if (button !== Clutter.BUTTON_PRIMARY)
             return Clutter.EVENT_PROPAGATE;
 
+        const hadDragging = this._dragging;
         this._pressActive = true;
         this._dragging = false;
+        if (hadDragging) {
+            this._island.remove_style_class_name('bytey-island-dragging');
+            this._borderCanvas?.queue_repaint();
+        }
         this._pressStart = event.get_coords();
         this._actorStart = [this._island.x, this._island.y];
 
@@ -329,6 +704,7 @@ export class IslandWidget {
                 return Clutter.EVENT_PROPAGATE;
             this._dragging = true;
             this._island.add_style_class_name('bytey-island-dragging');
+            this._borderCanvas?.queue_repaint();
         }
 
         const bounds = this.getBounds();
@@ -358,10 +734,13 @@ export class IslandWidget {
         const dy = curY - this._pressStart[1];
         const travel = Math.hypot(dx, dy);
 
+        const hadDragging = this._dragging;
         const wasDragging = this._dragging ||
             (this._visualsConfig.position_mode === 'floating' && travel >= DRAG_THRESHOLD_PX);
         this._dragging = false;
         this._island.remove_style_class_name('bytey-island-dragging');
+        if (hadDragging)
+            this._borderCanvas?.queue_repaint();
 
         if (wasDragging) {
             const bounds = this.getBounds();

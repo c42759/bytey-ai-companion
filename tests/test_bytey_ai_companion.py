@@ -8,6 +8,7 @@ import json
 import math
 import os
 import py_compile
+import re
 import socket
 import sqlite3
 import stat
@@ -19,11 +20,13 @@ import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 import httpx
 import websockets
+from google.genai import types as genai_types
 
 os.environ["BYTEY_DISABLE_KEYRING"] = "1"
 
@@ -41,9 +44,11 @@ from bytey_ai_companion.audio.wakeword import WakeWordMatcher  # noqa: E402
 from bytey_ai_companion.config import (  # noqa: E402
     ConfigManager,
     SecretStore,
+    VisualsConfig,
     resolve_config_dir,
 )
 from bytey_ai_companion.llm.emotions import EmotionStreamParser, VALID_EMOTIONS  # noqa: E402
+from bytey_ai_companion.llm.router import LLMRouter  # noqa: E402
 from bytey_ai_companion.main import ByteyDaemon  # noqa: E402
 from bytey_ai_companion.mcp_host import (  # noqa: E402
     MCPClientManager,
@@ -385,6 +390,50 @@ class TestConfigAndSecrets(unittest.TestCase):
                         self.assertFalse(SecretStore(config_dir=self.cfg_dir)._keyring_enabled())
                     with patch.dict(os.environ, {"AI_PET_DISABLE_KEYRING": "1"}):
                         self.assertFalse(SecretStore(config_dir=self.cfg_dir)._keyring_enabled())
+
+    def test_visuals_color_validation_and_patch_roundtrip(self) -> None:
+        store = SecretStore(config_dir=self.cfg_dir)
+        mgr = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+
+        self.assertEqual(mgr.config.visuals.eye_color, "#F7FAFF")
+        self.assertEqual(mgr.config.visuals.background_color, "#0A0A0C")
+        self.assertEqual(mgr.config.visuals.border_color, "#2A2C34")
+
+        normalized = VisualsConfig(
+            eye_color="#0f8",
+            background_color=" 112233cc ",
+            border_color="invalid",
+        )
+        self.assertEqual(normalized.eye_color, "#00FF88")
+        self.assertEqual(normalized.background_color, "#112233CC")
+        self.assertEqual(normalized.border_color, "#2A2C34")
+
+        invalid_all = VisualsConfig(
+            eye_color="invalid",
+            background_color="not-a-hex",
+            border_color="",
+        )
+        self.assertEqual(invalid_all.eye_color, "#F7FAFF")
+        self.assertEqual(invalid_all.background_color, "#0A0A0C")
+        self.assertEqual(invalid_all.border_color, "#2A2C34")
+
+        updated = mgr.update_config(
+            {
+                "visuals": {
+                    "eye_color": "#00ff88",
+                    "background_color": "#101218",
+                    "border_color": "#ff00aa80",
+                }
+            }
+        )
+        self.assertEqual(updated.visuals.eye_color, "#00FF88")
+        self.assertEqual(updated.visuals.background_color, "#101218")
+        self.assertEqual(updated.visuals.border_color, "#FF00AA80")
+
+        reloaded = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+        self.assertEqual(reloaded.config.visuals.eye_color, "#00FF88")
+        self.assertEqual(reloaded.config.visuals.background_color, "#101218")
+        self.assertEqual(reloaded.config.visuals.border_color, "#FF00AA80")
 
 
 class TestStorageManager(unittest.IsolatedAsyncioTestCase):
@@ -733,6 +782,169 @@ class TestSchemaSyncAndMCP(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(approved_res["content"], "echo:allowed")
 
 
+class TestGeminiToolThoughtSignature(unittest.IsolatedAsyncioTestCase):
+    """Test Gemini multi-round tool calls preserve thought signatures and filter thoughts."""
+
+    async def test_gemini_multi_round_tool_call_preserves_thought_signature(self) -> None:
+        recorded_calls: list[tuple[str, list[Any], Any]] = []
+        round_chunks: list[list[Any]] = [
+            [
+                SimpleNamespace(
+                    candidates=[
+                        SimpleNamespace(
+                            content=SimpleNamespace(
+                                parts=[
+                                    genai_types.Part(thought=True, text="checking weather"),
+                                    genai_types.Part(
+                                        function_call=genai_types.FunctionCall(
+                                            id="fc_weather_1",
+                                            name="Weather__get_current_weather",
+                                            args={"city": "Ovar"},
+                                        ),
+                                        thought_signature=b"sig-weather-xyz",
+                                    ),
+                                ]
+                            )
+                        )
+                    ]
+                )
+            ],
+            [
+                SimpleNamespace(
+                    candidates=[
+                        SimpleNamespace(
+                            content=SimpleNamespace(
+                                parts=[
+                                    genai_types.Part(
+                                        text="[emotion:happy] It is 18C and sunny in Ovar!"
+                                    )
+                                ]
+                            )
+                        )
+                    ]
+                )
+            ],
+        ]
+
+        class _FakeModels:
+            async def generate_content_stream(
+                self, *, model: str, contents: list[Any], config: Any
+            ) -> Any:
+                idx = len(recorded_calls)
+                recorded_calls.append((model, list(contents), config))
+                chunks = round_chunks[idx]
+
+                async def _iter_chunks() -> Any:
+                    for chunk in chunks:
+                        yield chunk
+
+                return _iter_chunks()
+
+        class _FakeAio:
+            def __init__(self) -> None:
+                self.models = _FakeModels()
+
+            async def aclose(self) -> None:
+                return None
+
+        class _FakeClient:
+            def __init__(self, api_key: str | None = None) -> None:
+                self.api_key = api_key
+                self.aio = _FakeAio()
+
+        fake_genai = SimpleNamespace(Client=_FakeClient)
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "Weather__get_current_weather",
+                    "description": "Get current weather for a city.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ]
+
+        router = LLMRouter()
+        r1_streamed: list[str] = []
+        r2_streamed: list[str] = []
+        try:
+            with patch("bytey_ai_companion.llm.router._google_genai", fake_genai):
+                res1 = await router.generate_chat(
+                    messages=[{"role": "user", "content": "How is the weather in Ovar?"}],
+                    system_prompt="You are Bytey.",
+                    provider="gemini",
+                    model="gemini-2.5-flash",
+                    api_key="test-key",
+                    tools=tools,
+                    on_text_chunk=r1_streamed.append,
+                )
+
+                self.assertEqual(len(res1["tool_calls"]), 1)
+                tc1 = res1["tool_calls"][0]
+                self.assertEqual(tc1["name"], "Weather__get_current_weather")
+                self.assertEqual(tc1["thought_signature"], b"sig-weather-xyz")
+                self.assertTrue(tc1["has_provider_id"])
+                self.assertEqual(r1_streamed, [])
+
+                messages = [
+                    {"role": "user", "content": "How is the weather in Ovar?"},
+                    res1["raw_assistant_message"],
+                    {
+                        "role": "tool",
+                        "tool_call_id": "fc_weather_1",
+                        "name": "Weather__get_current_weather",
+                        "content": "18C sunny",
+                    },
+                ]
+                res2 = await router.generate_chat(
+                    messages=messages,
+                    system_prompt="You are Bytey.",
+                    provider="gemini",
+                    model="gemini-2.5-flash",
+                    api_key="test-key",
+                    tools=tools,
+                    on_text_chunk=r2_streamed.append,
+                )
+        finally:
+            await router.close()
+
+        self.assertEqual(len(recorded_calls), 2)
+        _, round2_contents, _ = recorded_calls[1]
+
+        model_contents = [c for c in round2_contents if getattr(c, "role", None) == "model"]
+        self.assertEqual(len(model_contents), 1)
+        model_parts = list(model_contents[0].parts or [])
+        thought_parts = [p for p in model_parts if getattr(p, "thought", False)]
+        fc_parts = [p for p in model_parts if getattr(p, "function_call", None) is not None]
+        self.assertEqual(len(thought_parts), 1)
+        self.assertEqual(thought_parts[0].text, "checking weather")
+        self.assertEqual(len(fc_parts), 1)
+        self.assertEqual(fc_parts[0].thought_signature, b"sig-weather-xyz")
+        self.assertEqual(fc_parts[0].function_call.name, "Weather__get_current_weather")
+        self.assertEqual(fc_parts[0].function_call.id, "fc_weather_1")
+
+        user_contents = [c for c in round2_contents if getattr(c, "role", None) == "user"]
+        fn_resp_parts = [
+            p
+            for c in user_contents
+            for p in (c.parts or [])
+            if getattr(p, "function_response", None) is not None
+        ]
+        self.assertEqual(len(fn_resp_parts), 1)
+        self.assertEqual(fn_resp_parts[0].function_response.name, "Weather__get_current_weather")
+        self.assertEqual(fn_resp_parts[0].function_response.id, "fc_weather_1")
+
+        self.assertEqual(res2["content"], "It is 18C and sunny in Ovar!")
+        self.assertEqual(res2["emotion"], "happy")
+        self.assertEqual("".join(r2_streamed), "It is 18C and sunny in Ovar!")
+        self.assertNotIn("checking weather", "".join(r2_streamed))
+        self.assertNotIn("[emotion:", "".join(r2_streamed))
+
+
 class TestLiveDaemonIntegration(unittest.IsolatedAsyncioTestCase):
     """End-to-end tests against a live ByteyDaemon on ephemeral localhost port."""
 
@@ -808,6 +1020,22 @@ class TestLiveDaemonIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cfg_after_ext["visuals"]["position_mode"], "floating")
             self.assertEqual(cfg_after_ext["visuals"]["float_x"], 320)
             self.assertEqual(cfg_after_ext["visuals"]["float_y"], 140)
+
+            r = await client.patch(
+                "/api/v1/config",
+                json={
+                    "visuals": {
+                        "eye_color": "#00ff88",
+                        "background_color": "#11131a",
+                        "border_color": "#ffaa0080",
+                    }
+                },
+            )
+            self.assertEqual(r.status_code, 200)
+            cfg_colors = r.json()
+            self.assertEqual(cfg_colors["visuals"]["eye_color"], "#00FF88")
+            self.assertEqual(cfg_colors["visuals"]["background_color"], "#11131A")
+            self.assertEqual(cfg_colors["visuals"]["border_color"], "#FFAA0080")
 
             # 3. Secrets PUT + verify secret absent from GET /api/v1/config
             gem_secret = "AIzaSyTestSecretValue12345"
@@ -1277,6 +1505,259 @@ class TestSettingsClientAndSyntax(unittest.TestCase):
                 self.assertNotIn("gschemas.compiled", entry)
                 self.assertNotIn("__pycache__", entry)
                 self.assertNotIn(".git", entry)
+
+    @staticmethod
+    def _extract_js_method(source: str, signature: str) -> str:
+        """Extract a balanced-brace JS block starting at signature."""
+        start = source.find(signature)
+        if start == -1:
+            raise AssertionError(f"Missing JS signature: {signature}")
+        open_idx = source.find("{", start)
+        if open_idx == -1:
+            raise AssertionError(f"Missing opening brace for {signature}")
+        depth = 0
+        for idx in range(open_idx, len(source)):
+            ch = source[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[start : idx + 1]
+        raise AssertionError(f"Unbalanced braces for {signature}")
+
+    def _run_node_script(
+        self,
+        script: str,
+        *args: str,
+        failure_context: str,
+    ) -> None:
+        """Execute a Node verification script with positional arguments."""
+        proc = subprocess.run(
+            ["node", "-e", script, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"{failure_context}: {proc.stderr or proc.stdout}",
+        )
+
+    def test_transcript_drawer_tool_placement_and_thinking_css(self) -> None:
+        css_text = (GNOME_EXT_DIR / "stylesheet.css").read_text(encoding="utf-8")
+        thinking_match = re.search(r"\.bytey-island-thinking\s*\{([^}]*)\}", css_text)
+        self.assertIsNotNone(thinking_match)
+        thinking_body = thinking_match.group(1)  # type: ignore[union-attr]
+        for forbidden_rgb in ("168, 85, 247", "139, 92, 246"):
+            self.assertNotIn(forbidden_rgb, thinking_body)
+
+        island_rules = re.findall(
+            r"^\.bytey-island[^{]*\{([^}]*)\}",
+            css_text,
+            flags=re.MULTILINE,
+        )
+        self.assertGreater(len(island_rules), 0)
+        for rule_body in island_rules:
+            for forbidden_rgb in ("168, 85, 247", "139, 92, 246"):
+                self.assertNotIn(forbidden_rgb, rule_body)
+
+        island_js = (GNOME_EXT_DIR / "islandWidget.js").read_text(encoding="utf-8")
+        for symbol in ("_capsulePoint", "_hslToRgb", "_strokeRainbowCapsule"):
+            self.assertIn(symbol, island_js)
+
+        drawer_js = (GNOME_EXT_DIR / "transcriptDrawer.js").read_text(encoding="utf-8")
+        update_method = self._extract_js_method(drawer_js, "updateToolCall(event) {")
+        normalize_method = self._extract_js_method(drawer_js, "_normalizeTool(raw) {")
+        node_script = """
+const assert = require('assert');
+const [updateMethod, normalizeMethod] = process.argv.slice(1);
+const methods = new Function(`return ({ ${updateMethod}, ${normalizeMethod} });`)();
+
+function makeMockDrawer() {
+    const msg0 = {id: 'msg0', role: 'assistant', tool_calls: []};
+    const msg1 = {id: 'msg1', role: 'user', tool_calls: []};
+    return {
+        _destroyed: false,
+        _messages: [msg0, msg1],
+        _messageWidgets: new Map([
+            ['msg0', {msg: msg0, toolBox: {children: []}}],
+            ['msg1', {msg: msg1, toolBox: {children: []}}],
+        ]),
+        _toolWidgets: new Map(),
+        _normalizeTool: methods._normalizeTool,
+        updateToolCall: methods.updateToolCall,
+        upsertMessageDelta(event) {
+            const msg = {
+                id: event.message_id,
+                role: event.role,
+                content: event.text ?? '',
+                tool_calls: [],
+            };
+            this._messages.push(msg);
+            this._messageWidgets.set(msg.id, {msg, toolBox: {children: []}});
+        },
+        _appendToolWidget(toolBox, tool) {
+            const rec = {tool};
+            toolBox.children.push(rec);
+            this._toolWidgets.set(tool.id, rec);
+        },
+        _refreshToolWidget() {},
+        _scheduleScrollToBottom() {},
+    };
+}
+
+// Case A: message_id "msg2" arrives before any transcript delta for msg2
+const drawerA = makeMockDrawer();
+drawerA.updateToolCall({
+    call_id: 'call_a',
+    message_id: 'msg2',
+    server: 'weather',
+    tool: 'get_current_weather',
+    status: 'running',
+});
+assert.strictEqual(drawerA._messages[0].tool_calls.length, 0);
+assert.deepStrictEqual(drawerA._messages.map(m => m.id), ['msg0', 'msg1', 'msg2']);
+assert.strictEqual(drawerA._messages[2].role, 'assistant');
+assert.strictEqual(drawerA._messages[2].tool_calls.length, 1);
+
+// Case B: no message_id after user msg1 creates new assistant after msg1 instead of attaching to msg0
+const drawerB = makeMockDrawer();
+drawerB.updateToolCall({
+    call_id: 'call_b',
+    server: 'search',
+    tool: 'web_search',
+    status: 'running',
+});
+assert.strictEqual(drawerB._messages[0].tool_calls.length, 0);
+assert.deepStrictEqual(drawerB._messages.map(m => m.id), ['msg0', 'msg1', 'tool-msg-call_b']);
+assert.strictEqual(drawerB._messages[2].role, 'assistant');
+assert.strictEqual(drawerB._messages[2].tool_calls.length, 1);
+"""
+        self._run_node_script(
+            node_script,
+            update_method,
+            normalize_method,
+            failure_context="node transcriptDrawer updateToolCall test failed",
+        )
+
+    def test_drawer_header_alignment_and_connection_status_indicator(self) -> None:
+        css_text = (GNOME_EXT_DIR / "stylesheet.css").read_text(encoding="utf-8")
+        self.assertNotIn(".bytey-status-dot-online", css_text)
+
+        expected_css_rules = {
+            ".bytey-status-connected": ("#22c55e",),
+            ".bytey-status-error": ("#ef4444",),
+            ".bytey-status-disconnected": ("#000000", "#ffffff"),
+            ".bytey-status-tooltip": (),
+            ".bytey-provider-pill-label": (),
+        }
+        for selector, expected_tokens in expected_css_rules.items():
+            match = re.search(rf"{re.escape(selector)}\s*\{{([^}}]*)\}}", css_text)
+            self.assertIsNotNone(match, f"Missing CSS rule for {selector}")
+            rule_body = match.group(1)  # type: ignore[union-attr]
+            for token in expected_tokens:
+                self.assertIn(token, rule_body, f"{selector} missing {token}")
+
+        drawer_js = (GNOME_EXT_DIR / "transcriptDrawer.js").read_text(encoding="utf-8")
+        build_header = self._extract_js_method(drawer_js, "_buildHeader() {")
+        self.assertRegex(
+            build_header,
+            r"this\._providerPill\s*=\s*new St\.Bin\(\{[^}]*child:\s*this\._providerLabel",
+        )
+        self.assertRegex(
+            build_header,
+            r"this\._connect\(\s*this\._statusIndicator\s*,\s*'notify::hover'\s*,\s*\(\)\s*=>\s*\{[^}]*"
+            r"this\._showStatusTooltip\(\)[^}]*this\._hideStatusTooltip\(\)[^}]*\}\s*\)",
+        )
+
+        states_match = re.search(
+            r"const\s+CONNECTION_STATES\s*=\s*\[[^\]]*\];",
+            drawer_js,
+        )
+        self.assertIsNotNone(states_match, "Missing CONNECTION_STATES in transcriptDrawer.js")
+        states_decl = states_match.group(0)  # type: ignore[union-attr]
+        labels_decl = (
+            self._extract_js_method(drawer_js, "const CONNECTION_STATUS_LABELS =") + ";"
+        )
+        set_status_method = self._extract_js_method(
+            drawer_js, "setConnectionStatus(status) {"
+        )
+
+        node_script = """
+const assert = require('assert');
+const [statesDecl, labelsDecl, setStatusMethod] = process.argv.slice(1);
+const methods = new Function(
+    `${statesDecl}\n${labelsDecl}\nreturn ({ ${setStatusMethod} });`
+)();
+
+const classes = new Set(['bytey-status-dot', 'bytey-status-disconnected']);
+const drawer = {
+    _destroyed: false,
+    _connectionState: 'disconnected',
+    _online: false,
+    _statusDot: {
+        classes,
+        add_style_class_name(cls) { classes.add(cls); },
+        remove_style_class_name(cls) { classes.delete(cls); },
+    },
+    _statusIndicator: {accessible_name: 'Disconnected'},
+    _statusTooltip: {visible: false},
+    tooltipRefreshCount: 0,
+    _showStatusTooltip() {
+        this.tooltipRefreshCount += 1;
+    },
+    setConnectionStatus: methods.setConnectionStatus,
+};
+
+function assertState(expectedState, expectedOnline, expectedLabel) {
+    assert.strictEqual(drawer._connectionState, expectedState);
+    assert.strictEqual(drawer._online, expectedOnline);
+    assert.strictEqual(drawer._statusIndicator.accessible_name, expectedLabel);
+    for (const state of ['connected', 'error', 'disconnected']) {
+        assert.strictEqual(
+            classes.has(`bytey-status-${state}`),
+            state === expectedState,
+            `Unexpected class state for bytey-status-${state} when state=${expectedState}`
+        );
+    }
+}
+
+drawer.setConnectionStatus('connected');
+assertState('connected', true, 'Connected');
+assert.strictEqual(drawer.tooltipRefreshCount, 0);
+
+drawer._statusTooltip.visible = true;
+drawer.setConnectionStatus('connected');
+assertState('connected', true, 'Connected');
+assert.strictEqual(drawer.tooltipRefreshCount, 1);
+drawer._statusTooltip.visible = false;
+
+drawer.setConnectionStatus('error');
+assertState('error', false, 'Connection error');
+assert.strictEqual(drawer.tooltipRefreshCount, 1);
+
+drawer.setConnectionStatus('disconnected');
+assertState('disconnected', false, 'Disconnected');
+
+drawer.setConnectionStatus(true);
+assertState('connected', true, 'Connected');
+
+drawer.setConnectionStatus(false);
+assertState('disconnected', false, 'Disconnected');
+"""
+        self._run_node_script(
+            node_script,
+            states_decl,
+            labels_decl,
+            set_status_method,
+            failure_context="node transcriptDrawer setConnectionStatus test failed",
+        )
+
+        extension_js = (GNOME_EXT_DIR / "extension.js").read_text(encoding="utf-8")
+        for state in ("connected", "error", "disconnected"):
+            self.assertIn(f"setConnectionStatus('{state}')", extension_js)
 
 
 if __name__ == "__main__":

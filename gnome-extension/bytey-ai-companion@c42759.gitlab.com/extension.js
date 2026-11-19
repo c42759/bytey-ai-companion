@@ -56,6 +56,9 @@ export default class ByteyExtension extends Extension {
                 chat_width: 380,
                 chat_height: 420,
                 chat_density: 'comfortable',
+                eye_color: '#F7FAFF',
+                background_color: '#0A0A0C',
+                border_color: '#2A2C34',
             },
         };
 
@@ -63,6 +66,7 @@ export default class ByteyExtension extends Extension {
         this._wsConn = null;
         this._wsSignalIds = [];
         this._wsBackoffMs = WS_BACKOFF_MIN_MS;
+        this._wsHadError = false;
         this._reconnectTimerId = 0;
 
         this._cancellable = new Gio.Cancellable();
@@ -426,7 +430,9 @@ export default class ByteyExtension extends Extension {
 
     async _handleExit() {
         this._exitedByUser = true;
+        this._wsHadError = false;
         this._clearReconnectTimer();
+        this._drawer?.setConnectionStatus('disconnected');
         this._drawer?.close();
         this._contextMenu?.close();
         this._islandWidget?.hide();
@@ -514,7 +520,8 @@ export default class ByteyExtension extends Extension {
                     conn = session.websocket_connect_finish(res);
                 } catch (_err) {
                     if (!this._disabled && !this._exitedByUser) {
-                        this._drawer?.setConnectionStatus(false);
+                        this._wsHadError = true;
+                        this._drawer?.setConnectionStatus('error');
                         this._scheduleReconnect();
                     }
                     return;
@@ -531,7 +538,8 @@ export default class ByteyExtension extends Extension {
 
                 this._wsConn = conn;
                 this._wsBackoffMs = WS_BACKOFF_MIN_MS;
-                this._drawer?.setConnectionStatus(true);
+                this._wsHadError = false;
+                this._drawer?.setConnectionStatus('connected');
                 this._islandWidget?.show();
 
                 const msgId = conn.connect('message', (_c, dataType, bytes) => {
@@ -547,14 +555,16 @@ export default class ByteyExtension extends Extension {
                 });
 
                 const errId = conn.connect('error', () => {
+                    this._wsHadError = true;
                     if (!this._disabled)
-                        this._drawer?.setConnectionStatus(false);
+                        this._drawer?.setConnectionStatus('error');
                 });
 
                 const closedId = conn.connect('closed', () => {
+                    const closedAfterError = this._wsHadError;
                     this._closeWebSocket();
                     if (!this._disabled && !this._exitedByUser) {
-                        this._drawer?.setConnectionStatus(false);
+                        this._drawer?.setConnectionStatus(closedAfterError ? 'error' : 'disconnected');
                         this._scheduleReconnect();
                     }
                 });
@@ -654,7 +664,9 @@ export default class ByteyExtension extends Extension {
         }
         case 'shutdown': {
             this._exitedByUser = true;
+            this._wsHadError = false;
             this._clearReconnectTimer();
+            this._drawer?.setConnectionStatus('disconnected');
             this._drawer?.close();
             this._contextMenu?.close();
             this._islandWidget?.hide();

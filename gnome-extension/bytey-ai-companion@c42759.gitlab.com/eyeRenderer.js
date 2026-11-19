@@ -53,6 +53,8 @@ export class EyeRenderer {
         this._emotion = 'neutral';
         this._animationMode = 'full';
         this._cursorTracking = true;
+        this._eyeColor = [0.97, 0.98, 1.0, 1.0];
+        this._eyeColorHex = '#F7FAFF';
 
         this._micLevel = 0;
         this._ttsLevel = 0;
@@ -208,6 +210,28 @@ export class EyeRenderer {
     }
 
     /**
+     * Update eye color from a hex string (`#RGB`, `#RRGGBB`, `#RRGGBBAA`).
+     *
+     * @param {string} hexColor
+     */
+    setEyeColor(hexColor) {
+        if (this._destroyed)
+            return;
+
+        const nextHex = typeof hexColor === 'string' && hexColor.trim()
+            ? hexColor.trim()
+            : '#F7FAFF';
+        const nextColor = this._parseHexColor(nextHex);
+        const changed = nextHex !== this._eyeColorHex ||
+            nextColor.some((v, idx) => Math.abs(v - this._eyeColor[idx]) > 1e-4);
+
+        this._eyeColor = nextColor;
+        this._eyeColorHex = nextHex;
+        if (changed)
+            this._queueRepaint();
+    }
+
+    /**
      * Stop all timers, disconnect signals, and dispose resources.
      */
     destroy() {
@@ -233,6 +257,43 @@ export class EyeRenderer {
     _normalizeEmotion(emotion) {
         const norm = typeof emotion === 'string' ? emotion.toLowerCase().trim() : 'neutral';
         return VALID_EMOTIONS.has(norm) ? norm : 'neutral';
+    }
+
+    _parseHexColor(hex, fallback = [0.97, 0.98, 1.0, 1.0]) {
+        if (typeof hex !== 'string')
+            return [...fallback];
+        const clean = hex.trim();
+        if (!clean.startsWith('#'))
+            return [...fallback];
+        const raw = clean.slice(1);
+        if (!/^[0-9a-fA-F]+$/.test(raw))
+            return [...fallback];
+
+        if (raw.length === 3) {
+            return [
+                parseInt(raw[0] + raw[0], 16) / 255,
+                parseInt(raw[1] + raw[1], 16) / 255,
+                parseInt(raw[2] + raw[2], 16) / 255,
+                1.0,
+            ];
+        }
+        if (raw.length === 6) {
+            return [
+                parseInt(raw.slice(0, 2), 16) / 255,
+                parseInt(raw.slice(2, 4), 16) / 255,
+                parseInt(raw.slice(4, 6), 16) / 255,
+                1.0,
+            ];
+        }
+        if (raw.length === 8) {
+            return [
+                parseInt(raw.slice(0, 2), 16) / 255,
+                parseInt(raw.slice(2, 4), 16) / 255,
+                parseInt(raw.slice(4, 6), 16) / 255,
+                parseInt(raw.slice(6, 8), 16) / 255,
+            ];
+        }
+        return [...fallback];
     }
 
     _queueRepaint() {
@@ -494,7 +555,12 @@ export class EyeRenderer {
         const eyeH = Math.max(10, height * 0.58);
         const sep = Math.max(eyeW * 1.05, Math.min(width * 0.16, height * 0.68));
 
-        cr.setSourceRGBA(0.95, 0.96, 0.98, 0.95);
+        cr.setSourceRGBA(
+            this._eyeColor[0],
+            this._eyeColor[1],
+            this._eyeColor[2],
+            0.95 * this._eyeColor[3]
+        );
         this._fillCapsule(cr, cx - sep, cy, eyeW, eyeH);
         this._fillCapsule(cr, cx + sep, cy, eyeW, eyeH);
     }
@@ -525,8 +591,8 @@ export class EyeRenderer {
         let leftTilt = 0;
         let rightTilt = 0;
         let radiusRatio = 0.5;
-        let alpha = 0.98;
-        let color = [0.97, 0.98, 1.0];
+        let alpha = 0.98 * this._eyeColor[3];
+        let color = [this._eyeColor[0], this._eyeColor[1], this._eyeColor[2]];
 
         const mic = isFull ? this._smoothMicLevel : 0.45;
         const tts = isFull ? this._smoothTtsLevel : 0.5;
@@ -540,7 +606,6 @@ export class EyeRenderer {
             rightScaleX = 1.06 * pulse;
             leftScaleY = 1.12 * pulse * blink;
             rightScaleY = 1.12 * pulse * blink;
-            color = [0.82, 0.96, 1.0];
             this._drawListeningAura(cr, cx - sep, cy, baseH * 0.95, auraStrength);
             this._drawListeningAura(cr, cx + sep, cy, baseH * 0.95, auraStrength);
             break;
@@ -552,7 +617,6 @@ export class EyeRenderer {
             offsetY = orbY;
             leftScaleY = 0.92;
             rightScaleY = 0.92;
-            color = [0.92, 0.91, 1.0];
             break;
         }
         case 'TOOL_CALLING': {
@@ -561,7 +625,6 @@ export class EyeRenderer {
             rightScaleX = 1.08;
             leftScaleY = 0.72;
             rightScaleY = 0.72;
-            color = [1.0, 0.94, 0.78];
             if (isFull)
                 offsetX = Math.sin(this._phase * 4.2) * (maxTravelX * 0.45);
             break;
@@ -574,15 +637,13 @@ export class EyeRenderer {
             rightScaleY = Math.max(0.32, Math.min(1.22, pulse)) * blink;
             leftScaleX = 1.05;
             rightScaleX = 1.05;
-            color = [0.94, 0.98, 1.0];
             break;
         }
         case 'MUTED': {
-            alpha = 0.48;
+            alpha = 0.48 * this._eyeColor[3];
             leftScaleY = 0.36;
             rightScaleY = 0.36;
             offsetY = height * 0.06;
-            color = [0.85, 0.87, 0.92];
             break;
         }
         case 'ERROR': {
@@ -654,7 +715,7 @@ export class EyeRenderer {
                 rightDy += height * 0.04;
                 rightTilt += 0.07;
             } else if (emotion === 'sleepy') {
-                alpha = Math.min(alpha, 0.72);
+                alpha = Math.min(alpha, 0.72 * this._eyeColor[3]);
                 leftScaleY *= 0.42;
                 rightScaleY *= 0.42;
                 leftDy += height * 0.07;
@@ -704,10 +765,11 @@ export class EyeRenderer {
     }
 
     _drawListeningAura(cr, x, y, radius, strength) {
+        const [r, g, b, a] = this._eyeColor;
         const grad = new Cairo.RadialGradient(x, y, radius * 0.2, x, y, radius);
-        grad.addColorStopRGBA(0, 0.22, 0.74, 0.97, 0.55 * strength);
-        grad.addColorStopRGBA(0.6, 0.38, 0.85, 1.0, 0.22 * strength);
-        grad.addColorStopRGBA(1, 0.22, 0.74, 0.97, 0.0);
+        grad.addColorStopRGBA(0, r, g, b, 0.55 * strength * a);
+        grad.addColorStopRGBA(0.6, r, g, b, 0.22 * strength * a);
+        grad.addColorStopRGBA(1, r, g, b, 0.0);
         cr.setSource(grad);
         cr.arc(x, y, radius, 0, 2 * Math.PI);
         cr.fill();
@@ -731,10 +793,11 @@ export class EyeRenderer {
     }
 
     _drawSurprisedRings(cr, lx, ly, rx, ry, radius, color, alpha) {
+        const [hr, hg, hb] = this._eyeColor;
         for (const [ex, ey] of [[lx, ly], [rx, ry]]) {
             const halo = new Cairo.RadialGradient(ex, ey, radius * 0.4, ex, ey, radius * 1.5);
-            halo.addColorStopRGBA(0, 0.75, 0.92, 1.0, 0.32 * alpha);
-            halo.addColorStopRGBA(1, 0.75, 0.92, 1.0, 0.0);
+            halo.addColorStopRGBA(0, hr, hg, hb, 0.32 * alpha);
+            halo.addColorStopRGBA(1, hr, hg, hb, 0.0);
             cr.setSource(halo);
             cr.arc(ex, ey, radius * 1.5, 0, 2 * Math.PI);
             cr.fill();

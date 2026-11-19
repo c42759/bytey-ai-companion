@@ -3,58 +3,57 @@
 .bytey-island {
   background-color: #0a0a0c;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 0px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
-  padding: 4px 8px;
+  padding: 0px;
   min-width: 112px;
   min-height: 38px;
-  spacing: 6px;
   transition: 180ms ease;
 }
 
+.bytey-island-content {
+  padding: 4px 8px;
+  spacing: 6px;
+}
+
 .bytey-island:hover {
-  border-color: rgba(255, 255, 255, 0.24);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.68);
 }
 
 .bytey-island-expanded {
-  padding: 4px 10px;
   min-width: 164px;
   min-height: 42px;
 }
 
+.bytey-island-expanded .bytey-island-content {
+  padding: 4px 10px;
+}
+
 .bytey-island-listening {
-  border-color: rgba(56, 189, 248, 0.65);
   box-shadow: 0 8px 26px rgba(56, 189, 248, 0.28);
 }
 
 .bytey-island-thinking {
-  border-color: rgba(168, 85, 247, 0.52);
-  box-shadow: 0 8px 26px rgba(139, 92, 246, 0.24);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
 }
 
 .bytey-island-tool {
-  border-color: rgba(251, 191, 36, 0.6);
   box-shadow: 0 8px 26px rgba(245, 158, 11, 0.24);
 }
 
 .bytey-island-speaking {
-  border-color: rgba(96, 165, 250, 0.6);
   box-shadow: 0 8px 26px rgba(59, 130, 246, 0.26);
 }
 
 .bytey-island-muted {
-  border-color: rgba(255, 255, 255, 0.08);
   opacity: 200;
 }
 
 .bytey-island-error {
-  border-color: rgba(255, 90, 95, 0.85);
   box-shadow: 0 8px 26px rgba(255, 90, 95, 0.34);
 }
 
 .bytey-island-dragging {
-  border-color: rgba(255, 255, 255, 0.42);
   box-shadow: 0 14px 34px rgba(0, 0, 0, 0.75);
 }
 
@@ -92,21 +91,53 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   height: 26px;
-  padding: 3px 10px;
+  padding: 0 10px;
+  max-width: 165px;
+  color: #e4e4ec;
+}
+
+.bytey-provider-pill-label {
   max-width: 145px;
   font-size: 8.5pt;
   font-weight: 600;
   color: #e4e4ec;
 }
 
-.bytey-status-dot {
-  font-size: 8.5pt;
-  padding-left: 2px;
-  color: rgba(148, 163, 184, 0.9);
+.bytey-status-indicator {
+  width: 20px;
+  height: 20px;
 }
 
-.bytey-status-dot-online {
-  color: #4ade80;
+.bytey-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.bytey-status-connected {
+  background-color: #22c55e;
+  border: 1.5px solid #22c55e;
+}
+
+.bytey-status-error {
+  background-color: #ef4444;
+  border: 1.5px solid #ef4444;
+}
+
+.bytey-status-disconnected {
+  background-color: #000000;
+  border: 1.5px solid #ffffff;
+}
+
+.bytey-status-tooltip {
+  background-color: rgba(10, 10, 14, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  padding: 4px 8px;
+  font-size: 8pt;
+  font-weight: 600;
+  color: #f4f4f7;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.55);
 }
 
 .bytey-density-btn,
@@ -419,8 +450,18 @@
   padding: 0;
 }
 
-.bytey-density-compact .bytey-status-dot {
+.bytey-density-compact .bytey-provider-pill-label {
   font-size: 7.5pt;
+}
+
+.bytey-density-compact .bytey-status-indicator {
+  width: 18px;
+  height: 18px;
+}
+
+.bytey-density-compact .bytey-status-dot {
+  width: 8px;
+  height: 8px;
 }
 
 .bytey-density-compact .bytey-messages {
@@ -504,8 +545,18 @@
   padding: 0;
 }
 
-.bytey-density-spacious .bytey-status-dot {
+.bytey-density-spacious .bytey-provider-pill-label {
   font-size: 9.5pt;
+}
+
+.bytey-density-spacious .bytey-status-indicator {
+  width: 24px;
+  height: 24px;
+}
+
+.bytey-density-spacious .bytey-status-dot {
+  width: 12px;
+  height: 12px;
 }
 
 .bytey-density-spacious .bytey-messages {

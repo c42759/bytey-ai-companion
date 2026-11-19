@@ -10,9 +10,10 @@ from typing import Any, Callable
 
 import gi
 
+gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from .api_client import (  # noqa: E402
     DEFAULT_CONFIG,
@@ -49,6 +50,10 @@ FIXED_ALIGNMENTS = (
 )
 MCP_TRANSPORTS = ("stdio", "http", "sse")
 
+DEFAULT_EYE_COLOR = "#F7FAFF"
+DEFAULT_BG_COLOR = "#0A0A0C"
+DEFAULT_BORDER_COLOR = "#2A2C34"
+
 # Canonical setting -> (nested_path, flat_aliases)
 FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "pet_name": (("general", "pet_name"), ("pet_name",)),
@@ -77,6 +82,9 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "elevenlabs_model_id": (("voice_output", "elevenlabs_model_id"), ("elevenlabs_model_id",)),
     "animation_mode": (("visuals", "animation_mode"), ("animation_mode",)),
     "cursor_tracking": (("visuals", "cursor_tracking"), ("cursor_tracking",)),
+    "eye_color": (("visuals", "eye_color"), ("eye_color",)),
+    "background_color": (("visuals", "background_color"), ("background_color",)),
+    "border_color": (("visuals", "border_color"), ("border_color",)),
     "position_mode": (("visuals", "position_mode"), ("position_mode",)),
     "monitor_index": (("visuals", "monitor_index"), ("monitor_index",)),
     "fixed_alignment": (("visuals", "fixed_alignment"), ("fixed_alignment",)),
@@ -88,6 +96,50 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "chat_height": (("visuals", "chat_height"), ("chat_height",)),
     "chat_density": (("visuals", "chat_density"), ("chat_density",)),
 }
+
+
+def _parse_hex_channels(hex_str: str) -> tuple[float, float, float, float] | None:
+    """Parse #RGB, #RRGGBB, or #RRGGBBAA into normalized RGBA floats, or None if invalid."""
+    if not isinstance(hex_str, str):
+        return None
+    cleaned = hex_str.strip()
+    if not cleaned.startswith("#"):
+        return None
+    raw = cleaned[1:]
+    if not all(ch in "0123456789abcdefABCDEF" for ch in raw):
+        return None
+    if len(raw) == 3:
+        raw = "".join(ch * 2 for ch in raw) + "FF"
+    elif len(raw) == 6:
+        raw = f"{raw}FF"
+    elif len(raw) != 8:
+        return None
+    return (
+        int(raw[0:2], 16) / 255.0,
+        int(raw[2:4], 16) / 255.0,
+        int(raw[4:6], 16) / 255.0,
+        int(raw[6:8], 16) / 255.0,
+    )
+
+
+def _hex_to_rgba(hex_str: str, fallback: str = "#FFFFFFFF") -> Gdk.RGBA:
+    """Parse #RGB, #RRGGBB, or #RRGGBBAA (falling back if invalid) into a Gdk.RGBA."""
+    channels = _parse_hex_channels(hex_str)
+    if channels is None:
+        channels = _parse_hex_channels(fallback) or (1.0, 1.0, 1.0, 1.0)
+    r, g, b, a = channels
+    return Gdk.RGBA(red=r, green=g, blue=b, alpha=a)
+
+
+def _rgba_to_hex(rgba: Gdk.RGBA) -> str:
+    """Convert Gdk.RGBA to uppercase #RRGGBB (opaque) or #RRGGBBAA (translucent)."""
+    r = max(0, min(255, round(rgba.red * 255)))
+    g = max(0, min(255, round(rgba.green * 255)))
+    b = max(0, min(255, round(rgba.blue * 255)))
+    a = max(0, min(255, round(rgba.alpha * 255)))
+    if a >= 255:
+        return f"#{r:02X}{g:02X}{b:02X}"
+    return f"#{r:02X}{g:02X}{b:02X}{a:02X}"
 
 
 def _get_nested(data: dict[str, Any], path: tuple[str, ...]) -> Any:
@@ -399,6 +451,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._offline_banners: list[Adw.Banner] = []
         self._mcp_servers: dict[str, dict[str, Any]] = {}
         self._mcp_rows: list[Gtk.Widget] = []
+        self._color_controls: dict[str, tuple[Adw.ActionRow, Gtk.ColorDialogButton, str]] = {}
 
         self._build_general_page()
         self._build_ai_mcp_page()
@@ -1428,6 +1481,19 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         eye_group.add(self.cursor_tracking_row)
         page.add(eye_group)
 
+        colors_group = Adw.PreferencesGroup(
+            title="Colors",
+            description="Customize eye, island background, and border colors.",
+        )
+        reset_colors_btn = Gtk.Button(label="Reset Defaults", valign=Gtk.Align.CENTER)
+        reset_colors_btn.add_css_class("flat")
+        reset_colors_btn.connect("clicked", self._on_reset_colors)
+        colors_group.set_header_suffix(reset_colors_btn)
+        colors_group.add(self._make_color_row("Eye Color", "eye_color", DEFAULT_EYE_COLOR))
+        colors_group.add(self._make_color_row("Background Color", "background_color", DEFAULT_BG_COLOR))
+        colors_group.add(self._make_color_row("Border Color", "border_color", DEFAULT_BORDER_COLOR))
+        page.add(colors_group)
+
         chat_group = Adw.PreferencesGroup(
             title="Chat Window & Density",
             description="Resize the transcript drawer or adapt its UI density to your desktop.",
@@ -1525,6 +1591,45 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         page.add(self.floating_group)
 
         self.add(page)
+
+    def _make_color_row(self, title: str, field_key: str, default_hex: str) -> Adw.ActionRow:
+        """Create an ActionRow with a ColorDialogButton bound to a color config key."""
+        row = Adw.ActionRow(title=title, subtitle=default_hex)
+        btn = Gtk.ColorDialogButton(
+            dialog=Gtk.ColorDialog(with_alpha=True),
+            valign=Gtk.Align.CENTER,
+        )
+        btn.set_rgba(_hex_to_rgba(default_hex, default_hex))
+
+        def on_color_changed(*_: object) -> None:
+            if self._loading:
+                return
+            hex_val = _rgba_to_hex(btn.get_rgba())
+            row.set_subtitle(hex_val)
+            self._patch_fields({field_key: hex_val}, f"Saved {title.lower()}")
+
+        btn.connect("notify::rgba", on_color_changed)
+        row.add_suffix(btn)
+        self._color_controls[field_key] = (row, btn, default_hex)
+        return row
+
+    def _on_reset_colors(self, *_: object) -> None:
+        """Reset all color pickers to defaults and persist them in a single patch."""
+        self._loading = True
+        try:
+            for row, btn, default_hex in self._color_controls.values():
+                btn.set_rgba(_hex_to_rgba(default_hex, default_hex))
+                row.set_subtitle(default_hex)
+        finally:
+            self._loading = False
+        self._patch_fields(
+            {
+                "eye_color": DEFAULT_EYE_COLOR,
+                "background_color": DEFAULT_BG_COLOR,
+                "border_color": DEFAULT_BORDER_COLOR,
+            },
+            "Reset colors to defaults",
+        )
 
     def _on_position_mode_changed(self, *_: object) -> None:
         mode = _combo_selected_text(self.position_mode_row)
@@ -1654,6 +1759,11 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             # Visuals & Position
             _set_combo_text(self.anim_mode_row, str(self._read_field("animation_mode", "full")))
             self.cursor_tracking_row.set_active(bool(self._read_field("cursor_tracking", True)))
+            for key, (row, btn, default_hex) in self._color_controls.items():
+                raw_val = self._read_field(key, default_hex)
+                rgba = _hex_to_rgba(str(raw_val) if raw_val is not None else default_hex, default_hex)
+                btn.set_rgba(rgba)
+                row.set_subtitle(_rgba_to_hex(rgba))
             _set_combo_text(self.chat_density_row, str(self._read_field("chat_density", "comfortable")))
             self.chat_width_row.set_value(float(self._read_field("chat_width", 380)))
             self.chat_height_row.set_value(float(self._read_field("chat_height", 420)))

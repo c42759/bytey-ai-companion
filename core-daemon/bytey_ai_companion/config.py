@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import dotenv_values, set_key, unset_key
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from .llm.emotions import DEFAULT_SYSTEM_PROMPT
 
@@ -29,6 +29,35 @@ logger = logging.getLogger(__name__)
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _KEY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MERGE_SECTIONS = ("general", "provider", "voice_in", "voice_out", "visuals")
+
+DEFAULT_EYE_COLOR = "#F7FAFF"
+DEFAULT_BG_COLOR = "#0A0A0C"
+DEFAULT_BORDER_COLOR = "#2A2C34"
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
+_VISUAL_COLOR_DEFAULTS: dict[str, str] = {
+    "eye_color": DEFAULT_EYE_COLOR,
+    "background_color": DEFAULT_BG_COLOR,
+    "border_color": DEFAULT_BORDER_COLOR,
+}
+
+
+def _normalize_hex_color(value: Any, default: str) -> str:
+    """Normalize a hex color (#RGB, #RRGGBB, or #RRGGBBAA) or fall back to default."""
+    if not isinstance(value, str):
+        return default
+    cleaned = value.strip()
+    if not cleaned:
+        return default
+    if not cleaned.startswith("#"):
+        candidate = f"#{cleaned}"
+        if _HEX_COLOR_RE.match(candidate):
+            cleaned = candidate
+    if not _HEX_COLOR_RE.match(cleaned):
+        return default
+    if len(cleaned) == 4:
+        r, g, b = cleaned[1], cleaned[2], cleaned[3]
+        cleaned = f"#{r}{r}{g}{g}{b}{b}"
+    return cleaned.upper()
 
 
 def _primary_config_dir() -> Path:
@@ -122,6 +151,15 @@ class VisualsConfig(BaseModel):
     chat_width: int = 380
     chat_height: int = 420
     chat_density: str = "comfortable"
+    eye_color: str = DEFAULT_EYE_COLOR
+    background_color: str = DEFAULT_BG_COLOR
+    border_color: str = DEFAULT_BORDER_COLOR
+
+    @field_validator("eye_color", "background_color", "border_color", mode="before")
+    @classmethod
+    def _validate_color_field(cls, value: Any, info: ValidationInfo) -> str:
+        default = _VISUAL_COLOR_DEFAULTS[info.field_name or "eye_color"]
+        return _normalize_hex_color(value, default)
 
 
 class MCPServerConfig(BaseModel):
