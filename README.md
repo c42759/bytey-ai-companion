@@ -9,11 +9,32 @@
 
 ## Features
 
-- **Dynamic Island Overlay**: Always-on-top GNOME Shell pill (`Main.layoutManager.addTopChrome`) with Fixed 9-point or Floating drag positioning, multi-monitor support, and customizable island/eye/border colors.
-- **Procedural Cairo Eyes & Animations**: Expressive eyes reacting to daemon state (`IDLE`, `LISTENING`, `THINKING`, `TOOL_CALLING`, `SPEAKING`), LLM emotion tags, live cursor tracking, 10-second idle screen wandering, and a circling rainbow pill border while thinking.
-- **Voice Wake-Word, STT & TTS via PipeWire**: Local VAD (`silero-vad`) + open-vocabulary phonetic `"Hey Bytey"` wake-word detection, `faster-whisper` or HTTP Whisper STT, continuous follow-up listening, and sentence-chunked Kokoro / ElevenLabs TTS playback with barge-in interruption.
-- **Multi-Provider LLM & MCP Tools**: Supports Gemini (`google-genai`), OpenAI, Ollama, Anthropic, and Custom OpenAI-compatible endpoints, plus Model Context Protocol (`stdio` and `SSE`/`HTTP`) tool hosting with per-tool toggles and confirmation prompts.
-- **Native Preferences & Full Settings UI**: Built-in GNOME Extension Preferences (`prefs.js` via `org.gnome.shell.extensions.bytey-ai-companion`) for daemon URL configuration, paired with a standalone GTK4 / Libadwaita (`Adw.PreferencesWindow`) Settings UI for API keys, MCP servers, voice testing, and appearance.
+### Overlay & Visuals
+- **Always-On-Top Dynamic Island**: Native GNOME Shell compositor overlay (`Main.layoutManager.addTopChrome`) pinned above all windows on Wayland, with multi-monitor selection.
+- **Flexible Placement Modes**: Choose **Fixed** (9-point screen alignment grid with X/Y pixel offsets), **Floating** (mouse drag-and-drop with persisted coordinates), or **Notch** (MacBook-style concave-flare silhouette centered flush against the GNOME top bar).
+- **Procedural Cairo Eyes & Animations**: Vector eyes reacting to daemon states (`IDLE`, `LISTENING`, `THINKING`, `TOOL_CALLING`, `SPEAKING`, `MUTED`, `ERROR`) and LLM `[emotion:<tag>]` expressions (`happy`, `curious`, `surprised`, `sleepy`, `error`), with live cursor tracking, 10-second idle screen wandering, and a circling rainbow pill border while thinking.
+- **Customizable Appearance & Animation Modes**: Configure eye, background, and border colors (with one-click reset to defaults) and switch between `Full`, `State-Only`, or `Disabled` animation modes.
+
+### Interactions & Transcript Drawer
+- **Expandable Transcript Drawer (Left-Click)**: Opens an anchored popover displaying SQLite-persisted conversation history, a text input bar for silent prompting, and a **Clear / New Chat** action.
+- **Tool Badges, Replay & Layout Controls**: View collapsible MCP tool-call status and results inline on assistant messages, replay any message via TTS, switch UI density (`compact`, `comfortable`, `spacious`), resize the drawer with the bottom-right drag grip, and check daemon health via the 3-state connection indicator (`connected`, `error`, `disconnected`).
+- **Quick Context Menu (Right-Click)**: Access **Preferences** (`prefs.js`), **Configuration** (standalone Settings UI), quick toggles (**Mute Mic**, **Mute TTS**, **Lock/Float Position**), **New Chat Session**, and **Exit** (cleanly stops the daemon and hides the overlay).
+
+### Voice Input & Output (PipeWire)
+- **Open-Vocabulary Wake-Word**: Continuous PipeWire 16 kHz audio capture with Silero VAD and local phonetic matching (`"Hey Bytey"` or any custom `"Hey <name>"` phrase) requiring zero model retraining.
+- **Configurable Speech-to-Text (STT) & Follow-Up Listening**: Choose local `faster-whisper` or an OpenAI/custom Whisper-compatible HTTP endpoint, with automatic VAD silence cutoff, manual mic toggle, and continuous follow-up listening after assistant replies.
+- **Streaming Text-to-Speech (TTS)**: Sentence-chunked streaming playback with real-time eye amplitude sync and barge-in interruption, supporting **Kokoro** (HTTP + voice discovery), **Piper** (local ONNX/CLI synthesis with model download plus speed, pitch, noise, and speaker controls), **ElevenLabs** (streaming API + voice list), or **Disabled / Muted**.
+
+### AI Providers & MCP Tools
+- **Multi-Provider LLM Router**: Connects to **Google Gemini** (`google-genai`), **OpenAI**, **Ollama**, **Anthropic**, and **Custom OpenAI-Compatible** endpoints with live model discovery.
+- **Model-Aware Context Size & Tool Detection**: Automatically detects model tool-calling support (with manual override) and `context_length`, exposing power-of-2 **Context Size** presets capped to the active model's limit.
+- **Customizable Companion Identity & System Prompt**: Customize companion name, wake phrase, and system prompt directly in Preferences or Settings UI, with defaults loaded from `default_system_prompt.md`.
+- **Full MCP (Model Context Protocol) Host**: Connect `stdio` and `SSE` / `Streamable HTTP` MCP servers via a structured GUI form or raw `mcpServers` JSON editor, with connection testing, per-tool toggles, and optional confirmation prompts before execution.
+
+### Configuration, Backup & Security
+- **Dual Native Configuration UIs**: Lightweight GNOME Extension Preferences (`prefs.js`) and standalone GTK4 / Libadwaita Settings UI (`settings-ui`), both synced with the daemon REST API (with offline `config.json` fallback).
+- **JSON Import / Export**: Export all non-secret settings to a `.json` file and import a `.json` backup to replace the active configuration.
+- **Isolated Secrets & Legacy Fallback**: Stores API keys exclusively in `.env` (`0600`) or the OS keyring (`libsecret`)—never in `config.json`—and automatically falls back to legacy `ai-pet` config/database/keyring paths when Bytey equivalents are absent.
 
 ---
 
@@ -132,6 +153,9 @@ journalctl --user -u bytey-ai-companion-daemon.service -f
 # Stop / restart manually
 systemctl --user stop bytey-ai-companion-daemon.service
 systemctl --user restart bytey-ai-companion-daemon.service
+
+# Uninstall service (or add --with-extension to also remove the GNOME extension)
+./systemd/uninstall-service.sh
 ```
 
 `bytey-ai-companion-daemon.service` uses `Restart=on-failure`, so choosing **Exit** in the island right-click menu cleanly shuts down the daemon (exit code `0`) without auto-restarting.
