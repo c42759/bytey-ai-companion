@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
@@ -682,7 +684,7 @@ export class TranscriptDrawer {
 
         this._scheduleScrollToBottom();
         if (this._focusIdleId) {
-            GLib.source_remove(this._focusIdleId);
+            GLib.Source.remove(this._focusIdleId);
             this._focusIdleId = 0;
         }
         this._focusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
@@ -702,7 +704,7 @@ export class TranscriptDrawer {
             return;
         this._isOpen = false;
         if (this._focusIdleId) {
-            GLib.source_remove(this._focusIdleId);
+            GLib.Source.remove(this._focusIdleId);
             this._focusIdleId = 0;
         }
         if (this._container)
@@ -738,11 +740,11 @@ export class TranscriptDrawer {
         this._releaseResizeGrab();
 
         if (this._scrollIdleId) {
-            GLib.source_remove(this._scrollIdleId);
+            GLib.Source.remove(this._scrollIdleId);
             this._scrollIdleId = 0;
         }
         if (this._focusIdleId) {
-            GLib.source_remove(this._focusIdleId);
+            GLib.Source.remove(this._focusIdleId);
             this._focusIdleId = 0;
         }
 
@@ -756,6 +758,7 @@ export class TranscriptDrawer {
         this._signalIds = [];
         this._messageWidgets.clear();
         this._toolWidgets.clear();
+        this._messages = [];
         this._emptyStateActor = null;
 
         if (this._container) {
@@ -763,6 +766,18 @@ export class TranscriptDrawer {
             this._container.destroy();
             this._container = null;
         }
+        this._messagesBox = null;
+        this._scrollView = null;
+        this._entry = null;
+        this._providerLabel = null;
+        this._statusLabel = null;
+        this._densityBtn = null;
+        this._closeIcon = null;
+        this._micBtn = null;
+        this._micIcon = null;
+        this._resizeHandle = null;
+        this._positionManager = null;
+        this._callbacks = null;
     }
 
     _clearEmptyState() {

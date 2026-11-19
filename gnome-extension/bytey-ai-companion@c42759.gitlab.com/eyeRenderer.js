@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Cairo from 'cairo';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -246,21 +248,21 @@ export class EyeRenderer {
 
     _stopFrameLoop() {
         if (this._frameSourceId) {
-            GLib.source_remove(this._frameSourceId);
+            GLib.Source.remove(this._frameSourceId);
             this._frameSourceId = 0;
         }
     }
 
     _stopBlinkTimer() {
         if (this._blinkTimerId) {
-            GLib.source_remove(this._blinkTimerId);
+            GLib.Source.remove(this._blinkTimerId);
             this._blinkTimerId = 0;
         }
     }
 
     _stopPointerPoll() {
         if (this._pointerPollId) {
-            GLib.source_remove(this._pointerPollId);
+            GLib.Source.remove(this._pointerPollId);
             this._pointerPollId = 0;
         }
     }

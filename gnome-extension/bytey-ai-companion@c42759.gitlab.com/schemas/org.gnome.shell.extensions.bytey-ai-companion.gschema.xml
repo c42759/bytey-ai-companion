@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.bytey-ai-companion"
+          path="/org/gnome/shell/extensions/bytey-ai-companion/">
+    <key name="daemon-url" type="s">
+      <default>'http://127.0.0.1:8765'</default>
+      <summary>Core daemon base URL</summary>
+      <description>HTTP base URL of the local Bytey AI Companion core daemon.</description>
+    </key>
+  </schema>
+</schemalist>

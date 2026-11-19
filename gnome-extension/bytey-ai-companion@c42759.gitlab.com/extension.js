@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
-import Soup from 'gi://Soup';
+import Soup from 'gi://Soup?version=3.0';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
@@ -14,16 +16,27 @@ const WS_BACKOFF_MIN_MS = 1000;
 const WS_BACKOFF_MAX_MS = 30000;
 
 /**
- * GNOME Shell 46-50 Extension entrypoint for Bytey AI Companion Dynamic Island.
+ * GNOME Shell 48-50 Extension entrypoint for Bytey AI Companion Dynamic Island.
  */
 export default class ByteyExtension extends Extension {
     enable() {
         this._disabled = false;
         this._exitedByUser = false;
 
-        const envUrl = GLib.getenv('BYTEY_DAEMON_URL') || GLib.getenv('AI_PET_DAEMON_URL');
-        this._baseUrl = (envUrl && envUrl.trim() ? envUrl.trim() : DEFAULT_BASE_URL).replace(/\/+$/, '');
-        this._wsUrl = `${this._baseUrl.replace(/^http/i, 'ws')}/ws`;
+        this._settings = this.getSettings();
+        this._resolveDaemonUrls();
+        this._settingsChangedId = this._settings.connect('changed::daemon-url', () => {
+            if (this._disabled)
+                return;
+            const prev = this._baseUrl;
+            this._resolveDaemonUrls();
+            if (this._baseUrl !== prev) {
+                this._exitedByUser = false;
+                this._wsBackoffMs = WS_BACKOFF_MIN_MS;
+                this._connectWebSocket();
+                this._loadInitialData().catch(() => {});
+            }
+        });
 
         this._config = {
             general: {pet_name: 'Bytey'},
@@ -103,6 +116,7 @@ export default class ByteyExtension extends Extension {
         });
 
         this._contextMenu = new IslandContextMenu(this._islandWidget.actor, {
+            onOpenPreferences: () => this.openPreferences(),
             onToggleMicMute: muted => this._patchConfig({voice_in: {mic_muted: muted}}),
             onToggleTtsMute: muted => this._patchConfig({voice_out: {tts_muted: muted}}),
             onToggleFloating: floating => this._toggleFloatingMode(floating),
@@ -125,6 +139,12 @@ export default class ByteyExtension extends Extension {
     disable() {
         this._disabled = true;
         this._clearReconnectTimer();
+
+        if (this._settings && this._settingsChangedId) {
+            this._settings.disconnect(this._settingsChangedId);
+            this._settingsChangedId = 0;
+        }
+        this._settings = null;
 
         if (this._cancellable) {
             this._cancellable.cancel();
@@ -165,6 +185,33 @@ export default class ByteyExtension extends Extension {
         this._positionManager = null;
         this._config = null;
         this._activeSessionId = null;
+        this._baseUrl = null;
+        this._wsUrl = null;
+        this._wsSignalIds = [];
+        this._exitedByUser = false;
+        this._wsBackoffMs = WS_BACKOFF_MIN_MS;
+    }
+
+    _isValidHttpUrl(url) {
+        if (typeof url !== 'string')
+            return false;
+        const trimmed = url.trim();
+        if (!/^https?:\/\/\S+$/i.test(trimmed))
+            return false;
+        const stripped = trimmed.replace(/\/+$/, '');
+        return /^https?:\/\/\S+$/i.test(stripped);
+    }
+
+    _resolveDaemonUrls() {
+        const envUrl = GLib.getenv('BYTEY_DAEMON_URL') || GLib.getenv('AI_PET_DAEMON_URL');
+        const settingsUrl = this._settings?.get_string('daemon-url');
+        let chosen = DEFAULT_BASE_URL;
+        if (this._isValidHttpUrl(envUrl))
+            chosen = envUrl.trim().replace(/\/+$/, '');
+        else if (this._isValidHttpUrl(settingsUrl))
+            chosen = settingsUrl.trim().replace(/\/+$/, '');
+        this._baseUrl = chosen;
+        this._wsUrl = `${this._baseUrl.replace(/^http/i, 'ws')}/ws`;
     }
 
     _handleLeftClick() {
@@ -554,7 +601,7 @@ export default class ByteyExtension extends Extension {
 
     _clearReconnectTimer() {
         if (this._reconnectTimerId) {
-            GLib.source_remove(this._reconnectTimerId);
+            GLib.Source.remove(this._reconnectTimerId);
             this._reconnectTimerId = 0;
         }
     }

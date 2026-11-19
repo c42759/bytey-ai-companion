@@ -1,0 +1,13 @@
+{
+  "uuid": "bytey-ai-companion@c42759.gitlab.com",
+  "name": "Bytey AI Companion",
+  "description": "Always-on-top Dynamic Island overlay for Bytey AI Companion with procedural Cairo eyes, voice interaction, and anchored transcript drawer. Requires the local Bytey AI Companion core daemon.",
+  "url": "https://gitlab.com/c42759/bytey",
+  "shell-version": [
+    "48",
+    "49",
+    "50"
+  ],
+  "settings-schema": "org.gnome.shell.extensions.bytey-ai-companion",
+  "version-name": "0.1.0"
+}

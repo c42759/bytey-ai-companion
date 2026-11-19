@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import Clutter from 'gi://Clutter';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
@@ -242,6 +244,9 @@ export class IslandWidget {
             this._island.destroy();
             this._island = null;
         }
+        this._statusLabel = null;
+        this._positionManager = null;
+        this._callbacks = null;
     }
 
     _connect(obj, signal, handler) {

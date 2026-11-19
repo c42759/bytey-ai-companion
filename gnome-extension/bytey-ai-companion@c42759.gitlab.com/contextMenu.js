@@ -1,9 +1,8 @@
-import Gio from 'gi://Gio';
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-
-const SETTINGS_SCRIPT_PATH = '/home/c42759/Git/pet/settings-ui/run_settings.py';
 
 /**
  * Native GNOME right-click `PopupMenu` anchored to the Dynamic Island pill.
@@ -12,6 +11,7 @@ export class IslandContextMenu {
     /**
      * @param {St.Widget} sourceActor
      * @param {object} callbacks
+     * @param {() => void} [callbacks.onOpenPreferences]
      * @param {(muted: boolean) => void} [callbacks.onToggleMicMute]
      * @param {(muted: boolean) => void} [callbacks.onToggleTtsMute]
      * @param {(floating: boolean) => void} [callbacks.onToggleFloating]
@@ -23,6 +23,7 @@ export class IslandContextMenu {
         this._callbacks = callbacks;
         this._syncing = false;
         this._destroyed = false;
+        this._signalIds = [];
 
         this._menuManager = new PopupMenu.PopupMenuManager(sourceActor);
         this._menu = new PopupMenu.PopupMenu(sourceActor, 0.5, St.Side.TOP);
@@ -41,41 +42,47 @@ export class IslandContextMenu {
         return Boolean(this._menu?.isOpen);
     }
 
+    _connect(obj, signal, handler) {
+        const id = obj.connect(signal, handler);
+        this._signalIds.push([obj, id]);
+        return id;
+    }
+
     _buildItems() {
-        const configItem = new PopupMenu.PopupMenuItem('Configuration');
-        configItem.connect('activate', () => {
-            this._launchSettings();
+        const prefsItem = new PopupMenu.PopupMenuItem('Preferences');
+        this._connect(prefsItem, 'activate', () => {
+            this._callbacks?.onOpenPreferences?.();
         });
-        this._menu.addMenuItem(configItem);
+        this._menu.addMenuItem(prefsItem);
 
         this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this._micMuteItem = new PopupMenu.PopupSwitchMenuItem('Mute Microphone', false);
-        this._micMuteItem.connect('toggled', (_item, state) => {
+        this._connect(this._micMuteItem, 'toggled', (_item, state) => {
             if (!this._syncing)
-                this._callbacks.onToggleMicMute?.(Boolean(state));
+                this._callbacks?.onToggleMicMute?.(Boolean(state));
         });
         this._menu.addMenuItem(this._micMuteItem);
 
         this._ttsMuteItem = new PopupMenu.PopupSwitchMenuItem('Mute Voice (TTS)', false);
-        this._ttsMuteItem.connect('toggled', (_item, state) => {
+        this._connect(this._ttsMuteItem, 'toggled', (_item, state) => {
             if (!this._syncing)
-                this._callbacks.onToggleTtsMute?.(Boolean(state));
+                this._callbacks?.onToggleTtsMute?.(Boolean(state));
         });
         this._menu.addMenuItem(this._ttsMuteItem);
 
         this._floatingItem = new PopupMenu.PopupSwitchMenuItem('Floating Position', false);
-        this._floatingItem.connect('toggled', (_item, state) => {
+        this._connect(this._floatingItem, 'toggled', (_item, state) => {
             if (!this._syncing)
-                this._callbacks.onToggleFloating?.(Boolean(state));
+                this._callbacks?.onToggleFloating?.(Boolean(state));
         });
         this._menu.addMenuItem(this._floatingItem);
 
         this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         const newChatItem = new PopupMenu.PopupMenuItem('New Chat Session');
-        newChatItem.connect('activate', () => {
-            this._callbacks.onNewChat?.();
+        this._connect(newChatItem, 'activate', () => {
+            this._callbacks?.onNewChat?.();
         });
         this._menu.addMenuItem(newChatItem);
 
@@ -83,28 +90,10 @@ export class IslandContextMenu {
 
         const exitItem = new PopupMenu.PopupMenuItem('Exit');
         exitItem.label.add_style_class_name('bytey-context-menu-danger');
-        exitItem.connect('activate', () => {
-            this._callbacks.onExit?.();
+        this._connect(exitItem, 'activate', () => {
+            this._callbacks?.onExit?.();
         });
         this._menu.addMenuItem(exitItem);
-    }
-
-    _launchSettings() {
-        try {
-            const proc = Gio.Subprocess.new(
-                ['python3', SETTINGS_SCRIPT_PATH],
-                Gio.SubprocessFlags.NONE
-            );
-            proc.wait_async(null, (source, res) => {
-                try {
-                    source.wait_finish(res);
-                } catch (_e) {
-                    // Settings window closed or terminated.
-                }
-            });
-        } catch (err) {
-            console.error(`Bytey AI Companion: failed to launch Settings UI: ${err.message}`);
-        }
     }
 
     /**
@@ -165,12 +154,29 @@ export class IslandContextMenu {
             return;
         this._destroyed = true;
 
-        if (this._menu) {
+        if (this._menu)
             this._menu.close(false);
+
+        for (const [obj, id] of this._signalIds) {
+            try {
+                obj.disconnect(id);
+            } catch (_e) {
+                // Ignore if item was already disposed.
+            }
+        }
+        this._signalIds = [];
+
+        if (this._menu) {
             this._menuManager?.removeMenu(this._menu);
+            this._menu.actor?.get_parent()?.remove_child(this._menu.actor);
             this._menu.destroy();
             this._menu = null;
         }
         this._menuManager = null;
+        this._sourceActor = null;
+        this._callbacks = null;
+        this._micMuteItem = null;
+        this._ttsMuteItem = null;
+        this._floatingItem = null;
     }
 }

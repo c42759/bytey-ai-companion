@@ -16,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -28,7 +30,7 @@ os.environ["BYTEY_DISABLE_KEYRING"] = "1"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORE_DAEMON_DIR = REPO_ROOT / "core-daemon"
 SETTINGS_UI_DIR = REPO_ROOT / "settings-ui"
-GNOME_EXT_DIR = REPO_ROOT / "gnome-extension" / "bytey-ai-companion@local"
+GNOME_EXT_DIR = REPO_ROOT / "gnome-extension" / "bytey-ai-companion@c42759.gitlab.com"
 
 for _p in (str(CORE_DAEMON_DIR), str(SETTINGS_UI_DIR)):
     if _p not in sys.path:
@@ -1109,12 +1111,172 @@ class TestSettingsClientAndSyntax(unittest.TestCase):
         meta_path = GNOME_EXT_DIR / "metadata.json"
         self.assertTrue(meta_path.is_file())
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        self.assertEqual(meta.get("uuid"), "bytey-ai-companion@local")
+        self.assertEqual(meta.get("uuid"), "bytey-ai-companion@c42759.gitlab.com")
         self.assertEqual(meta.get("name"), "Bytey AI Companion")
         self.assertIsInstance(meta.get("description"), str)
-        self.assertIsInstance(meta.get("shell-version"), list)
-        self.assertGreater(len(meta["shell-version"]), 0)
-        self.assertIsInstance(meta.get("version"), int)
+        self.assertEqual(meta.get("shell-version"), ["48", "49", "50"])
+        self.assertEqual(meta.get("url"), "https://gitlab.com/c42759/bytey")
+        self.assertEqual(
+            meta.get("settings-schema"),
+            "org.gnome.shell.extensions.bytey-ai-companion",
+        )
+        self.assertNotIn("version", meta)
+        self.assertIsInstance(meta.get("version-name"), str)
+
+    def test_ego_submission_readiness(self) -> None:
+        """Verify EGO packaging, GSettings schema, license, and GJS rules."""
+        license_path = GNOME_EXT_DIR / "LICENSE"
+        self.assertTrue(license_path.is_file())
+        license_text = license_path.read_text(encoding="utf-8")
+        self.assertIn("GNU GENERAL PUBLIC LICENSE", license_text)
+        self.assertIn("Version 3", license_text)
+
+        schemas_dir = GNOME_EXT_DIR / "schemas"
+        schema_path = (
+            schemas_dir / "org.gnome.shell.extensions.bytey-ai-companion.gschema.xml"
+        )
+        self.assertTrue(schema_path.is_file())
+        schema_text = schema_path.read_text(encoding="utf-8")
+        self.assertIn('id="org.gnome.shell.extensions.bytey-ai-companion"', schema_text)
+        self.assertIn(
+            'path="/org/gnome/shell/extensions/bytey-ai-companion/"', schema_text
+        )
+        tracked_compiled = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                str((schemas_dir / "gschemas.compiled").relative_to(REPO_ROOT)),
+            ],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(tracked_compiled.returncode, 0)
+        self.assertEqual(
+            tracked_compiled.stdout.strip(),
+            "",
+            "gschemas.compiled must never be tracked in git",
+        )
+
+        schema_proc = subprocess.run(
+            ["glib-compile-schemas", "--strict", "--dry-run", str(schemas_dir)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            schema_proc.returncode,
+            0,
+            f"glib-compile-schemas failed: {schema_proc.stderr}",
+        )
+
+        icons_dir = GNOME_EXT_DIR / "icons"
+        for icon_name, expected_viewbox in (
+            ("bytey-ai-companion.svg", "0 0 128 128"),
+            ("bytey-ai-companion-symbolic.svg", "0 0 16 16"),
+        ):
+            with self.subTest(icon=icon_name):
+                svg_path = icons_dir / icon_name
+                self.assertTrue(svg_path.is_file(), f"Missing SVG icon: {svg_path}")
+                root = ET.parse(svg_path).getroot()
+                self.assertTrue(root.tag.endswith("svg"))
+                self.assertEqual(root.attrib.get("viewBox"), expected_viewbox)
+
+        png_icon_path = REPO_ROOT / "gnome-extension" / "bytey-ai-companion-icon-128.png"
+        self.assertTrue(png_icon_path.is_file(), f"Missing PNG icon: {png_icon_path}")
+        png_bytes = png_icon_path.read_bytes()
+        self.assertTrue(png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertGreaterEqual(len(png_bytes), 24)
+        self.assertEqual(struct.unpack(">II", png_bytes[16:24]), (128, 128))
+
+        prefs_text = (GNOME_EXT_DIR / "prefs.js").read_text(encoding="utf-8")
+        self.assertIn("ExtensionPreferences", prefs_text)
+        self.assertIn("gi://Soup?version=3.0", prefs_text)
+        self.assertIn("bytey-ai-companion.svg", prefs_text)
+        for forbidden_import in (
+            "gi://St",
+            "gi://Clutter",
+            "gi://Meta",
+            "gi://Shell",
+            "resource:///org/gnome/shell/",
+        ):
+            self.assertNotIn(forbidden_import, prefs_text)
+
+        ext_text = (GNOME_EXT_DIR / "extension.js").read_text(encoding="utf-8")
+        self.assertIn("gi://Soup?version=3.0", ext_text)
+        self.assertNotIn("'gi://Soup'", ext_text)
+        self.assertNotIn('"gi://Soup"', ext_text)
+        self.assertIn("this.getSettings()", ext_text)
+        self.assertIn("this.openPreferences()", ext_text)
+        self.assertIn("    disable() {", ext_text)
+        disable_body = ext_text.split("    disable() {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("this._settings.disconnect(", disable_body)
+        self.assertIn("this._settings = null;", disable_body)
+
+        js_files = sorted(GNOME_EXT_DIR.glob("*.js"))
+        self.assertGreater(len(js_files), 0)
+        forbidden_js_tokens = (
+            "/home/",
+            "Gio.Subprocess",
+            "GLib.spawn_",
+            "GLib.source_remove(",
+        )
+        for js_file in js_files:
+            with self.subTest(file=js_file.name):
+                js_text = js_file.read_text(encoding="utf-8")
+                self.assertTrue(
+                    js_text.startswith("// SPDX-License-Identifier: GPL-3.0-or-later"),
+                    f"{js_file.name} missing SPDX header",
+                )
+                for token in forbidden_js_tokens:
+                    self.assertNotIn(token, js_text)
+
+        expected_zip_entries = sorted(
+            [
+                "LICENSE",
+                "contextMenu.js",
+                "extension.js",
+                "eyeRenderer.js",
+                "icons/bytey-ai-companion-symbolic.svg",
+                "icons/bytey-ai-companion.svg",
+                "islandWidget.js",
+                "metadata.json",
+                "positionManager.js",
+                "prefs.js",
+                "schemas/org.gnome.shell.extensions.bytey-ai-companion.gschema.xml",
+                "stylesheet.css",
+                "transcriptDrawer.js",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            pack_proc = subprocess.run(
+                [
+                    "bash",
+                    str(REPO_ROOT / "gnome-extension" / "pack-ego.sh"),
+                    str(tmp_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                pack_proc.returncode,
+                0,
+                f"pack-ego.sh failed: {pack_proc.stdout}\n{pack_proc.stderr}",
+            )
+            zip_path = (
+                tmp_path / "bytey-ai-companion@c42759.gitlab.com.shell-extension.zip"
+            )
+            self.assertTrue(zip_path.is_file())
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zip_entries = sorted(zf.namelist())
+            self.assertEqual(zip_entries, expected_zip_entries)
+            for entry in zip_entries:
+                self.assertNotIn("gschemas.compiled", entry)
+                self.assertNotIn("__pycache__", entry)
+                self.assertNotIn(".git", entry)
 
 
 if __name__ == "__main__":

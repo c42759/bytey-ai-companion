@@ -321,7 +321,7 @@ pet/
 │           ├── manager.py          # stdio + SSE/Streamable HTTP ClientSession pool
 │           └── schema_sync.py      # Bidirectional GUI <-> mcpServers JSON adapter
 ├── gnome-extension/
-│   └── bytey-ai-companion@local/
+│   └── bytey-ai-companion@c42759.gitlab.com/
 │       ├── metadata.json           # shell-version: ["50"] (and compatible 46-49 if tested)
 │       ├── extension.js            # Extension lifecycle & IPC reconnect loop
 │       ├── islandWidget.js         # Matte-black pill, Cairo DrawingArea eyes, click/drag

@@ -1,18 +1,42 @@
 # Bytey AI Companion
 
-Always-on-top **Dynamic Island** desktop AI assistant for **GNOME Shell 50 (Wayland / PipeWire)**, split into a portable Python core daemon (`core-daemon/`, package `bytey_ai_companion`), a thin GNOME Shell extension (`gnome-extension/bytey-ai-companion@local/`), and a native GTK4 / Libadwaita Settings UI (`settings-ui/`, package `bytey_settings`).
+<div align="center">
+  <img src="./gnome-extension/bytey-ai-companion@c42759.gitlab.com/icons/bytey-ai-companion.svg" alt="Bytey AI Companion" width="112" height="112" />
+  <p><strong>Always-on-top Dynamic Island desktop AI assistant for GNOME Shell 48–50 (Wayland / PipeWire)</strong></p>
+</div>
+
+---
+
+## Features
+
+- **Dynamic Island Overlay**: Always-on-top GNOME Shell pill (`Main.layoutManager.addTopChrome`) with Fixed 9-point or Floating drag positioning, multi-monitor support, and customizable island/eye/border colors.
+- **Procedural Cairo Eyes & Animations**: Expressive eyes reacting to daemon state (`IDLE`, `LISTENING`, `THINKING`, `TOOL_CALLING`, `SPEAKING`), LLM emotion tags, live cursor tracking, 10-second idle screen wandering, and a circling rainbow pill border while thinking.
+- **Voice Wake-Word, STT & TTS via PipeWire**: Local VAD (`silero-vad`) + open-vocabulary phonetic `"Hey Bytey"` wake-word detection, `faster-whisper` or HTTP Whisper STT, continuous follow-up listening, and sentence-chunked Kokoro / ElevenLabs TTS playback with barge-in interruption.
+- **Multi-Provider LLM & MCP Tools**: Supports Gemini (`google-genai`), OpenAI, Ollama, Anthropic, and Custom OpenAI-compatible endpoints, plus Model Context Protocol (`stdio` and `SSE`/`HTTP`) tool hosting with per-tool toggles and confirmation prompts.
+- **Native Preferences & Full Settings UI**: Built-in GNOME Extension Preferences (`prefs.js` via `org.gnome.shell.extensions.bytey-ai-companion`) for daemon URL configuration, paired with a standalone GTK4 / Libadwaita (`Adw.PreferencesWindow`) Settings UI for API keys, MCP servers, voice testing, and appearance.
 
 ---
 
 ## Architecture Overview
 
-- **`core-daemon/` (`bytey_ai_companion`)**: Python `asyncio` + HTTP/WebSocket daemon (`127.0.0.1:8765`) handling PipeWire audio capture, VAD/wake-word/STT, multi-provider LLM routing, MCP tool hosting, sentence-chunked TTS playback, and SQLite conversation history (`~/.local/share/bytey-ai-companion/bytey.db`).
-- **`gnome-extension/bytey-ai-companion@local/`**: GNOME Shell 50 ESM overlay (`Main.layoutManager.addTopChrome`) rendering procedural Cairo eyes, Fixed 9-point or Floating drag positioning, left-click transcript drawer, and right-click context menu.
+- **`core-daemon/` (`bytey_ai_companion`)**: Python `asyncio` + HTTP/WebSocket daemon (`127.0.0.1:8765`, `/api/v1/*` + `/ws`) handling PipeWire audio capture (`pw-record`/`pw-play`), VAD/wake-word/STT, multi-provider LLM routing, MCP tool hosting, sentence-chunked TTS playback, and SQLite conversation history (`~/.local/share/bytey-ai-companion/bytey.db`).
+- **`gnome-extension/bytey-ai-companion@c42759.gitlab.com/`**: GNOME Shell 48–50 ESM extension rendering procedural Cairo eyes, left-click expandable transcript drawer (with 3-state connection indicator, tool-call badges, density modes, and resize grip), right-click context menu, and native `prefs.js`.
 - **`settings-ui/` (`bytey_settings`)**: Native GTK4 / Libadwaita (`Adw.PreferencesWindow`) settings panel talking to the daemon REST API (with offline fallback to `~/.config/bytey-ai-companion/config.json`).
+- **`systemd/`**: `systemd --user` service unit (`bytey-ai-companion-daemon.service`) managing the background Python daemon lifecycle.
 
 ---
 
-## Setup
+## Supported GNOME Versions
+
+| GNOME Shell | Session / Audio | Status |
+| :--- | :--- | :--- |
+| **48** | Wayland / PipeWire | Supported |
+| **49** | Wayland / PipeWire | Supported |
+| **50** | Wayland / PipeWire | Supported |
+
+---
+
+## Building and Installation
 
 ### 1. Base Runtime Requirements
 
@@ -20,7 +44,7 @@ System packages (Fedora / Ubuntu / Arch equivalents):
 - Python 3.11+ (tested on Python 3.14)
 - PyGObject (`python3-gobject`), GTK4, Libadwaita (`libadwaita`)
 - PipeWire tools (`pipewire-utils` for `pw-record` / `pw-play`)
-- GNOME Shell 45–50 (`libsoup3`, `gjs`)
+- GNOME Shell 48–50 (`libsoup3`, `gjs`, `glib-compile-schemas`)
 
 Required Python packages (when not already provided by system packages):
 ```bash
@@ -52,23 +76,20 @@ Never store API keys in `~/.config/bytey-ai-companion/config.json`. Provide secr
 2. **Settings UI / OS Keyring (`libsecret`)**:
    Enter API keys directly in **AI & MCP**, **Voice Input**, or **Voice Output** tabs and click apply (`PUT /api/v1/secrets`).
 
----
+### 4. GNOME Shell Extension Installation
 
-## GNOME Shell Extension Installation
-
-Symlink the extension into your user GNOME Shell extensions directory and enable it:
+The extension targets **GNOME Shell 48–50** (`bytey-ai-companion@c42759.gitlab.com`). For local symlink installs, compile the GSettings schema in-place first (`schemas/gschemas.compiled` is gitignored and excluded from EGO upload zips), symlink the extension into your user extensions directory, and enable it:
 
 ```bash
+glib-compile-schemas /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com/schemas
 mkdir -p ~/.local/share/gnome-shell/extensions
-ln -sfn /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@local ~/.local/share/gnome-shell/extensions/bytey-ai-companion@local
-gnome-extensions enable bytey-ai-companion@local
+ln -sfn /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com ~/.local/share/gnome-shell/extensions/bytey-ai-companion@c42759.gitlab.com
+gnome-extensions enable bytey-ai-companion@c42759.gitlab.com
 ```
 
-> On Wayland, log out and back in once after first linking a new extension so GNOME Shell discovers `bytey-ai-companion@local`.
+> On Wayland, log out and back in once after first linking a new extension so GNOME Shell discovers `bytey-ai-companion@c42759.gitlab.com`.
 
----
-
-## `systemd --user` Service
+### 5. `systemd --user` Service
 
 Install and start the background daemon user unit:
 
@@ -92,11 +113,9 @@ systemctl --user restart bytey-ai-companion-daemon.service
 
 `bytey-ai-companion-daemon.service` uses `Restart=on-failure`, so choosing **Exit** in the island right-click menu cleanly shuts down the daemon (exit code `0`) without auto-restarting.
 
----
+### 6. Launching the Settings UI
 
-## Launching the Settings UI
-
-You can open Settings from the island right-click menu (**Configuration**) or directly from a terminal:
+You can open standalone full-featured Settings (API keys, MCP JSON editor, voice test, provider/model selection, colors) from the island right-click menu (**Configuration**) or directly from a terminal:
 
 ```bash
 python3 /home/c42759/Git/pet/settings-ui/run_settings.py
@@ -104,9 +123,7 @@ python3 /home/c42759/Git/pet/settings-ui/run_settings.py
 
 If the daemon is stopped, the Settings UI shows an offline banner and reads/writes non-secret settings directly in `~/.config/bytey-ai-companion/config.json`.
 
----
-
-## Migrating from AI Pet
+### 7. Migrating from AI Pet
 
 If upgrading from an earlier `ai-pet` installation, switch your `systemd --user` unit and GNOME Shell extension symlinks to Bytey AI Companion:
 
@@ -121,19 +138,48 @@ systemctl --user enable --now bytey-ai-companion-daemon.service
 # 2. Switch GNOME Shell extension symlink
 gnome-extensions disable ai-pet@local || true
 rm -f ~/.local/share/gnome-shell/extensions/ai-pet@local
-ln -sfn /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@local ~/.local/share/gnome-shell/extensions/bytey-ai-companion@local
-gnome-extensions enable bytey-ai-companion@local
+glib-compile-schemas /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com/schemas
+ln -sfn /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com ~/.local/share/gnome-shell/extensions/bytey-ai-companion@c42759.gitlab.com
+gnome-extensions enable bytey-ai-companion@c42759.gitlab.com
 ```
 
-> On Wayland, log out and back in once after linking `bytey-ai-companion@local` so GNOME Shell picks up the new extension UUID.
+> On Wayland, log out and back in once after linking `bytey-ai-companion@c42759.gitlab.com` so GNOME Shell picks up the new extension UUID.
 
-### Automatic Legacy Fallback
-
-Existing user configuration, history, environment overrides, and keyring secrets continue to work automatically when the new Bytey paths or keys are not yet present:
+**Automatic Legacy Fallback**: Existing user configuration, history, environment overrides, and keyring secrets continue to work automatically when the new Bytey paths or keys are not yet present:
 - **Config & `.env`**: Falls back to `~/.config/ai-pet/config.json` and `~/.config/ai-pet/.env` when `~/.config/bytey-ai-companion/` equivalents do not exist.
 - **SQLite Database**: Falls back to `~/.local/share/ai-pet/pet.db` when `~/.local/share/bytey-ai-companion/bytey.db` does not exist.
 - **Environment Variables**: `BYTEY_*` environment variables take precedence, with automatic fallback to legacy `AI_PET_*` variables.
 - **OS Keyring (`libsecret`)**: Checks Bytey keyring entries first and falls back to legacy `ai-pet` `libsecret` entries.
+
+---
+
+## Publishing to GNOME Extensions (extensions.gnome.org)
+
+Build an `extensions.gnome.org` (EGO) submission archive with:
+
+```bash
+./gnome-extension/build.sh
+```
+
+This validates `metadata.json`, SVG icons, GSettings XML (`glib-compile-schemas --strict --dry-run`), and JS syntax (`node --check` if available), then creates `gnome-extension/bytey-ai-companion@c42759.gitlab.com.shell-extension.zip` (gitignored, 13-file allowlist, excluding `schemas/gschemas.compiled`).
+
+To publish on [extensions.gnome.org](https://extensions.gnome.org/):
+1. Run `./gnome-extension/build.sh` to generate `gnome-extension/bytey-ai-companion@c42759.gitlab.com.shell-extension.zip`.
+2. Sign in to [extensions.gnome.org](https://extensions.gnome.org/) and open **Upload Extension**.
+3. Upload `gnome-extension/bytey-ai-companion@c42759.gitlab.com.shell-extension.zip`.
+4. Upload `./gnome-extension/bytey-ai-companion@c42759.gitlab.com/icons/bytey-ai-companion-icon-128.png` (`128×128` PNG) as the extension listing icon on the EGO web form.
+5. Verify metadata (`uuid`: `bytey-ai-companion@c42759.gitlab.com`, `shell-version`: `48`, `49`, `50`, `license`: `GPL-3.0-or-later`, `url`: `https://gitlab.com/c42759/bytey`) and submit for review.
+
+---
+
+## Usage
+
+- **Left-Click Island**: Opens or closes the anchored **Transcript Drawer** showing SQLite-persisted conversation history, active provider pill, 3-state daemon connection indicator (green connected, red error, black disconnected), tool-call badges, TTS replay, Clear/New Chat, density toggle, bottom-right resize grip, and text/mic input bar.
+- **Right-Click Island**: Opens the context menu with quick toggles, **New Chat Session**, **Preferences**, **Configuration**, and **Exit**.
+- **Voice & Wake-Word**: Say `"Hey Bytey"` (configurable) or click the drawer mic button to speak; click the mic button again to submit early.
+- **Preferences vs Configuration**:
+  - **Preferences** (`prefs.js`): Native GNOME Extension Preferences (`org.gnome.shell.extensions.bytey-ai-companion`, e.g. `daemon-url`), also accessible from the GNOME **Extensions** app.
+  - **Configuration** (`settings-ui/run_settings.py`): Full GTK4 / Libadwaita Settings UI for API keys, LLM providers/models, MCP servers, voice I/O testing, and island colors.
 
 ---
 
@@ -154,4 +200,35 @@ Test the GNOME Shell extension in an isolated nested Wayland session without aff
 ```bash
 dbus-run-session -- gnome-shell --nested --wayland
 ```
-Inside the nested shell, enable `bytey-ai-companion@local` and monitor logs with `journalctl --user -f` or stderr.
+Inside the nested shell, enable `bytey-ai-companion@c42759.gitlab.com` and monitor logs with `journalctl --user -f` or stderr.
+
+---
+
+## Support & Contributing
+
+- **Repository**: [https://gitlab.com/c42759/bytey](https://gitlab.com/c42759/bytey)
+- **Issue Tracker**: [https://gitlab.com/c42759/bytey/-/issues](https://gitlab.com/c42759/bytey/-/issues)
+- **Contributing Guide**: [CONTRIBUTING.md](./CONTRIBUTING.md)
+- **Changelog**: [CHANGELOG.md](./CHANGELOG.md)
+
+---
+
+## Contributors
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://gitlab.com/c42759">
+        <img src="https://unavatar.io/gitlab/c42759?fallback=https://www.gravatar.com/avatar/?d=mp" width="80" height="80" alt="Carlos Santos" /><br />
+        <sub><b>Carlos Santos</b></sub>
+      </a><br />
+      <sub>@c42759 • Maintainer &amp; Author</sub>
+    </td>
+  </tr>
+</table>
+
+---
+
+## License
+
+This project is licensed under the **GPL-3.0-or-later** license. See [LICENSE](./gnome-extension/bytey-ai-companion@c42759.gitlab.com/LICENSE) for full details.
