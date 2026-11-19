@@ -53,9 +53,11 @@ System packages (Fedora / Ubuntu / Arch equivalents):
 - PipeWire tools (`pipewire-utils` for `pw-record` / `pw-play`)
 - GNOME Shell 48–50 (`libsoup3`, `gjs`, `glib-compile-schemas`)
 
-Required Python packages (when not already provided by system packages):
+Install the core daemon package (installs required Python dependencies and the `bytey-ai-companion-daemon` command):
 ```bash
-pip install fastapi uvicorn websockets pydantic httpx python-dotenv keyring mcp google-genai
+pip install --user -e ./core-daemon
+# Or inside an active virtualenv:
+# pip install -e ./core-daemon
 ```
 
 ### 2. Optional Voice & Wake-Word Packages
@@ -107,8 +109,13 @@ gnome-extensions enable bytey-ai-companion@c42759.gitlab.com
 
 ### 5. `systemd --user` Service
 
-Install and start the background daemon user unit:
+Install and start the background daemon user unit (auto-detects `bytey-ai-companion-daemon` or your active `python3` + repository path):
 
+```bash
+./systemd/install-service.sh
+```
+
+Or, if `bytey-ai-companion-daemon` is installed in `~/.local/bin`, you can symlink the portable unit directly:
 ```bash
 mkdir -p ~/.config/systemd/user
 ln -sfn "$(pwd)/systemd/bytey-ai-companion-daemon.service" ~/.config/systemd/user/bytey-ai-companion-daemon.service
@@ -147,9 +154,7 @@ If upgrading from an earlier `ai-pet` installation, switch your `systemd --user`
 # 1. Switch systemd --user daemon unit
 systemctl --user disable --now ai-pet-daemon.service || true
 rm -f ~/.config/systemd/user/ai-pet-daemon.service
-ln -sfn "$(pwd)/systemd/bytey-ai-companion-daemon.service" ~/.config/systemd/user/bytey-ai-companion-daemon.service
-systemctl --user daemon-reload
-systemctl --user enable --now bytey-ai-companion-daemon.service
+./systemd/install-service.sh
 
 # 2. Switch GNOME Shell extension symlink
 gnome-extensions disable ai-pet@local || true
