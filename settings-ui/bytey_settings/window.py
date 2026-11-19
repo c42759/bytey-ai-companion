@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -53,6 +54,7 @@ MCP_TRANSPORTS = ("stdio", "http", "sse")
 DEFAULT_EYE_COLOR = "#F7FAFF"
 DEFAULT_BG_COLOR = "#0A0A0C"
 DEFAULT_BORDER_COLOR = "#2A2C34"
+DEFAULT_CONTEXT_FALLBACK_MAX = 131072
 
 # Canonical setting -> (nested_path, flat_aliases)
 FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
@@ -64,6 +66,8 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "llm_model": (("llm", "model"), ("llm_model", "model")),
     "llm_supports_tools": (("llm", "supports_tools"), ("supports_tools",)),
     "llm_force_tools": (("llm", "force_enable_tools"), ("force_enable_tools", "force_tools")),
+    "llm_context_size": (("llm", "context_size"), ("llm_context_size", "context_size")),
+    "llm_max_context_size": (("llm", "max_context_size"), ("max_context_size",)),
     "mic_muted": (("voice_input", "mic_muted"), ("mic_muted",)),
     "wake_sensitivity": (("voice_input", "wake_sensitivity"), ("wake_sensitivity",)),
     "vad_silence_timeout_ms": (
@@ -221,6 +225,97 @@ def _set_secret_row_state(
 ) -> None:
     _set_secret_badge(badge, configured)
     row.set_text(SECRET_MASK_PLACEHOLDER if configured else "")
+
+
+def _normalize_positive_int(value: Any) -> int | None:
+    """Parse a positive integer value, returning None for invalid or non-positive inputs."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = int(text)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def format_context_short(tokens: int) -> str:
+    """Format a token count compactly (e.g. '128K', '1M', or '100,000')."""
+    if tokens >= 1048576 and tokens % 1048576 == 0:
+        return f"{tokens // 1048576}M"
+    if tokens >= 1024 and tokens % 1024 == 0:
+        return f"{tokens // 1024}K"
+    return f"{tokens:,}"
+
+
+def format_context_tokens(tokens: int) -> str:
+    """Format a token count for dropdown display (e.g. '128K (131,072)')."""
+    short = format_context_short(tokens)
+    if short.endswith(("M", "K")):
+        return f"{short} ({tokens:,})"
+    return short
+
+
+def build_context_size_presets(
+    max_context: int | None,
+    current_value: int | None = None,
+) -> list[tuple[str, int | None]]:
+    """Build (label, token_count) context size preset options bounded by max_context."""
+    max_ctx = _normalize_positive_int(max_context)
+    cur_val = _normalize_positive_int(current_value)
+
+    values: list[int] = []
+    if max_ctx is not None and max_ctx < 4096:
+        if max_ctx < 512:
+            values.append(max_ctx)
+        else:
+            step = 512
+            while step <= max_ctx:
+                values.append(step)
+                step *= 2
+    else:
+        limit = min(
+            max_ctx if max_ctx is not None else DEFAULT_CONTEXT_FALLBACK_MAX,
+            16777216,
+        )
+        step = 4096
+        while step <= limit:
+            values.append(step)
+            step *= 2
+
+    if cur_val is not None and (max_ctx is None or cur_val <= max_ctx) and cur_val not in values:
+        values.append(cur_val)
+        values.sort()
+
+    return [("Auto (Default)", None), *[(format_context_tokens(v), v) for v in values]]
+
+
+def clamp_context_size(
+    value: int | None,
+    presets: list[tuple[str, int | None]],
+) -> int | None:
+    """Clamp a context size token count to the nearest valid preset <= value."""
+    cur = _normalize_positive_int(value)
+    if cur is None:
+        return None
+    numeric = [v for _, v in presets if v is not None]
+    if cur in numeric:
+        return cur
+    if not numeric:
+        return None
+    le = [v for v in numeric if v <= cur]
+    return max(le) if le else numeric[-1]
 
 
 class MCPServerDialog(Adw.Dialog):
@@ -446,6 +541,8 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._use_flat_keys = False
         self._secrets_configured: dict[str, bool] = {}
         self._model_tool_map: dict[str, bool] = {}
+        self._model_context_map: dict[str, int] = {}
+        self._context_preset_values: list[int | None] = [None]
         self._elevenlabs_voices: list[tuple[str, str]] = []
         self._debounce_timers: dict[str, int] = {}
         self._offline_banners: list[Adw.Banner] = []
@@ -590,6 +687,23 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         if not res.ok:
             self._toast(f"Save failed: {res.error}")
             return
+        if (
+            isinstance(res.data, dict)
+            and isinstance(res.data.get("llm"), dict)
+            and "max_context_size" in res.data["llm"]
+        ):
+            llm_data = res.data["llm"]
+            if isinstance(llm_data.get("supports_tools"), bool):
+                self._config.setdefault("llm", {})["supports_tools"] = llm_data["supports_tools"]
+            max_ctx = _normalize_positive_int(llm_data["max_context_size"])
+            self._config.setdefault("llm", {})["max_context_size"] = max_ctx
+            model = self.model_entry_row.get_text().strip()
+            if model and max_ctx is not None:
+                self._model_context_map[model] = max_ctx
+            clamped_val, changed = self._refresh_context_size_row(clamp_current=True)
+            if changed:
+                self._patch_fields({"llm_context_size": clamped_val})
+            self._update_tools_sensitivity()
         if toast_msg:
             suffix = " (offline)" if res.offline else ""
             self._toast(f"{toast_msg}{suffix}")
@@ -748,6 +862,14 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         )
         ai_group.add(self.model_entry_row)
 
+        self.context_size_row = _make_string_combo(
+            "Context Size",
+            "Context window tokens (Auto uses provider default)",
+            ["Auto (Default)"],
+        )
+        self.context_size_row.connect("notify::selected", self._on_context_size_selected)
+        ai_group.add(self.context_size_row)
+
         self.tools_status_row = Adw.ActionRow(
             title="Tools Support",
             subtitle="Auto-detected capability for the selected model",
@@ -811,10 +933,14 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             return
         provider = _combo_selected_text(self.provider_row)
         default_url = PROVIDER_DEFAULT_URLS.get(provider, "")
+        self._model_tool_map.clear()
+        self._model_context_map.clear()
+        self._config.setdefault("llm", {})["max_context_size"] = None
         self._loading = True
         self.llm_base_url_row.set_text(default_url)
         self._refresh_llm_secret_indicator()
         self._loading = False
+        self._refresh_context_size_row()
         self._patch_fields({"llm_provider": provider, "llm_base_url": default_url}, f"Provider: {provider}")
 
     def _refresh_llm_secret_indicator(self) -> None:
@@ -861,6 +987,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
 
             names: list[str] = []
             self._model_tool_map.clear()
+            self._model_context_map.clear()
             for item in models_raw:
                 if isinstance(item, str):
                     names.append(item)
@@ -870,6 +997,9 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
                         names.append(mid)
                         if "supports_tools" in item:
                             self._model_tool_map[mid] = bool(item["supports_tools"])
+                        ctx_len = _normalize_positive_int(item.get("context_length"))
+                        if ctx_len is not None:
+                            self._model_context_map[mid] = ctx_len
 
             current = self.model_entry_row.get_text().strip()
             if current and current not in names:
@@ -883,6 +1013,9 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
                 _set_combo_text(self.model_combo_row, current)
             self._loading = False
             self._update_tools_sensitivity()
+            clamped_val, changed = self._refresh_context_size_row(clamp_current=True)
+            if changed:
+                self._patch_fields({"llm_context_size": clamped_val})
             self._toast(f"Loaded {len([n for n in names if n])} model(s)")
 
         self._run_async(lambda: self.client.list_models(provider, base_url), on_done)
@@ -904,8 +1037,55 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         updates: dict[str, Any] = {"llm_model": model_name}
         if model_name in self._model_tool_map:
             updates["llm_supports_tools"] = self._model_tool_map[model_name]
+        clamped_val, changed = self._refresh_context_size_row(clamp_current=True)
+        if changed:
+            updates["llm_context_size"] = clamped_val
         self._patch_fields(updates, f"Model: {model_name}")
         self._update_tools_sensitivity()
+
+    def _refresh_context_size_row(self, *, clamp_current: bool = False) -> tuple[int | None, bool]:
+        model = self.model_entry_row.get_text().strip()
+        max_ctx = self._model_context_map.get(model) or _normalize_positive_int(
+            self._read_field("llm_max_context_size", None)
+        )
+        cur_val = _normalize_positive_int(self._read_field("llm_context_size", None))
+        presets = build_context_size_presets(max_ctx, cur_val)
+        next_val = clamp_context_size(cur_val, presets) if clamp_current else cur_val
+        changed = next_val != cur_val
+        self._context_preset_values = [v for _, v in presets]
+
+        prev_loading = self._loading
+        self._loading = True
+        try:
+            self.context_size_row.set_model(Gtk.StringList.new([lbl for lbl, _ in presets]))
+            try:
+                sel_idx = self._context_preset_values.index(next_val)
+            except ValueError:
+                sel_idx = 0
+            self.context_size_row.set_selected(sel_idx)
+            self.context_size_row.set_subtitle(
+                f"Max supported by model: {format_context_short(max_ctx)} ({max_ctx:,} tokens)"
+                if max_ctx
+                else "Context window tokens (Auto uses provider default)"
+            )
+        finally:
+            self._loading = prev_loading
+        return (next_val, changed)
+
+    def _on_context_size_selected(self, *_: object) -> None:
+        if self._loading:
+            return
+        idx = int(self.context_size_row.get_selected())
+        if idx < 0 or idx >= len(self._context_preset_values):
+            return
+        val = self._context_preset_values[idx]
+        label = _combo_selected_text(self.context_size_row)
+        if val == _normalize_positive_int(self._read_field("llm_context_size", None)):
+            return
+        self._patch_fields(
+            {"llm_context_size": val},
+            f"Saved context size: {label}" if val else "Context size set to Auto",
+        )
 
     def _on_force_tools_toggled(self, *_: object) -> None:
         if self._loading:
@@ -1674,6 +1854,13 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             for section in ("general", "llm", "voice_input", "voice_output", "visuals")
         )
         self._config = deep_merge(DEFAULT_CONFIG, raw_cfg)
+        if (
+            res.offline
+            and isinstance(raw_cfg.get("provider"), dict)
+            and raw_cfg["provider"].get("context_size") is not None
+            and not (isinstance(raw_cfg.get("llm"), dict) and "context_size" in raw_cfg["llm"])
+        ):
+            self._config.setdefault("llm", {})["context_size"] = raw_cfg["provider"]["context_size"]
         self._secrets_configured = (
             {str(k): bool(v) for k, v in secrets_meta.items()} if isinstance(secrets_meta, dict) else {}
         )
@@ -1719,6 +1906,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self.force_tools_row.set_active(bool(self._read_field("llm_force_tools", False)))
             self._refresh_llm_secret_indicator()
             self._update_tools_sensitivity()
+            self._refresh_context_size_row()
 
             # Voice Input
             self.mic_muted_row.set_active(bool(self._read_field("mic_muted", False)))

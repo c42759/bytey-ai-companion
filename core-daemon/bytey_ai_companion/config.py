@@ -104,6 +104,23 @@ class ProviderConfig(BaseModel):
     base_url: str = "http://localhost:11434"
     supports_tools_override: bool | None = None
     temperature: float = 0.7
+    context_size: int | None = None
+
+    @field_validator("context_size", mode="before")
+    @classmethod
+    def _validate_context_size(cls, value: Any) -> int | None:
+        """Normalize context_size, treating auto/empty/non-positive values as None."""
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, str):
+            cleaned = value.strip().lower()
+            if not cleaned or cleaned in ("auto", "default", "none", "0"):
+                return None
+            value = int(cleaned)
+        if isinstance(value, (int, float)):
+            iv = int(value)
+            return iv if iv > 0 else None
+        raise ValueError(f"Invalid context_size: {value!r}")
 
 
 class VoiceInConfig(BaseModel):

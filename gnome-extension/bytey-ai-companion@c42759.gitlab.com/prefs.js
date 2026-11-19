@@ -44,6 +44,7 @@ const PROVIDER_DEFAULT_URLS = {
     anthropic: 'https://api.anthropic.com',
     custom: 'http://localhost:8000/v1',
 };
+const DEFAULT_CONTEXT_FALLBACK_MAX = 131072;
 
 function normalizeUrl(raw) {
     if (typeof raw !== 'string')
@@ -200,6 +201,87 @@ function cloneJson(obj) {
     return JSON.parse(JSON.stringify(obj ?? {}));
 }
 
+function formatNumberCommas(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function formatContextTokens(tokens) {
+    if (tokens >= 1048576 && tokens % 1048576 === 0)
+        return `${tokens / 1048576}M (${formatNumberCommas(tokens)})`;
+    if (tokens >= 1024 && tokens % 1024 === 0)
+        return `${tokens / 1024}K (${formatNumberCommas(tokens)})`;
+    return formatNumberCommas(tokens);
+}
+
+function formatContextShort(tokens) {
+    if (tokens >= 1048576 && tokens % 1048576 === 0)
+        return `${tokens / 1048576}M`;
+    if (tokens >= 1024 && tokens % 1024 === 0)
+        return `${tokens / 1024}K`;
+    return formatNumberCommas(tokens);
+}
+
+function normalizePositiveInt(value) {
+    if (typeof value === 'number')
+        return Number.isInteger(value) && value > 0 ? value : null;
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!/^\d+$/.test(trimmed))
+            return null;
+        const parsed = Number(trimmed);
+        return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    }
+    return null;
+}
+
+function buildContextPresets(maxContext, currentValue = null) {
+    const maxCtx = normalizePositiveInt(maxContext);
+    const curVal = normalizePositiveInt(currentValue);
+    const values = [];
+
+    if (maxCtx !== null && maxCtx < 4096) {
+        for (let p = 2048; p >= 512; p /= 2) {
+            if (p <= maxCtx) {
+                values.push(p);
+                break;
+            }
+        }
+        if (values.length === 0)
+            values.push(maxCtx);
+    } else {
+        const limit = maxCtx ?? DEFAULT_CONTEXT_FALLBACK_MAX;
+        for (let v = 4096; v <= limit && v <= 16777216; v *= 2)
+            values.push(v);
+    }
+
+    if (curVal !== null && (maxCtx === null || curVal <= maxCtx) && !values.includes(curVal)) {
+        values.push(curVal);
+        values.sort((a, b) => a - b);
+    }
+
+    return [
+        {label: 'Auto (Default)', value: null},
+        ...values.map(v => ({label: formatContextTokens(v), value: v})),
+    ];
+}
+
+function clampContextValue(value, presets) {
+    const cur = normalizePositiveInt(value);
+    if (cur === null)
+        return null;
+    if (presets.some(p => p.value === cur))
+        return cur;
+    const numeric = presets.map(p => p.value).filter(v => v !== null);
+    if (numeric.length === 0)
+        return null;
+    let best = null;
+    for (const v of numeric) {
+        if (v <= cur && (best === null || v > best))
+            best = v;
+    }
+    return best !== null ? best : numeric[numeric.length - 1];
+}
+
 /**
  * Libadwaita preferences window for Bytey AI Companion.
  */
@@ -220,6 +302,10 @@ export default class ByteyPreferences extends ExtensionPreferences {
         let modelFetchSeq = 0;
         let detectedToolsSupport = false;
         const modelToolMap = new Map();
+        let currentContextSize = null;
+        let detectedMaxContext = null;
+        let contextPresetOptions = buildContextPresets(null, null);
+        const modelContextMap = new Map();
         let mcpServers = {};
         let mcpRows = [];
 
@@ -511,10 +597,16 @@ export default class ByteyPreferences extends ExtensionPreferences {
             model: Gtk.StringList.new(['No models available']),
             sensitive: false,
         });
+        const contextSizeRow = new Adw.ComboRow({
+            title: 'Context Size',
+            subtitle: 'Context window tokens (Auto uses provider default)',
+            model: Gtk.StringList.new(contextPresetOptions.map(o => o.label)),
+        });
         aiGroup.add(providerRow);
         aiGroup.add(baseUrlRow);
         aiGroup.add(aiApiKeyRow);
         aiGroup.add(modelRow);
+        aiGroup.add(contextSizeRow);
 
         const toolsStatusRow = new Adw.ActionRow({
             title: 'Tools Support',
@@ -642,6 +734,34 @@ export default class ByteyPreferences extends ExtensionPreferences {
             mcpJsonGroup.set_sensitive(active);
         };
 
+        const refreshContextSizeRow = ({clampAndReturnChanged = false} = {}) => {
+            const maxCtx = modelContextMap.has(currentConfiguredModel)
+                ? modelContextMap.get(currentConfiguredModel)
+                : detectedMaxContext;
+            contextPresetOptions = buildContextPresets(maxCtx, currentContextSize);
+            let changed = false;
+            if (clampAndReturnChanged) {
+                const nextVal = clampContextValue(currentContextSize, contextPresetOptions);
+                changed = nextVal !== currentContextSize;
+                currentContextSize = nextVal;
+            }
+            const selIdx = Math.max(0, contextPresetOptions.findIndex(o => o.value === currentContextSize));
+            const prevLoading = loading;
+            loading = true;
+            try {
+                contextSizeRow.set_model(Gtk.StringList.new(contextPresetOptions.map(o => o.label)));
+                contextSizeRow.set_selected(selIdx);
+                contextSizeRow.set_subtitle(
+                    maxCtx
+                        ? `Max supported by model: ${formatContextShort(maxCtx)} (${formatNumberCommas(maxCtx)} tokens)`
+                        : 'Context window tokens (Auto uses provider default)'
+                );
+            } finally {
+                loading = prevLoading;
+            }
+            return changed;
+        };
+
         const normalizeMcpMap = rawMap => {
             const normalized = {};
             if (!rawMap || typeof rawMap !== 'object' || Array.isArray(rawMap))
@@ -675,6 +795,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             try {
                 availableModels = [];
                 modelToolMap.clear();
+                modelContextMap.clear();
                 modelRow.set_model(Gtk.StringList.new(['No models available']));
                 modelRow.set_selected(0);
                 modelRow.set_sensitive(false);
@@ -683,6 +804,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 loading = false;
             }
             updateToolsSensitivity();
+            refreshContextSizeRow();
         };
 
         const fetchModels = async (
@@ -725,6 +847,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 let id = '';
                 let name = '';
                 let supportsTools;
+                let contextLength = null;
                 if (typeof entry === 'string') {
                     id = entry.trim();
                     name = id;
@@ -733,10 +856,16 @@ export default class ByteyPreferences extends ExtensionPreferences {
                     name = String(entry.name ?? id).trim();
                     if (typeof entry.supports_tools === 'boolean')
                         supportsTools = entry.supports_tools;
+                    contextLength = normalizePositiveInt(entry.context_length);
                 }
                 if (id && !seenIds.has(id)) {
                     seenIds.add(id);
-                    parsedModels.push({id, name: name || id, supports_tools: supportsTools});
+                    parsedModels.push({
+                        id,
+                        name: name || id,
+                        supports_tools: supportsTools,
+                        context_length: contextLength,
+                    });
                 }
             }
 
@@ -752,9 +881,12 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
             availableModels = parsedModels;
             modelToolMap.clear();
+            modelContextMap.clear();
             for (const m of availableModels) {
                 if (typeof m.supports_tools === 'boolean')
                     modelToolMap.set(m.id, m.supports_tools);
+                if (m.context_length !== null)
+                    modelContextMap.set(m.id, m.context_length);
             }
             const modelIds = availableModels.map(m => m.id);
             const matchIdx = currentConfiguredModel ? modelIds.indexOf(currentConfiguredModel) : -1;
@@ -775,14 +907,24 @@ export default class ByteyPreferences extends ExtensionPreferences {
             if (matchIdx < 0 && autoSelectIfMissing && chosen) {
                 currentConfiguredModel = chosen.id;
                 updateToolsSensitivity();
+                const ctxClamped = refreshContextSizeRow({clampAndReturnChanged: true});
                 const patch = {provider: {model: chosen.id}};
+                if (ctxClamped)
+                    patch.provider.context_size = currentContextSize;
                 if (typeof chosen.supports_tools === 'boolean')
                     patch.supports_tools = chosen.supports_tools;
                 await patchConfig(patch, `Selected model ${chosen.id}`);
             } else {
                 updateToolsSensitivity();
-                if (showResultToast)
+                const ctxClamped = refreshContextSizeRow({clampAndReturnChanged: true});
+                if (ctxClamped) {
+                    await patchConfig(
+                        {provider: {context_size: currentContextSize}},
+                        `Context size clamped to ${formatContextShort(currentContextSize)}`
+                    );
+                } else if (showResultToast) {
                     showToast(`Loaded ${availableModels.length} model(s) from ${prov}`);
+                }
             }
         };
 
@@ -1261,6 +1403,8 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 forceToolsRow.set_active(Boolean(
                     llm.force_enable_tools ?? (provider.supports_tools_override === true)
                 ));
+                currentContextSize = normalizePositiveInt(provider.context_size ?? llm.context_size);
+                detectedMaxContext = normalizePositiveInt(llm.max_context_size);
                 mcpServers = normalizeMcpMap(cfg.mcpServers ?? cfg.mcp_servers ?? {});
             } finally {
                 loading = false;
@@ -1272,6 +1416,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             syncMcpJsonText();
             rebuildMcpList();
             updateToolsSensitivity();
+            refreshContextSizeRow();
             fetchModels(comboText(providerRow), baseUrlRow.get_text().trim(), {
                 autoSelectIfMissing: false,
                 showResultToast: false,
@@ -1317,9 +1462,22 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 return;
             if (resp.ok) {
                 setOfflineState(false);
-                if (typeof resp.data?.llm?.supports_tools === 'boolean' && !forceToolsRow.get_active()) {
-                    detectedToolsSupport = resp.data.llm.supports_tools;
+                const llmData = resp.data?.llm;
+                if (typeof llmData?.supports_tools === 'boolean' && !forceToolsRow.get_active()) {
+                    detectedToolsSupport = llmData.supports_tools;
                     updateToolsSensitivity();
+                }
+                if (llmData && typeof llmData === 'object' && Object.prototype.hasOwnProperty.call(llmData, 'max_context_size')) {
+                    detectedMaxContext = normalizePositiveInt(llmData.max_context_size);
+                    if (currentConfiguredModel && detectedMaxContext !== null)
+                        modelContextMap.set(currentConfiguredModel, detectedMaxContext);
+                    const ctxClamped = refreshContextSizeRow({clampAndReturnChanged: true});
+                    if (
+                        ctxClamped &&
+                        (!patch?.provider || !Object.prototype.hasOwnProperty.call(patch.provider, 'context_size'))
+                    ) {
+                        httpJson('PATCH', '/api/v1/config', {provider: {context_size: currentContextSize}}).catch(() => {});
+                    }
                 }
                 showToast(toastMsg);
             } else {
@@ -1538,6 +1696,9 @@ export default class ByteyPreferences extends ExtensionPreferences {
         providerRow.connect('notify::selected', () => onUserChange(async () => {
             const prov = comboText(providerRow);
             const defaultUrl = PROVIDER_DEFAULT_URLS[prov] ?? '';
+            modelToolMap.clear();
+            modelContextMap.clear();
+            detectedMaxContext = null;
             loading = true;
             try {
                 baseUrlRow.set_text(defaultUrl);
@@ -1545,6 +1706,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             } finally {
                 loading = false;
             }
+            refreshContextSizeRow();
             await patchConfig({provider: {active_provider: prov, base_url: defaultUrl}}, 'Saved AI provider');
             if (!destroyed && comboText(providerRow) === prov)
                 await fetchModels(prov, defaultUrl, {autoSelectIfMissing: true});
@@ -1586,10 +1748,26 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 return;
             currentConfiguredModel = chosen.id;
             updateToolsSensitivity();
+            const ctxClamped = refreshContextSizeRow({clampAndReturnChanged: true});
             const patch = {provider: {model: chosen.id}};
+            if (ctxClamped)
+                patch.provider.context_size = currentContextSize;
             if (typeof chosen.supports_tools === 'boolean')
                 patch.supports_tools = chosen.supports_tools;
             patchConfig(patch, `Saved model: ${chosen.id}`);
+        }));
+
+        contextSizeRow.connect('notify::selected', () => onUserChange(() => {
+            const idx = contextSizeRow.get_selected();
+            const opt = contextPresetOptions[idx];
+            const nextVal = opt ? opt.value : null;
+            if (nextVal === currentContextSize)
+                return;
+            currentContextSize = nextVal;
+            patchConfig(
+                {provider: {context_size: currentContextSize}},
+                currentContextSize ? `Saved context size: ${opt.label}` : 'Context size set to Auto'
+            );
         }));
 
         forceToolsRow.connect('notify::active', () => onUserChange(() => {
@@ -1615,6 +1793,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         syncMcpJsonText();
         rebuildMcpList();
         updateToolsSensitivity();
+        refreshContextSizeRow();
         loadConfig();
     }
 }

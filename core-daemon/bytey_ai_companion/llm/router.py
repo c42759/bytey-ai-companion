@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import re
 from collections.abc import Callable
 from typing import Any
@@ -19,6 +20,8 @@ except ImportError:
     _genai_types = None  # type: ignore[assignment]
 
 from .emotions import EmotionStreamParser
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_PROVIDERS: tuple[str, ...] = (
     "gemini",
@@ -35,11 +38,11 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 ANTHROPIC_VERSION = "2023-06-01"
 
 ANTHROPIC_FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
-    {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "supports_tools": True},
-    {"id": "claude-opus-4-20250514", "name": "Claude Opus 4", "supports_tools": True},
-    {"id": "claude-3-7-sonnet-20250219", "name": "Claude 3.7 Sonnet", "supports_tools": True},
-    {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "supports_tools": True},
-    {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "supports_tools": True},
+    {"id": "claude-sonnet-4-20250514", "name": "Claude Sonnet 4", "supports_tools": True, "context_length": 200000},
+    {"id": "claude-opus-4-20250514", "name": "Claude Opus 4", "supports_tools": True, "context_length": 200000},
+    {"id": "claude-3-7-sonnet-20250219", "name": "Claude 3.7 Sonnet", "supports_tools": True, "context_length": 200000},
+    {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet", "supports_tools": True, "context_length": 200000},
+    {"id": "claude-3-5-haiku-20241022", "name": "Claude 3.5 Haiku", "supports_tools": True, "context_length": 200000},
 )
 
 _NON_TOOL_TOKENS: tuple[str, ...] = (
@@ -63,6 +66,80 @@ _OPENAI_TOOL_MODEL_RE = re.compile(
     r"(?:^|/)(?:gpt-3\.5|gpt-4|gpt-5|chatgpt|o1(?!-mini|-preview)|o3|o4)",
     re.IGNORECASE,
 )
+
+_OPENAI_REASONING_CTX_RE = re.compile(r"(?:^|/)(?:o1|o3|o4)", re.IGNORECASE)
+
+
+def _parse_positive_int(val: Any) -> int | None:
+    """Return a positive integer from val, or None if invalid/non-positive."""
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        parsed = int(val)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _extract_ollama_context_length(show_data: Any) -> int | None:
+    """Extract positive integer context length from an Ollama /api/show payload."""
+    if not isinstance(show_data, dict):
+        return None
+    model_info = show_data.get("model_info")
+    if isinstance(model_info, dict):
+        arch = str(model_info.get("general.architecture") or "").strip()
+        if arch:
+            arch_ctx = _parse_positive_int(model_info.get(f"{arch}.context_length"))
+            if arch_ctx is not None:
+                return arch_ctx
+        for key, val in model_info.items():
+            key_str = str(key)
+            if key_str == "context_length" or key_str.endswith(".context_length"):
+                ctx = _parse_positive_int(val)
+                if ctx is not None:
+                    return ctx
+    return _parse_positive_int(show_data.get("context_length"))
+
+
+def _heuristic_context_length(provider: str, model: str) -> int | None:
+    """Estimate context window size from provider and model identifier."""
+    prov = (provider or "").strip().lower()
+    mod = (model or "").strip().lower()
+    if not mod:
+        return None
+
+    if prov == "gemini":
+        if "gemini-1.0" in mod:
+            return 32768
+        if "gemini" in mod:
+            return 1048576
+        return None
+
+    if prov == "anthropic":
+        if mod.startswith(("claude-2", "claude-instant")):
+            return 100000
+        if "claude" in mod:
+            return 200000
+        return None
+
+    if prov == "openai":
+        if "gpt-4.1" in mod:
+            return 1047576
+        if "gpt-5" in mod:
+            return 400000
+        if _OPENAI_REASONING_CTX_RE.search(mod):
+            return 200000
+        if "gpt-4o" in mod or "gpt-4-turbo" in mod or "chatgpt-4o" in mod:
+            return 128000
+        if "gpt-4-32k" in mod:
+            return 32768
+        if "gpt-3.5" in mod:
+            return 16384
+        if "gpt-4" in mod:
+            return 8192
+        return None
+
+    return None
 
 
 def _normalize_ollama_base(base_url: str) -> str:
@@ -284,6 +361,7 @@ class LLMRouter:
             if not mid:
                 return None
             supports_tools = False
+            context_length: int | None = None
             async with sem:
                 try:
                     show_resp = await client.post(
@@ -296,9 +374,16 @@ class LLMRouter:
                         caps = show_data.get("capabilities") if isinstance(show_data, dict) else None
                         if isinstance(caps, list):
                             supports_tools = "tools" in [str(c).lower() for c in caps]
+                        context_length = _extract_ollama_context_length(show_data)
                 except Exception:
                     supports_tools = False
-            return {"id": mid, "name": mid, "supports_tools": supports_tools}
+                    context_length = None
+            return {
+                "id": mid,
+                "name": mid,
+                "supports_tools": supports_tools,
+                "context_length": context_length,
+            }
 
         inspected = await asyncio.gather(
             *(inspect_model(m) for m in raw_models if isinstance(m, dict))
@@ -347,7 +432,28 @@ class LLMRouter:
                 supports_tools = "tools" in [str(p).lower() for p in supported_params]
             else:
                 supports_tools = _heuristic_tool_support(provider, mid)
-            models.append({"id": mid, "name": name, "supports_tools": supports_tools})
+            context_length: int | None = None
+            for ctx_key in (
+                "context_length",
+                "context_window",
+                "max_context_length",
+                "max_model_len",
+                "input_token_limit",
+                "n_ctx",
+            ):
+                context_length = _parse_positive_int(item.get(ctx_key))
+                if context_length is not None:
+                    break
+            if context_length is None:
+                context_length = _heuristic_context_length(provider, mid)
+            models.append(
+                {
+                    "id": mid,
+                    "name": name,
+                    "supports_tools": supports_tools,
+                    "context_length": context_length,
+                }
+            )
 
         models.sort(key=lambda m: m["id"])
         return {"models": models, "error": None}
@@ -379,11 +485,15 @@ class LLMRouter:
                 if not mid:
                     continue
                 display_name = str(getattr(item, "display_name", None) or mid)
+                context_length = _parse_positive_int(
+                    getattr(item, "input_token_limit", None)
+                ) or _heuristic_context_length("gemini", mid)
                 models.append(
                     {
                         "id": mid,
                         "name": display_name,
                         "supports_tools": _heuristic_tool_support("gemini", mid),
+                        "context_length": context_length,
                     }
                 )
         except Exception as exc:
@@ -432,11 +542,17 @@ class LLMRouter:
             if not mid:
                 continue
             name = str(item.get("display_name") or item.get("name") or mid)
+            context_length = (
+                _parse_positive_int(item.get("max_input_tokens"))
+                or _parse_positive_int(item.get("context_length"))
+                or _heuristic_context_length("anthropic", mid)
+            )
             models.append(
                 {
                     "id": mid,
                     "name": name,
                     "supports_tools": _heuristic_tool_support("anthropic", mid),
+                    "context_length": context_length,
                 }
             )
         if not models:
@@ -445,6 +561,50 @@ class LLMRouter:
                 "error": None,
             }
         return {"models": models, "error": None}
+
+    async def detect_model_capabilities(
+        self,
+        provider: str,
+        model: str,
+        override: bool | None = None,
+        base_url: str = "",
+        api_key: str | None = None,
+    ) -> tuple[bool, int | None]:
+        """Resolve (supports_tools, context_length) for the selected provider and model."""
+        del api_key
+        prov = (provider or "").strip().lower()
+        if prov == "ollama":
+            fallback_tools = bool(override) if override is not None else False
+            if not (model or "").strip():
+                return fallback_tools, None
+            base = _normalize_ollama_base(base_url)
+            client = self._get_client()
+            try:
+                resp = await client.post(
+                    f"{base}/api/show",
+                    json={"model": model},
+                    timeout=10.0,
+                )
+                if resp.status_code >= 400:
+                    return fallback_tools, None
+                data = resp.json()
+                supports_tools = False
+                caps = data.get("capabilities") if isinstance(data, dict) else None
+                if isinstance(caps, list):
+                    supports_tools = "tools" in [str(c).lower() for c in caps]
+                if override is not None:
+                    supports_tools = bool(override)
+                context_length = _extract_ollama_context_length(data)
+                return supports_tools, context_length
+            except Exception:
+                return fallback_tools, None
+
+        supports_tools = (
+            bool(override)
+            if override is not None
+            else _heuristic_tool_support(prov, model)
+        )
+        return supports_tools, _heuristic_context_length(prov, model)
 
     async def detect_tool_support(
         self,
@@ -457,28 +617,14 @@ class LLMRouter:
         """Resolve whether the selected provider/model supports tool calling."""
         if override is not None:
             return bool(override)
-
-        prov = (provider or "").strip().lower()
-        if prov == "ollama":
-            base = _normalize_ollama_base(base_url)
-            client = self._get_client()
-            try:
-                resp = await client.post(
-                    f"{base}/api/show",
-                    json={"model": model},
-                    timeout=10.0,
-                )
-                if resp.status_code >= 400:
-                    return False
-                data = resp.json()
-                caps = data.get("capabilities") if isinstance(data, dict) else None
-                if isinstance(caps, list):
-                    return "tools" in [str(c).lower() for c in caps]
-                return False
-            except Exception:
-                return False
-
-        return _heuristic_tool_support(prov, model)
+        supports_tools, _ = await self.detect_model_capabilities(
+            provider,
+            model,
+            override=override,
+            base_url=base_url,
+            api_key=api_key,
+        )
+        return supports_tools
 
     async def generate_chat(
         self,
@@ -492,6 +638,7 @@ class LLMRouter:
         tools: list[dict[str, Any]] | None = None,
         on_text_chunk: Callable[[str], Any] | None = None,
         on_emotion: Callable[[str], Any] | None = None,
+        context_size: int | None = None,
     ) -> dict[str, Any]:
         """Stream a chat completion with emotion tag extraction and normalized tool calls."""
         prov = (provider or "").strip().lower()
@@ -525,7 +672,14 @@ class LLMRouter:
             )
         elif prov == "ollama":
             tool_calls = await self._chat_ollama(
-                messages, effective_prompt, model, base_url, temperature, tools, emit_delta
+                messages,
+                effective_prompt,
+                model,
+                base_url,
+                temperature,
+                tools,
+                emit_delta,
+                context_size=context_size,
             )
         elif prov == "gemini":
             tool_calls, gemini_parts = await self._chat_gemini(
@@ -717,6 +871,7 @@ class LLMRouter:
         temperature: float,
         tools: list[dict[str, Any]] | None,
         emit_delta: Callable[[str], Any],
+        context_size: int | None = None,
     ) -> list[dict[str, Any]]:
         base = _normalize_ollama_base(base_url)
         url = f"{base}/api/chat"
@@ -750,11 +905,16 @@ class LLMRouter:
                     tool_entry["tool_name"] = str(msg["name"])
                 wire_messages.append(tool_entry)
 
+        options: dict[str, Any] = {"temperature": temperature}
+        effective_num_ctx = _parse_positive_int(context_size)
+        if effective_num_ctx is not None:
+            options["num_ctx"] = effective_num_ctx
+
         body: dict[str, Any] = {
             "model": model,
             "messages": wire_messages,
             "stream": True,
-            "options": {"temperature": temperature},
+            "options": options,
         }
         if tools:
             body["tools"] = [
@@ -804,6 +964,30 @@ class LLMRouter:
                     tc_id = str(tc.get("id") or f"ollama_call_{len(tool_calls)}")
                     tool_calls.append({"id": tc_id, "name": name, "arguments": args})
                 if chunk.get("done") is True:
+                    prompt_eval_count = chunk.get("prompt_eval_count")
+                    eval_count = chunk.get("eval_count")
+                    done_reason = chunk.get("done_reason")
+                    prompt_tokens = _parse_positive_int(prompt_eval_count)
+                    if prompt_eval_count is not None or eval_count is not None:
+                        logger.info(
+                            "Ollama chat done (model=%s, num_ctx=%s, prompt_eval_count=%s, eval_count=%s, done_reason=%s)",
+                            model,
+                            effective_num_ctx,
+                            prompt_eval_count,
+                            eval_count,
+                            done_reason,
+                        )
+                    if (
+                        effective_num_ctx is not None
+                        and prompt_tokens is not None
+                        and prompt_tokens >= int(effective_num_ctx * 0.95)
+                    ):
+                        logger.warning(
+                            "Ollama prompt tokens (%d) near or exceeding num_ctx (%d) for model %s; earlier context may be truncated",
+                            prompt_tokens,
+                            effective_num_ctx,
+                            model,
+                        )
                     break
 
         return tool_calls

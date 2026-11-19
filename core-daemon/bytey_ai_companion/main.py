@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import logging
 import os
@@ -40,6 +41,8 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "llm_base_url": ("provider", "base_url"),
     "llm_model": ("provider", "model"),
     "model": ("provider", "model"),
+    "llm_context_size": ("provider", "context_size"),
+    "context_size": ("provider", "context_size"),
     "mic_muted": ("voice_in", "mic_muted"),
     "wake_sensitivity": ("voice_in", "wake_sensitivity"),
     "vad_silence_timeout_ms": ("voice_in", "silence_timeout_ms"),
@@ -106,6 +109,17 @@ def _export_mcp_map_for_ui(servers: dict[str, MCPServerConfig]) -> dict[str, dic
     return exported
 
 
+def _accepts_kwarg(fn: Any, kwarg: str) -> bool:
+    """Return True if fn accepts `kwarg` explicitly or via **kwargs."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    return kwarg in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+
+
 class ByteyDaemon:
     """Orchestrates IPC, storage, voice pipeline, LLM router, MCP host, and TTS."""
 
@@ -163,6 +177,7 @@ class ByteyDaemon:
         self._emotion_reset_task: asyncio.Task[None] | None = None
         self._active_session_id: str | None = None
         self._detected_tools_support: bool = False
+        self._detected_context_length: int | None = None
         self._pending_confirmations: dict[str, asyncio.Future[bool]] = {}
         self._chat_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -177,6 +192,33 @@ class ByteyDaemon:
         task.add_done_callback(self._background_tasks.discard)
         return task
 
+    async def _detect_active_model_capabilities(
+        self,
+        cfg: Any,
+        api_key: str | None,
+    ) -> tuple[bool, int | None]:
+        """Detect (supports_tools, context_length) for the active provider and model."""
+        try:
+            detect_caps = getattr(self.llm_router, "detect_model_capabilities", None)
+            if callable(detect_caps):
+                return await detect_caps(
+                    cfg.provider.active_provider,
+                    cfg.provider.model,
+                    override=cfg.provider.supports_tools_override,
+                    base_url=cfg.provider.base_url,
+                    api_key=api_key,
+                )
+            supported = await self.llm_router.detect_tool_support(
+                cfg.provider.active_provider,
+                cfg.provider.model,
+                override=cfg.provider.supports_tools_override,
+                base_url=cfg.provider.base_url,
+                api_key=api_key,
+            )
+            return bool(supported), None
+        except Exception:
+            return bool(cfg.provider.supports_tools_override), None
+
     async def start(self) -> None:
         """Initialize database, tool support metadata, IPC server, and voice capture."""
         if self._started:
@@ -189,16 +231,13 @@ class ByteyDaemon:
         if cfg.voice_in.mic_muted:
             self.state = "MUTED"
 
-        try:
-            self._detected_tools_support = await self.llm_router.detect_tool_support(
-                cfg.provider.active_provider,
-                cfg.provider.model,
-                override=cfg.provider.supports_tools_override,
-                base_url=cfg.provider.base_url,
-                api_key=self._get_provider_api_key(cfg.provider.active_provider),
-            )
-        except Exception:
-            self._detected_tools_support = bool(cfg.provider.supports_tools_override)
+        (
+            self._detected_tools_support,
+            self._detected_context_length,
+        ) = await self._detect_active_model_capabilities(
+            cfg,
+            self._get_provider_api_key(cfg.provider.active_provider),
+        )
 
         await self.ipc.start()
         if self.enable_voice_capture:
@@ -265,6 +304,8 @@ class ByteyDaemon:
             "supports_tools": self._detected_tools_support,
             "force_enable_tools": cfg.provider.supports_tools_override is True,
             "temperature": cfg.provider.temperature,
+            "context_size": cfg.provider.context_size,
+            "max_context_size": self._detected_context_length,
         }
         data["voice_input"] = {
             "mic_muted": cfg.voice_in.mic_muted,
@@ -325,6 +366,8 @@ class ByteyDaemon:
                 mapped["base_url"] = llm["base_url"]
             if "temperature" in llm:
                 mapped["temperature"] = llm["temperature"]
+            if "context_size" in llm:
+                mapped["context_size"] = llm["context_size"]
             if "supports_tools" in llm and isinstance(llm["supports_tools"], bool):
                 tools_hint = llm["supports_tools"]
             if "force_enable_tools" in llm:
@@ -603,17 +646,24 @@ class ByteyDaemon:
             cfg = self.config_manager.config
             api_key = self._get_provider_api_key(cfg.provider.active_provider)
 
-            try:
-                supports_tools = await self.llm_router.detect_tool_support(
-                    cfg.provider.active_provider,
-                    cfg.provider.model,
-                    override=cfg.provider.supports_tools_override,
-                    base_url=cfg.provider.base_url,
-                    api_key=api_key,
-                )
-            except Exception:
-                supports_tools = bool(cfg.provider.supports_tools_override)
+            supports_tools, detected_context_length = await self._detect_active_model_capabilities(
+                cfg,
+                api_key,
+            )
             self._detected_tools_support = supports_tools
+            self._detected_context_length = detected_context_length
+
+            effective_context_size = cfg.provider.context_size
+            if (
+                isinstance(effective_context_size, int)
+                and not isinstance(effective_context_size, bool)
+                and effective_context_size > 0
+                and isinstance(self._detected_context_length, int)
+                and not isinstance(self._detected_context_length, bool)
+                and self._detected_context_length > 0
+                and effective_context_size > self._detected_context_length
+            ):
+                effective_context_size = self._detected_context_length
 
             tools: list[dict[str, Any]] = []
             if supports_tools and cfg.mcp_servers:
@@ -653,18 +703,21 @@ class ByteyDaemon:
 
             try:
                 for _round in range(6):
-                    result = await self.llm_router.generate_chat(
-                        messages=llm_messages,
-                        system_prompt=cfg.general.system_prompt,
-                        provider=cfg.provider.active_provider,
-                        model=cfg.provider.model,
-                        base_url=cfg.provider.base_url,
-                        api_key=api_key,
-                        temperature=cfg.provider.temperature,
-                        tools=tools or None,
-                        on_text_chunk=on_text_chunk,
-                        on_emotion=on_emotion,
-                    )
+                    chat_kwargs: dict[str, Any] = {
+                        "messages": llm_messages,
+                        "system_prompt": cfg.general.system_prompt,
+                        "provider": cfg.provider.active_provider,
+                        "model": cfg.provider.model,
+                        "base_url": cfg.provider.base_url,
+                        "api_key": api_key,
+                        "temperature": cfg.provider.temperature,
+                        "tools": tools or None,
+                        "on_text_chunk": on_text_chunk,
+                        "on_emotion": on_emotion,
+                    }
+                    if _accepts_kwarg(self.llm_router.generate_chat, "context_size"):
+                        chat_kwargs["context_size"] = effective_context_size
+                    result = await self.llm_router.generate_chat(**chat_kwargs)
                     if result.get("emotion"):
                         final_emotion = str(result["emotion"])
                     tool_calls = result.get("tool_calls") or []
@@ -908,19 +961,17 @@ class ByteyDaemon:
         canonical_patch, tools_hint = self._normalize_patch(raw_patch)
         updated = self.config_manager.update_config(canonical_patch)
 
-        if tools_hint is not None:
+        if "provider" in canonical_patch:
+            detected_tools, detected_ctx = await self._detect_active_model_capabilities(
+                updated,
+                self._get_provider_api_key(updated.provider.active_provider),
+            )
+            self._detected_tools_support = (
+                tools_hint if tools_hint is not None else detected_tools
+            )
+            self._detected_context_length = detected_ctx
+        elif tools_hint is not None:
             self._detected_tools_support = tools_hint
-        elif "provider" in canonical_patch:
-            try:
-                self._detected_tools_support = await self.llm_router.detect_tool_support(
-                    updated.provider.active_provider,
-                    updated.provider.model,
-                    override=updated.provider.supports_tools_override,
-                    base_url=updated.provider.base_url,
-                    api_key=self._get_provider_api_key(updated.provider.active_provider),
-                )
-            except Exception:
-                pass
 
         if updated.voice_in.mic_muted != prev_muted:
             await self.voice_input.set_muted(updated.voice_in.mic_muted)

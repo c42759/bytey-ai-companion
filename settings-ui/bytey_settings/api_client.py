@@ -82,6 +82,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model": "",
         "supports_tools": False,
         "force_enable_tools": False,
+        "context_size": None,
+        "max_context_size": None,
     },
     "voice_input": {
         "mic_muted": False,
