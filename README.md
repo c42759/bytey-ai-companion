@@ -38,6 +38,13 @@
 
 ## Building and Installation
 
+Clone the repository and run all commands below from the repository root:
+
+```bash
+git clone https://gitlab.com/c42759/bytey.git
+cd bytey
+```
+
 ### 1. Base Runtime Requirements
 
 System packages (Fedora / Ubuntu / Arch equivalents):
@@ -78,16 +85,25 @@ Never store API keys in `~/.config/bytey-ai-companion/config.json`. Provide secr
 
 ### 4. GNOME Shell Extension Installation
 
-The extension targets **GNOME Shell 48–50** (`bytey-ai-companion@c42759.gitlab.com`). For local symlink installs, compile the GSettings schema in-place first (`schemas/gschemas.compiled` is gitignored and excluded from EGO upload zips), symlink the extension into your user extensions directory, and enable it:
+The extension targets **GNOME Shell 48–50** (`bytey-ai-companion@c42759.gitlab.com`).
 
+**Standard install (recommended)**:
 ```bash
-glib-compile-schemas /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com/schemas
-mkdir -p ~/.local/share/gnome-shell/extensions
-ln -sfn /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com ~/.local/share/gnome-shell/extensions/bytey-ai-companion@c42759.gitlab.com
+./gnome-extension/build.sh
+gnome-extensions install gnome-extension/bytey-ai-companion@c42759.gitlab.com.shell-extension.zip --force
 gnome-extensions enable bytey-ai-companion@c42759.gitlab.com
 ```
 
-> On Wayland, log out and back in once after first linking a new extension so GNOME Shell discovers `bytey-ai-companion@c42759.gitlab.com`.
+**Symlink development install**: Compile the GSettings schema in-place first (`schemas/gschemas.compiled` is gitignored and excluded from EGO upload zips), symlink the extension into your user extensions directory, and enable it:
+
+```bash
+glib-compile-schemas gnome-extension/bytey-ai-companion@c42759.gitlab.com/schemas
+mkdir -p ~/.local/share/gnome-shell/extensions
+ln -sfn "$(pwd)/gnome-extension/bytey-ai-companion@c42759.gitlab.com" ~/.local/share/gnome-shell/extensions/bytey-ai-companion@c42759.gitlab.com
+gnome-extensions enable bytey-ai-companion@c42759.gitlab.com
+```
+
+> On Wayland, log out and back in once after first linking or installing a new extension so GNOME Shell discovers `bytey-ai-companion@c42759.gitlab.com`.
 
 ### 5. `systemd --user` Service
 
@@ -95,7 +111,7 @@ Install and start the background daemon user unit:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-ln -sfn /home/c42759/Git/pet/systemd/bytey-ai-companion-daemon.service ~/.config/systemd/user/bytey-ai-companion-daemon.service
+ln -sfn "$(pwd)/systemd/bytey-ai-companion-daemon.service" ~/.config/systemd/user/bytey-ai-companion-daemon.service
 systemctl --user daemon-reload
 systemctl --user enable --now bytey-ai-companion-daemon.service
 ```
@@ -118,7 +134,7 @@ systemctl --user restart bytey-ai-companion-daemon.service
 You can open standalone full-featured Settings (API keys, MCP JSON editor, voice test, provider/model selection, colors) from the island right-click menu (**Configuration**) or directly from a terminal:
 
 ```bash
-python3 /home/c42759/Git/pet/settings-ui/run_settings.py
+python3 settings-ui/run_settings.py
 ```
 
 If the daemon is stopped, the Settings UI shows an offline banner and reads/writes non-secret settings directly in `~/.config/bytey-ai-companion/config.json`.
@@ -131,15 +147,15 @@ If upgrading from an earlier `ai-pet` installation, switch your `systemd --user`
 # 1. Switch systemd --user daemon unit
 systemctl --user disable --now ai-pet-daemon.service || true
 rm -f ~/.config/systemd/user/ai-pet-daemon.service
-ln -sfn /home/c42759/Git/pet/systemd/bytey-ai-companion-daemon.service ~/.config/systemd/user/bytey-ai-companion-daemon.service
+ln -sfn "$(pwd)/systemd/bytey-ai-companion-daemon.service" ~/.config/systemd/user/bytey-ai-companion-daemon.service
 systemctl --user daemon-reload
 systemctl --user enable --now bytey-ai-companion-daemon.service
 
 # 2. Switch GNOME Shell extension symlink
 gnome-extensions disable ai-pet@local || true
 rm -f ~/.local/share/gnome-shell/extensions/ai-pet@local
-glib-compile-schemas /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com/schemas
-ln -sfn /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com ~/.local/share/gnome-shell/extensions/bytey-ai-companion@c42759.gitlab.com
+glib-compile-schemas gnome-extension/bytey-ai-companion@c42759.gitlab.com/schemas
+ln -sfn "$(pwd)/gnome-extension/bytey-ai-companion@c42759.gitlab.com" ~/.local/share/gnome-shell/extensions/bytey-ai-companion@c42759.gitlab.com
 gnome-extensions enable bytey-ai-companion@c42759.gitlab.com
 ```
 
@@ -187,12 +203,12 @@ To publish on [extensions.gnome.org](https://extensions.gnome.org/):
 
 ### Python Unit & Integration Tests
 ```bash
-PYTHONPATH=/home/c42759/Git/pet/core-daemon python3 -m unittest discover -s /home/c42759/Git/pet/tests -v
+PYTHONPATH=core-daemon python3 -m unittest discover -s tests -v
 ```
 
 Or with `pytest`:
 ```bash
-PYTHONPATH=/home/c42759/Git/pet/core-daemon pytest /home/c42759/Git/pet/tests
+PYTHONPATH=core-daemon pytest tests
 ```
 
 ### Nested GNOME Shell Wayland Verification

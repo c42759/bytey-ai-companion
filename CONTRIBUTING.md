@@ -43,7 +43,7 @@ Contributions, bug reports, and feature suggestions are welcome!
 
 1. **Run Python unit and integration tests**:
    ```bash
-   PYTHONPATH=/home/c42759/Git/pet/core-daemon python3 -m unittest discover -s /home/c42759/Git/pet/tests -v
+   PYTHONPATH=core-daemon python3 -m unittest discover -s tests -v
    ```
 
 2. **Validate & package the GNOME extension**:
@@ -53,9 +53,9 @@ Contributions, bug reports, and feature suggestions are welcome!
 
 3. **Compile GSettings schema and symlink for local testing**:
    ```bash
-   glib-compile-schemas /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com/schemas
+   glib-compile-schemas gnome-extension/bytey-ai-companion@c42759.gitlab.com/schemas
    mkdir -p ~/.local/share/gnome-shell/extensions
-   ln -sfn /home/c42759/Git/pet/gnome-extension/bytey-ai-companion@c42759.gitlab.com ~/.local/share/gnome-shell/extensions/bytey-ai-companion@c42759.gitlab.com
+   ln -sfn "$(pwd)/gnome-extension/bytey-ai-companion@c42759.gitlab.com" ~/.local/share/gnome-shell/extensions/bytey-ai-companion@c42759.gitlab.com
    gnome-extensions enable bytey-ai-companion@c42759.gitlab.com
    ```
 
