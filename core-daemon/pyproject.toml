@@ -21,6 +21,7 @@ voice = [
     "silero-vad>=5.1",
     "rapidfuzz>=3.0",
     "sounddevice>=0.4",
+    "piper-tts>=1.2",
 ]
 mcp = [
     "mcp>=1.0",

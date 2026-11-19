@@ -99,6 +99,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "kokoro_base_url": "http://localhost:8880/v1",
         "kokoro_voice": "af_heart",
         "kokoro_speed": 1.0,
+        "piper_model": "en_US-lessac-medium",
+        "piper_models_dir": "",
+        "piper_speed": 1.0,
+        "piper_pitch": 0.0,
+        "piper_noise_scale": 0.667,
+        "piper_speaker_id": None,
         "elevenlabs_voice_id": "",
         "elevenlabs_model_id": "eleven_flash_v2_5",
     },
@@ -507,17 +513,54 @@ class DaemonClient:
             status_code=resp.status_code,
         )
 
-    def list_tts_voices(self, provider: str, base_url: str = "") -> ApiResult:
-        """Fetch available TTS voices for Kokoro or ElevenLabs."""
+    def _post_json_action(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+        offline_error: str,
+        default_data: dict[str, Any],
+    ) -> ApiResult:
+        """Execute a POST JSON request returning a normalized ApiResult."""
+        resp, err, offline = self._request("POST", path, json=payload, timeout=timeout)
+        if resp is None:
+            return ApiResult(ok=False, offline=offline, error=offline_error if offline else err)
+        if resp.is_success:
+            try:
+                data = resp.json()
+            except ValueError:
+                data = dict(default_data)
+            return ApiResult(ok=True, offline=False, data=data, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    def list_tts_voices(
+        self,
+        provider: str,
+        base_url: str = "",
+        *,
+        refresh: bool = False,
+        language: str = "",
+    ) -> ApiResult:
+        """Fetch available TTS voices for Kokoro, Piper, or ElevenLabs."""
         params: dict[str, str] = {"provider": provider}
         if base_url:
             params["base_url"] = base_url
+        if refresh:
+            params["refresh"] = "1"
+        if language:
+            params["language"] = language
 
         resp, err, offline = self._request(
             "GET",
             "/api/v1/tts/voices",
             params=params,
-            timeout=15.0,
+            timeout=30.0 if refresh else 15.0,
         )
         if resp is None:
             return ApiResult(
@@ -538,6 +581,29 @@ class DaemonClient:
             offline=False,
             error=_extract_error(resp),
             status_code=resp.status_code,
+        )
+
+    def download_piper_model(self, model_id: str) -> ApiResult:
+        """Download a Piper voice model via the core daemon."""
+        cleaned = model_id.strip()
+        if not cleaned:
+            return ApiResult(ok=False, error="No Piper model specified")
+        return self._post_json_action(
+            "/api/v1/tts/piper/download",
+            {"model": cleaned},
+            timeout=300.0,
+            offline_error="Daemon offline: cannot download Piper model",
+            default_data={"ok": True, "model": cleaned},
+        )
+
+    def replay_tts(self, text: str) -> ApiResult:
+        """Speak *text* using the daemon's active TTS provider."""
+        return self._post_json_action(
+            "/api/v1/tts/replay",
+            {"text": text},
+            timeout=15.0,
+            offline_error="Daemon offline: cannot preview TTS voice",
+            default_data={"ok": True},
         )
 
 

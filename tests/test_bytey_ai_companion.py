@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import math
 import os
 import py_compile
 import re
+import shutil
 import socket
 import sqlite3
 import stat
@@ -17,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import wave
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
@@ -25,6 +28,7 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
+import numpy as np
 import websockets
 from google.genai import types as genai_types
 from pydantic import ValidationError
@@ -45,10 +49,15 @@ from bytey_ai_companion.audio.stt import DEFAULT_OPENAI_STT_URL, STTEngine  # no
 from bytey_ai_companion.audio.vad import VADProcessor  # noqa: E402
 from bytey_ai_companion.audio.wakeword import WakeWordMatcher  # noqa: E402
 from bytey_ai_companion.config import (  # noqa: E402
+    PIPER_NOISE_SCALE_RANGE,
+    PIPER_PITCH_RANGE,
+    PIPER_SPEED_RANGE,
+    PIPER_VOICE_PRESETS,
     ConfigManager,
     ProviderConfig,
     SecretStore,
     VisualsConfig,
+    VoiceOutConfig,
     resolve_config_dir,
 )
 from bytey_ai_companion.llm.emotions import EmotionStreamParser, VALID_EMOTIONS  # noqa: E402
@@ -66,11 +75,30 @@ from bytey_ai_companion.storage import (  # noqa: E402
     resolve_data_dir,
     resolve_db_path,
 )
-from bytey_ai_companion.tts.chunker import SentenceChunker  # noqa: E402
-from bytey_settings.api_client import DaemonClient, resolve_local_config_path  # noqa: E402
+from bytey_ai_companion.tts import (  # noqa: E402
+    CURATED_PIPER_VOICES,
+    PiperTTSClient,
+    SentenceChunker,
+    StreamingTTSPlayer,
+    apply_pitch_shift_wav,
+)
+from bytey_ai_companion.tts.piper_provider import (  # noqa: E402
+    PIPER_VOICES_BASE_URL,
+    PIPER_VOICES_INDEX_URL,
+    _build_atempo_chain,
+)
+from bytey_settings.api_client import (  # noqa: E402
+    DEFAULT_CONFIG as SETTINGS_DEFAULT_CONFIG,
+    DaemonClient,
+    resolve_local_config_path,
+)
 from bytey_settings.window import (  # noqa: E402
+    PIPER_VOICE_PRESETS as SETTINGS_PIPER_VOICE_PRESETS,
     POSITION_MODE_OPTIONS as SETTINGS_POSITION_MODE_OPTIONS,
+    TTS_PROVIDERS as SETTINGS_TTS_PROVIDERS,
     ByteyPreferencesWindow,
+    _match_piper_preset_index,
+    _piper_sample_text,
     build_context_size_presets,
     clamp_context_size,
 )
@@ -514,6 +542,164 @@ class TestConfigAndSecrets(unittest.TestCase):
         self.assertIsNone(cleared.provider.context_size)
         reloaded_cleared = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
         self.assertIsNone(reloaded_cleared.config.provider.context_size)
+
+    def test_voice_out_piper_validation_and_roundtrip(self) -> None:
+        defaults = VoiceOutConfig()
+        self.assertEqual(defaults.tts_provider, "kokoro")
+        self.assertEqual(defaults.piper_model, "en_US-lessac-medium")
+        self.assertEqual(defaults.piper_models_dir, "")
+        self.assertEqual(defaults.piper_speed, 1.0)
+        self.assertEqual(defaults.piper_pitch, 0.0)
+        self.assertEqual(defaults.piper_noise_scale, 0.667)
+        self.assertIsNone(defaults.piper_speaker_id)
+
+        # Range clamping
+        self.assertEqual(VoiceOutConfig(piper_speed=0.1).piper_speed, 0.4)
+        self.assertEqual(VoiceOutConfig(piper_speed=-5).piper_speed, 0.4)
+        self.assertEqual(VoiceOutConfig(piper_speed=9.0).piper_speed, 2.5)
+        self.assertEqual(VoiceOutConfig(piper_speed="1.35").piper_speed, 1.35)
+
+        self.assertEqual(VoiceOutConfig(piper_pitch=-20).piper_pitch, -12.0)
+        self.assertEqual(VoiceOutConfig(piper_pitch=99).piper_pitch, 12.0)
+        self.assertEqual(VoiceOutConfig(piper_pitch="-4.5").piper_pitch, -4.5)
+
+        self.assertEqual(VoiceOutConfig(piper_noise_scale=-1).piper_noise_scale, 0.0)
+        self.assertEqual(VoiceOutConfig(piper_noise_scale=3.0).piper_noise_scale, 1.5)
+        self.assertEqual(VoiceOutConfig(piper_noise_scale="0.85").piper_noise_scale, 0.85)
+
+        # Invalid / bool / empty fallbacks
+        for bad in (None, True, False, "", "   ", "not-a-num", float("nan"), float("inf"), float("-inf")):
+            with self.subTest(bad=bad):
+                cfg = VoiceOutConfig(
+                    piper_speed=bad,
+                    piper_pitch=bad,
+                    piper_noise_scale=bad,
+                )
+                self.assertEqual(cfg.piper_speed, 1.0)
+                self.assertEqual(cfg.piper_pitch, 0.0)
+                self.assertEqual(cfg.piper_noise_scale, 0.667)
+
+        for bad_str in (None, True, False, "", "   "):
+            with self.subTest(bad_str=bad_str):
+                cfg = VoiceOutConfig(
+                    tts_provider=bad_str,
+                    piper_model=bad_str,
+                    piper_models_dir=bad_str,
+                )
+                self.assertEqual(cfg.tts_provider, "kokoro")
+                self.assertEqual(cfg.piper_model, "en_US-lessac-medium")
+                self.assertEqual(cfg.piper_models_dir, "")
+
+        self.assertEqual(VoiceOutConfig(tts_provider="  PIPER  ").tts_provider, "piper")
+        self.assertEqual(
+            VoiceOutConfig(piper_model="  pt_PT-tugão-medium  ").piper_model,
+            "pt_PT-tugão-medium",
+        )
+        self.assertEqual(
+            VoiceOutConfig(piper_models_dir="  /tmp/piper-models  ").piper_models_dir,
+            "/tmp/piper-models",
+        )
+
+        # piper_speaker_id validation & clamping
+        for bad_sid in (None, True, False, "", "   ", "bad"):
+            with self.subTest(bad_sid=bad_sid):
+                self.assertIsNone(VoiceOutConfig(piper_speaker_id=bad_sid).piper_speaker_id)
+        for neg_sid in (-5, -1, "-3", 0, "0"):
+            with self.subTest(neg_sid=neg_sid):
+                self.assertEqual(VoiceOutConfig(piper_speaker_id=neg_sid).piper_speaker_id, 0)
+        self.assertEqual(VoiceOutConfig(piper_speaker_id=4).piper_speaker_id, 4)
+        self.assertEqual(VoiceOutConfig(piper_speaker_id=" 7 ").piper_speaker_id, 7)
+
+        # ConfigManager / ByteyConfig persistence
+        store = SecretStore(config_dir=self.cfg_dir)
+        mgr = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+        updated = mgr.update_config(
+            {
+                "voice_out": {
+                    "tts_provider": "piper",
+                    "piper_model": "pt_PT-tugão-medium",
+                    "piper_models_dir": "/opt/piper",
+                    "piper_speed": 1.25,
+                    "piper_pitch": 8.0,
+                    "piper_noise_scale": 0.8,
+                    "piper_speaker_id": 2,
+                }
+            }
+        )
+        self.assertEqual(updated.voice_out.tts_provider, "piper")
+        self.assertEqual(updated.voice_out.piper_model, "pt_PT-tugão-medium")
+        self.assertEqual(updated.voice_out.piper_models_dir, "/opt/piper")
+        self.assertEqual(updated.voice_out.piper_speed, 1.25)
+        self.assertEqual(updated.voice_out.piper_pitch, 8.0)
+        self.assertEqual(updated.voice_out.piper_noise_scale, 0.8)
+        self.assertEqual(updated.voice_out.piper_speaker_id, 2)
+
+        reloaded = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+        self.assertEqual(reloaded.config.voice_out.piper_model, "pt_PT-tugão-medium")
+        self.assertEqual(reloaded.config.voice_out.piper_pitch, 8.0)
+        self.assertEqual(reloaded.config.voice_out.piper_speaker_id, 2)
+
+        partial = mgr.update_config({"voice_out": {"piper_pitch": -20, "piper_speaker_id": None}})
+        self.assertEqual(partial.voice_out.piper_pitch, -12.0)
+        self.assertIsNone(partial.voice_out.piper_speaker_id)
+        self.assertEqual(partial.voice_out.piper_model, "pt_PT-tugão-medium")
+
+        # ByteyDaemon _normalize_patch & _serialize_config via voice_out and voice_output
+        daemon = ByteyDaemon(
+            config_dir=self.cfg_dir,
+            data_dir=self.cfg_dir / "data",
+            enable_voice_capture=False,
+        )
+        canon_out, _ = daemon._normalize_patch(
+            {
+                "voice_out": {
+                    "tts_provider": "piper",
+                    "piper_model": "de_DE-thorsten-medium",
+                    "piper_models_dir": "/var/piper",
+                    "piper_speed": 1.4,
+                    "piper_pitch": -3.5,
+                    "piper_noise_scale": 0.5,
+                    "piper_speaker_id": 1,
+                }
+            }
+        )
+        self.assertEqual(canon_out["voice_out"]["tts_provider"], "piper")
+        self.assertEqual(canon_out["voice_out"]["piper_model"], "de_DE-thorsten-medium")
+        self.assertEqual(canon_out["voice_out"]["piper_speaker_id"], 1)
+
+        canon_output, _ = daemon._normalize_patch(
+            {
+                "voice_output": {
+                    "provider": "piper",
+                    "piper_model": "fr_FR-siwis-medium",
+                    "piper_models_dir": "/tmp/piper",
+                    "piper_speed": 0.75,
+                    "piper_pitch": 6.0,
+                    "piper_noise_scale": 0.9,
+                    "piper_speaker_id": 3,
+                }
+            }
+        )
+        self.assertEqual(canon_output["voice_out"]["tts_provider"], "piper")
+        self.assertEqual(canon_output["voice_out"]["piper_model"], "fr_FR-siwis-medium")
+        self.assertEqual(canon_output["voice_out"]["piper_models_dir"], "/tmp/piper")
+        self.assertEqual(canon_output["voice_out"]["piper_speed"], 0.75)
+        self.assertEqual(canon_output["voice_out"]["piper_pitch"], 6.0)
+        self.assertEqual(canon_output["voice_out"]["piper_noise_scale"], 0.9)
+        self.assertEqual(canon_output["voice_out"]["piper_speaker_id"], 3)
+
+        daemon.config_manager.update_config(canon_output)
+        serialized = daemon._serialize_config()
+        self.assertEqual(serialized["voice_out"]["tts_provider"], "piper")
+        self.assertEqual(serialized["voice_out"]["piper_model"], "fr_FR-siwis-medium")
+        self.assertEqual(serialized["voice_output"]["provider"], "piper")
+        self.assertEqual(serialized["voice_output"]["tts_provider"], "piper")
+        self.assertEqual(serialized["voice_output"]["piper_model"], "fr_FR-siwis-medium")
+        self.assertEqual(serialized["voice_output"]["piper_models_dir"], "/tmp/piper")
+        self.assertEqual(serialized["voice_output"]["piper_speed"], 0.75)
+        self.assertEqual(serialized["voice_output"]["piper_pitch"], 6.0)
+        self.assertEqual(serialized["voice_output"]["piper_noise_scale"], 0.9)
+        self.assertEqual(serialized["voice_output"]["piper_speaker_id"], 3)
 
 
 class TestStorageManager(unittest.IsolatedAsyncioTestCase):
@@ -2591,6 +2777,225 @@ assert.strictEqual(clampContextValue(null, presets8k), null);
             failure_context="node prefs.js buildContextPresets/clampContextValue test failed",
         )
 
+    def test_piper_ui_parity_and_ego_compliance(self) -> None:
+        prefs_js = (GNOME_EXT_DIR / "prefs.js").read_text(encoding="utf-8")
+        window_py = (SETTINGS_UI_DIR / "bytey_settings" / "window.py").read_text(encoding="utf-8")
+
+        self._assert_prefs_ego_constraints(prefs_js)
+
+        for expected in (
+            "PIPER_VOICE_PRESETS",
+            "longHttpSession",
+            "'/api/v1/tts/piper/download'",
+            "'/api/v1/tts/replay'",
+        ):
+            self.assertIn(expected, prefs_js)
+
+        tts_decl = re.search(r"const\s+TTS_PROVIDERS\s*=\s*\[[^\]]*\];", prefs_js)
+        presets_decl = re.search(r"const\s+PIPER_VOICE_PRESETS\s*=\s*\[[\s\S]*?\];", prefs_js)
+        self.assertIsNotNone(tts_decl)
+        self.assertIsNotNone(presets_decl)
+        combo_text_fn = self._extract_js_method(prefs_js, "function comboText(row) {")
+        match_fn = self._extract_js_method(
+            prefs_js, "function matchPiperPresetIndex(speed, pitch, noiseScale) {"
+        )
+        sample_fn = self._extract_js_method(prefs_js, "function sampleTextForLanguage(langCode) {")
+        sync_tts_fn = self._extract_js_method(prefs_js, "const syncTtsVisibility = () => {")
+
+        piper_node = """
+const assert = require('assert');
+const [backendPresetsJson, ttsDecl, presetsDecl, comboFn, matchFn, sampleFn, syncFn] = process.argv.slice(1);
+const backendPresets = JSON.parse(backendPresetsJson);
+
+const makeRow = () => ({visible: null, set_visible(v) { this.visible = v; }});
+const ttsProviderRow = {selected: 'kokoro', get_selected_item() { return {get_string: () => this.selected}; }};
+const kokoroBaseUrlRow = makeRow();
+const kokoroApiKeyRow = makeRow();
+const elevenlabsApiKeyRow = makeRow();
+const piperLangRow = makeRow();
+const piperModelRow = makeRow();
+const piperCustomModelRow = makeRow();
+const piperPresetRow = makeRow();
+const piperSpeedRow = makeRow();
+const piperPitchRow = makeRow();
+const piperNoiseRow = makeRow();
+const piperTestRow = makeRow();
+
+const {
+    TTS_PROVIDERS,
+    PIPER_VOICE_PRESETS,
+    matchPiperPresetIndex,
+    sampleTextForLanguage,
+    syncTtsVisibility,
+} = new Function(
+    'ttsProviderRow', 'kokoroBaseUrlRow', 'kokoroApiKeyRow', 'elevenlabsApiKeyRow',
+    'piperLangRow', 'piperModelRow', 'piperCustomModelRow', 'piperPresetRow',
+    'piperSpeedRow', 'piperPitchRow', 'piperNoiseRow', 'piperTestRow',
+    `${ttsDecl}\n${presetsDecl}\n${comboFn}\n${matchFn}\n${sampleFn}\n${syncFn}\n` +
+    `return {TTS_PROVIDERS, PIPER_VOICE_PRESETS, matchPiperPresetIndex, sampleTextForLanguage, syncTtsVisibility};`
+)(
+    ttsProviderRow, kokoroBaseUrlRow, kokoroApiKeyRow, elevenlabsApiKeyRow,
+    piperLangRow, piperModelRow, piperCustomModelRow, piperPresetRow,
+    piperSpeedRow, piperPitchRow, piperNoiseRow, piperTestRow
+);
+
+assert.deepStrictEqual(TTS_PROVIDERS, ['kokoro', 'piper', 'elevenlabs', 'disabled']);
+assert.strictEqual(PIPER_VOICE_PRESETS[PIPER_VOICE_PRESETS.length - 1].id, 'custom');
+for (const [key, spec] of Object.entries(backendPresets)) {
+    const found = PIPER_VOICE_PRESETS.find(p => p.id === key);
+    assert.ok(found, `Missing preset ${key}`);
+    assert.strictEqual(found.label, spec.label);
+    assert.strictEqual(found.speed, spec.speed);
+    assert.strictEqual(found.pitch, spec.pitch);
+    assert.strictEqual(found.noise_scale, spec.noise_scale);
+}
+
+assert.strictEqual(matchPiperPresetIndex(1.0, 0.0, 0.667), 0);
+assert.strictEqual(matchPiperPresetIndex(1.0, 0.0, 0.67), 0);
+assert.strictEqual(matchPiperPresetIndex(1.25, 8.0, 0.8), 1);
+assert.strictEqual(matchPiperPresetIndex(1.15, 10.5, 0.9), 2);
+assert.strictEqual(matchPiperPresetIndex(0.82, -8.0, 0.667), 3);
+assert.strictEqual(matchPiperPresetIndex(0.68, -5.5, 0.55), 4);
+assert.strictEqual(matchPiperPresetIndex(1.55, 5.5, 1.0), 5);
+assert.strictEqual(matchPiperPresetIndex(1.05, -2.5, 0.1), 6);
+assert.strictEqual(matchPiperPresetIndex(1.13, 3.0, 0.5), 7);
+assert.strictEqual(matchPiperPresetIndex(NaN, 0.0, 0.667), 7);
+
+assert.ok(sampleTextForLanguage('en_US').includes('Bytey'));
+assert.ok(sampleTextForLanguage('pt-BR').includes('Olá'));
+assert.ok(sampleTextForLanguage('fr_FR').includes('Bonjour'));
+assert.strictEqual(sampleTextForLanguage('xx_YY'), sampleTextForLanguage('en'));
+
+const piperRows = [
+    piperLangRow, piperModelRow, piperCustomModelRow, piperPresetRow,
+    piperSpeedRow, piperPitchRow, piperNoiseRow, piperTestRow,
+];
+
+ttsProviderRow.selected = 'piper';
+syncTtsVisibility();
+for (const r of piperRows) assert.strictEqual(r.visible, true);
+assert.strictEqual(kokoroBaseUrlRow.visible, false);
+assert.strictEqual(kokoroApiKeyRow.visible, false);
+assert.strictEqual(elevenlabsApiKeyRow.visible, false);
+
+ttsProviderRow.selected = 'kokoro';
+syncTtsVisibility();
+for (const r of piperRows) assert.strictEqual(r.visible, false);
+assert.strictEqual(kokoroBaseUrlRow.visible, true);
+assert.strictEqual(kokoroApiKeyRow.visible, true);
+assert.strictEqual(elevenlabsApiKeyRow.visible, false);
+
+ttsProviderRow.selected = 'elevenlabs';
+syncTtsVisibility();
+for (const r of piperRows) assert.strictEqual(r.visible, false);
+assert.strictEqual(kokoroBaseUrlRow.visible, false);
+assert.strictEqual(kokoroApiKeyRow.visible, false);
+assert.strictEqual(elevenlabsApiKeyRow.visible, true);
+
+ttsProviderRow.selected = 'disabled';
+syncTtsVisibility();
+for (const r of piperRows) assert.strictEqual(r.visible, false);
+assert.strictEqual(kokoroBaseUrlRow.visible, false);
+assert.strictEqual(kokoroApiKeyRow.visible, false);
+assert.strictEqual(elevenlabsApiKeyRow.visible, false);
+"""
+        self._run_node_script(
+            piper_node,
+            json.dumps(PIPER_VOICE_PRESETS),
+            tts_decl.group(0),  # type: ignore[union-attr]
+            presets_decl.group(0),  # type: ignore[union-attr]
+            combo_text_fn,
+            match_fn,
+            sample_fn,
+            sync_tts_fn,
+            failure_context="node prefs.js Piper presets/visibility test failed",
+        )
+
+        # settings-ui api_client.py & window.py parity
+        self.assertIn("piper", SETTINGS_TTS_PROVIDERS)
+        self.assertEqual(SETTINGS_TTS_PROVIDERS, ("kokoro", "piper", "elevenlabs", "disabled"))
+        vo_defaults = SETTINGS_DEFAULT_CONFIG["voice_output"]
+        self.assertEqual(vo_defaults["piper_model"], "en_US-lessac-medium")
+        self.assertEqual(vo_defaults["piper_models_dir"], "")
+        self.assertEqual(vo_defaults["piper_speed"], 1.0)
+        self.assertEqual(vo_defaults["piper_pitch"], 0.0)
+        self.assertEqual(vo_defaults["piper_noise_scale"], 0.667)
+        self.assertIsNone(vo_defaults["piper_speaker_id"])
+
+        self.assertEqual(SETTINGS_PIPER_VOICE_PRESETS[-1][0], "custom")
+        for idx, (pid, spec) in enumerate(PIPER_VOICE_PRESETS.items()):
+            w_pid, w_lbl, w_spd, w_pitch, w_noise = SETTINGS_PIPER_VOICE_PRESETS[idx]
+            self.assertEqual(w_pid, pid)
+            self.assertEqual(w_lbl, spec["label"])
+            self.assertEqual(w_spd, spec["speed"])
+            self.assertEqual(w_pitch, spec["pitch"])
+            self.assertEqual(w_noise, spec["noise_scale"])
+
+        self.assertEqual(_match_piper_preset_index(1.0, 0.0, 0.667), 0)
+        self.assertEqual(_match_piper_preset_index(1.0, 0.0, 0.67), 0)
+        self.assertEqual(_match_piper_preset_index(1.25, 8.0, 0.8), 1)
+        self.assertEqual(_match_piper_preset_index(1.05, -2.5, 0.1), 6)
+        self.assertEqual(_match_piper_preset_index(1.13, 3.0, 0.5), 7)
+        self.assertIn("Olá", _piper_sample_text("pt-BR"))
+        self.assertEqual(_piper_sample_text("xx_YY"), _piper_sample_text("en"))
+
+        for token in (
+            '"Piper Speed"',
+            '"Piper Pitch"',
+            '"Piper Expressiveness"',
+            "self.piper_speed_scale",
+            "self.piper_pitch_scale",
+            "self.piper_noise_scale",
+            "download_piper_model",
+            "replay_tts",
+        ):
+            self.assertIn(token, window_py)
+
+        # Verify DaemonClient.download_piper_model & replay_tts via MockTransport
+        seen_api_calls: list[tuple[str, str, dict[str, Any]]] = []
+
+        def _client_handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content.decode("utf-8")) if request.content else {}
+            seen_api_calls.append((request.method, str(request.url), body))
+            if request.url.path == "/api/v1/tts/piper/download":
+                return httpx.Response(200, json={"ok": True, "installed": True, "model": body.get("model")})
+            if request.url.path == "/api/v1/tts/replay":
+                return httpx.Response(200, json={"ok": True})
+            if request.url.path == "/api/v1/tts/voices":
+                return httpx.Response(200, json={"voices": [{"id": "en_US-lessac-medium", "installed": False}]})
+            return httpx.Response(404, json={"error": "Not found"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dc = DaemonClient(base_url="http://127.0.0.1:8765", config_path=Path(tmp) / "cfg.json")
+            dc._client.close()
+            dc._client = httpx.Client(
+                base_url="http://127.0.0.1:8765",
+                transport=httpx.MockTransport(_client_handler),
+            )
+            try:
+                empty_dl = dc.download_piper_model("   ")
+                self.assertFalse(empty_dl.ok)
+
+                voices_res = dc.list_tts_voices("piper", refresh=True, language="pt")
+                self.assertTrue(voices_res.ok)
+                self.assertIn("voices", voices_res.data)
+
+                dl_res = dc.download_piper_model("pt_PT-tugão-medium")
+                self.assertTrue(dl_res.ok)
+                self.assertTrue(dl_res.data["installed"])
+
+                rep_res = dc.replay_tts("Olá!")
+                self.assertTrue(rep_res.ok)
+            finally:
+                dc.close()
+
+        self.assertEqual(len(seen_api_calls), 3)
+        self.assertIn("provider=piper", seen_api_calls[0][1])
+        self.assertIn("refresh=1", seen_api_calls[0][1])
+        self.assertIn("language=pt", seen_api_calls[0][1])
+        self.assertEqual(seen_api_calls[1][2], {"model": "pt_PT-tugão-medium"})
+        self.assertEqual(seen_api_calls[2][2], {"text": "Olá!"})
+
 
 class TestSTTBackendPrecedence(unittest.IsolatedAsyncioTestCase):
     """Test openai_whisper fixed endpoint URL and STT_API_KEY precedence."""
@@ -2655,6 +3060,712 @@ class TestSTTBackendPrecedence(unittest.IsolatedAsyncioTestCase):
             stt_engine=STTEngine(),
         )
         self.assertEqual(await svc_fallback._resolve_stt_secret("openai_whisper"), "oa-key")
+
+
+def _make_sine_wav_bytes(
+    duration_s: float = 0.4,
+    sample_rate: int = 22050,
+    freq_hz: float = 440.0,
+    amplitude: int = 12000,
+) -> bytes:
+    """Build deterministic mono 16-bit PCM WAV bytes containing a pure sine tone."""
+    num_samples = int(round(duration_s * sample_rate))
+    t = np.arange(num_samples, dtype=np.float64) / float(sample_rate)
+    pcm = np.rint(amplitude * np.sin(2.0 * np.pi * freq_hz * t)).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+def _inspect_wav_bytes(wav_bytes: bytes) -> tuple[int, int, int, int, float]:
+    """Return (channels, sampwidth, sample_rate, nframes, rms) for a 16-bit WAV payload."""
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        sample_rate = wf.getframerate()
+        nframes = wf.getnframes()
+        raw = wf.readframes(nframes)
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
+    rms = float(np.sqrt(np.mean(samples * samples))) if samples.size > 0 else 0.0
+    return channels, sampwidth, sample_rate, nframes, rms
+
+
+class TestPiperTTS(unittest.IsolatedAsyncioTestCase):
+    """Tests for Piper WAV pitch shifting, discovery, download, 3-tier synthesis, and player dispatch."""
+
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp_dir.name)
+        self.fake_home = self.root / "home"
+        self.fake_home.mkdir(parents=True, exist_ok=True)
+        self.models_dir = self.root / "piper_models"
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        self._home_patcher = patch("pathlib.Path.home", return_value=self.fake_home)
+        self._home_patcher.start()
+
+    def tearDown(self) -> None:
+        self._home_patcher.stop()
+        self.tmp_dir.cleanup()
+
+    @staticmethod
+    def _write_fake_model(
+        target_dir: Path,
+        model_id: str,
+        *,
+        language_code: str = "en_US",
+        num_speakers: int = 1,
+        sample_rate: int = 22050,
+        noise_w: float = 0.8,
+        phoneme_id_map: dict[str, list[int]] | None = None,
+        espeak_voice: str = "en-us",
+    ) -> tuple[Path, Path]:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        onnx_path = target_dir / f"{model_id}.onnx"
+        json_path = target_dir / f"{model_id}.onnx.json"
+        onnx_path.write_bytes(b"FAKE_ONNX_WEIGHTS_" + model_id.encode("utf-8"))
+        cfg = {
+            "audio": {"sample_rate": sample_rate, "quality": "medium"},
+            "espeak": {"voice": espeak_voice},
+            "inference": {"noise_scale": 0.667, "length_scale": 1.0, "noise_w": noise_w},
+            "language": {"code": language_code},
+            "num_speakers": num_speakers,
+            "phoneme_type": "espeak",
+            "phoneme_id_map": phoneme_id_map
+            or {
+                "^": [1],
+                "$": [2],
+                "_": [0],
+                " ": [3],
+                "o": [10],
+                "l": [11],
+                "a": [12],
+                ".": [13],
+            },
+        }
+        json_path.write_text(json.dumps(cfg), encoding="utf-8")
+        return onnx_path, json_path
+
+    async def test_apply_pitch_shift_wav_fast_path_ffmpeg_and_numpy_fallback(self) -> None:
+        wav_in = _make_sine_wav_bytes(duration_s=0.4, sample_rate=22050, freq_hz=440.0)
+        _, _, _, n_in, rms_in = _inspect_wav_bytes(wav_in)
+        self.assertGreater(rms_in, 0.1)
+
+        # Fast path (< 0.05 semitones) returns exact identical bytes
+        for zeroish in (0.0, 0.04, -0.04):
+            out = await apply_pitch_shift_wav(wav_in, zeroish)
+            self.assertIs(out, wav_in)
+
+        # Verify atempo decomposition stays within ffmpeg's [0.5, 2.0] range
+        for factor in (0.25, 0.5, 1.0, 2.0, 3.0):
+            stages = _build_atempo_chain(factor)
+            self.assertGreaterEqual(len(stages), 1)
+            for stage in stages:
+                val = float(stage.split("=", 1)[1])
+                self.assertGreaterEqual(val, 0.5 - 1e-6)
+                self.assertLessEqual(val, 2.0 + 1e-6)
+
+        # Real /usr/bin/ffmpeg path (+7.0 and -7.0 semitones)
+        self.assertTrue(os.path.isfile("/usr/bin/ffmpeg"))
+        for semitones in (7.0, -7.0):
+            with self.subTest(backend="ffmpeg", semitones=semitones):
+                shifted = await apply_pitch_shift_wav(
+                    wav_in, semitones, ffmpeg_bin="/usr/bin/ffmpeg"
+                )
+                self.assertTrue(shifted.startswith(b"RIFF"))
+                self.assertNotEqual(shifted, wav_in)
+                ch, sw, sr, nframes, rms = _inspect_wav_bytes(shifted)
+                self.assertEqual(ch, 1)
+                self.assertEqual(sw, 2)
+                self.assertEqual(sr, 22050)
+                self.assertGreater(nframes, 0)
+                self.assertGreater(rms, 0.05)
+                duration_s = nframes / float(sr)
+                self.assertAlmostEqual(duration_s, 0.4, delta=0.08)
+
+        # Pure-numpy fallback path
+        up_np = await apply_pitch_shift_wav(wav_in, 7.0, ffmpeg_bin="/nonexistent/ffmpeg")
+        down_np = await apply_pitch_shift_wav(wav_in, -7.0, ffmpeg_bin="/nonexistent/ffmpeg")
+
+        for label, payload in (("up", up_np), ("down", down_np)):
+            with self.subTest(backend="numpy", direction=label):
+                self.assertTrue(payload.startswith(b"RIFF"))
+                ch, sw, sr, nframes, rms = _inspect_wav_bytes(payload)
+                self.assertEqual(ch, 1)
+                self.assertEqual(sw, 2)
+                self.assertEqual(sr, 22050)
+                self.assertGreater(nframes, 0)
+                self.assertGreater(rms, 0.05)
+
+        _, _, _, n_up, _ = _inspect_wav_bytes(up_np)
+        _, _, _, n_down, _ = _inspect_wav_bytes(down_np)
+        self.assertEqual(n_up, int(round(n_in / (2.0 ** (7.0 / 12.0)))))
+        self.assertEqual(n_down, int(round(n_in / (2.0 ** (-7.0 / 12.0)))))
+        self.assertLess(n_up, n_in)
+        self.assertGreater(n_down, n_in)
+
+    async def test_piper_scan_local_models_catalog_and_language_filter(self) -> None:
+        self._write_fake_model(self.models_dir, "en_US-lessac-medium", language_code="en_US")
+        self._write_fake_model(
+            self.models_dir / "nested",
+            "fr_FR-custom-low",
+            language_code="fr_FR",
+            num_speakers=2,
+            sample_rate=16000,
+        )
+        # Orphan .onnx without JSON and broken JSON should be ignored cleanly
+        (self.models_dir / "orphan-broken.onnx").write_bytes(b"NO_JSON")
+        (self.models_dir / "badjson.onnx").write_bytes(b"BAD_JSON")
+        (self.models_dir / "badjson.onnx.json").write_text("{not valid json", encoding="utf-8")
+
+        def _forbid_network(_request: httpx.Request) -> httpx.Response:
+            raise AssertionError("Unexpected HTTP request during refresh=False catalog listing")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_forbid_network)) as http:
+            client = PiperTTSClient(models_dir=self.models_dir, http_client=http)
+            local = client.scan_local_models()
+            self.assertEqual(set(local.keys()), {"en_US-lessac-medium", "fr_FR-custom-low"})
+            self.assertTrue(local["en_US-lessac-medium"]["installed"])
+            self.assertEqual(local["fr_FR-custom-low"]["num_speakers"], 2)
+            self.assertEqual(local["fr_FR-custom-low"]["sample_rate"], 16000)
+
+            voices = await client.list_voices(refresh=False)
+            by_id = {v["id"]: v for v in voices}
+            self.assertGreaterEqual(len(voices), len(CURATED_PIPER_VOICES))
+            self.assertTrue(by_id["en_US-lessac-medium"]["installed"])
+            self.assertTrue(by_id["en_US-lessac-medium"]["path"])
+            self.assertTrue(by_id["fr_FR-custom-low"]["installed"])
+            self.assertFalse(by_id["pt_PT-tugão-medium"]["installed"])
+            self.assertFalse(by_id["pt_BR-faber-medium"]["installed"])
+
+            pt_voices = await client.list_voices(refresh=False, language="pt")
+            pt_ids = {v["id"] for v in pt_voices}
+            self.assertEqual(pt_ids, {"pt_PT-tugão-medium", "pt_BR-faber-medium"})
+
+            pt_pt_voices = await client.list_voices(refresh=False, language="pt-PT")
+            self.assertEqual([v["id"] for v in pt_pt_voices], ["pt_PT-tugão-medium"])
+
+    async def test_piper_download_model_validation_atomic_and_unicode_encoding(self) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _r: httpx.Response(500))
+        ) as http:
+            client = PiperTTSClient(models_dir=self.models_dir, http_client=http)
+            for bad_id in ("../evil", "dir/model", "dir\\model", "", "   ", "bad\x00id"):
+                with self.subTest(bad_id=bad_id), self.assertRaises(ValueError):
+                    await client.download_model(bad_id)
+
+        requested_urls: list[str] = []
+        fake_cfg_bytes = json.dumps(
+            {
+                "audio": {"sample_rate": 22050, "quality": "medium"},
+                "language": {"code": "pt_PT"},
+                "num_speakers": 1,
+            }
+        ).encode("utf-8")
+        fake_onnx_bytes = b"MOCK_ONNX_TUGAO_BYTES_123456"
+
+        def _download_handler(request: httpx.Request) -> httpx.Response:
+            raw_url = str(request.url)
+            requested_urls.append(raw_url)
+            if raw_url.endswith(".onnx.json"):
+                return httpx.Response(200, content=fake_cfg_bytes)
+            if raw_url.endswith(".onnx"):
+                return httpx.Response(200, content=fake_onnx_bytes)
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_download_handler)) as http:
+            client = PiperTTSClient(models_dir=self.models_dir, http_client=http)
+            res = await client.download_model("pt_PT-tugão-medium")
+            self.assertTrue(res["ok"])
+            self.assertTrue(res["installed"])
+            self.assertEqual(res["model"], "pt_PT-tugão-medium")
+
+            onnx_file = self.models_dir / "pt_PT-tugão-medium.onnx"
+            json_file = self.models_dir / "pt_PT-tugão-medium.onnx.json"
+            self.assertTrue(onnx_file.is_file())
+            self.assertTrue(json_file.is_file())
+            self.assertEqual(onnx_file.read_bytes(), fake_onnx_bytes)
+            self.assertEqual(json_file.read_bytes(), fake_cfg_bytes)
+            self.assertEqual(list(self.models_dir.glob("*.tmp")), [])
+
+            self.assertEqual(len(requested_urls), 2)
+            self.assertIn("pt/pt_PT/tug%C3%A3o/medium/pt_PT-tug%C3%A3o-medium.onnx.json", requested_urls[0])
+            self.assertIn("pt/pt_PT/tug%C3%A3o/medium/pt_PT-tug%C3%A3o-medium.onnx", requested_urls[1])
+
+            # Already-installed check short-circuits without extra HTTP requests
+            res2 = await client.download_model("pt_PT-tugão-medium")
+            self.assertTrue(res2["installed"])
+            self.assertEqual(len(requested_urls), 2)
+
+            voices = await client.list_voices(refresh=False, language="pt_PT")
+            self.assertTrue(voices[0]["installed"])
+
+        # Failure mid-download cleans up temporary files without leaving partial install
+        def _fail_onnx_handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url).endswith(".onnx.json"):
+                return httpx.Response(200, content=fake_cfg_bytes)
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_fail_onnx_handler)) as http:
+            client = PiperTTSClient(models_dir=self.models_dir, http_client=http)
+            with self.assertRaises(httpx.HTTPStatusError):
+                await client.download_model("en_US-amy-low")
+            self.assertFalse((self.models_dir / "en_US-amy-low.onnx").exists())
+            self.assertFalse((self.models_dir / "en_US-amy-low.onnx.json").exists())
+            self.assertEqual(list(self.models_dir.glob("*.tmp")), [])
+
+    async def test_piper_tier3_onnx_espeak_synthesis(self) -> None:
+        self._write_fake_model(
+            self.models_dir,
+            "es_ES-sharvard-medium",
+            language_code="es_ES",
+            num_speakers=3,
+            sample_rate=22050,
+            noise_w=0.75,
+            espeak_voice="es",
+        )
+
+        captured_runs: list[dict[str, Any]] = []
+        t = np.arange(4410, dtype=np.float32) / 22050.0
+        synth_wave = (0.5 * np.sin(2.0 * np.pi * 440.0 * t)).astype(np.float32)
+
+        class _FakeInferenceSession:
+            def __init__(self, model_path: str, **_kwargs: Any) -> None:
+                self.model_path = model_path
+
+            def run(self, _outputs: Any, inputs: dict[str, Any]) -> list[np.ndarray]:
+                captured_runs.append(inputs)
+                return [synth_wave[None, :]]
+
+        class _FakeEspeakProc:
+            returncode = 0
+
+            async def communicate(self, _data: bytes | None = None) -> tuple[bytes, bytes]:
+                return b"ola\n", b""
+
+        async def _fake_subproc(*args: Any, **_kwargs: Any) -> _FakeEspeakProc:
+            self.assertIn("espeak-ng", str(args[0]))
+            return _FakeEspeakProc()
+
+        client = PiperTTSClient(models_dir=self.models_dir)
+        try:
+            with (
+                patch("bytey_ai_companion.tts.piper_provider._import_piper_voice", return_value=None),
+                patch("bytey_ai_companion.tts.piper_provider.shutil.which", return_value=None),
+                patch("bytey_ai_companion.tts.piper_provider._has_onnxruntime", return_value=True),
+                patch(
+                    "bytey_ai_companion.tts.piper_provider._find_espeak_ng",
+                    return_value="/usr/bin/espeak-ng",
+                ),
+                patch("onnxruntime.InferenceSession", _FakeInferenceSession),
+                patch(
+                    "bytey_ai_companion.tts.piper_provider.asyncio.create_subprocess_exec",
+                    side_effect=_fake_subproc,
+                ),
+                patch(
+                    "bytey_ai_companion.tts.piper_provider.apply_pitch_shift_wav",
+                    wraps=apply_pitch_shift_wav,
+                ) as pitch_spy,
+            ):
+                self.assertEqual(client.detect_backend(), "onnx_espeak")
+                wav_bytes, fmt = await client.synthesize(
+                    "Hola.",
+                    model="es_ES-sharvard-medium",
+                    speed=1.25,
+                    pitch=5.0,
+                    noise_scale=0.55,
+                    speaker_id=2,
+                    auto_download=False,
+                )
+                self.assertEqual(fmt, "wav")
+                self.assertTrue(wav_bytes.startswith(b"RIFF"))
+                ch, sw, sr, nframes, rms = _inspect_wav_bytes(wav_bytes)
+                self.assertEqual((ch, sw, sr), (1, 2, 22050))
+                self.assertGreater(nframes, 0)
+                self.assertGreater(rms, 0.1)
+                self.assertEqual(pitch_spy.call_count, 1)
+                self.assertEqual(pitch_spy.call_args.args[1], 5.0)
+
+                # Verify speaker clamping & default speaker ID on multi-speaker model
+                await client.synthesize(
+                    "Hola.",
+                    model="es_ES-sharvard-medium",
+                    speed=1.0,
+                    pitch=0.0,
+                    noise_scale=0.667,
+                    speaker_id=99,
+                    auto_download=False,
+                )
+                await client.synthesize(
+                    "Hola.",
+                    model="es_ES-sharvard-medium",
+                    speed=1.0,
+                    pitch=0.0,
+                    noise_scale=0.667,
+                    speaker_id=None,
+                    auto_download=False,
+                )
+        finally:
+            await client.close()
+
+        self.assertEqual(len(captured_runs), 3)
+        first = captured_runs[0]
+        np.testing.assert_allclose(
+            first["scales"],
+            np.array([0.55, round(1.0 / 1.25, 4), 0.75], dtype=np.float32),
+            atol=1e-6,
+        )
+        np.testing.assert_array_equal(first["sid"], np.array([2], dtype=np.int64))
+        self.assertEqual(int(first["input"][0, 0]), 1)
+        self.assertEqual(int(first["input"][0, -1]), 2)
+        self.assertEqual(int(first["input_lengths"][0]), int(first["input"].shape[1]))
+        np.testing.assert_array_equal(captured_runs[1]["sid"], np.array([2], dtype=np.int64))
+        np.testing.assert_array_equal(captured_runs[2]["sid"], np.array([0], dtype=np.int64))
+
+    async def test_piper_tier1_python_and_tier2_cli_synthesis(self) -> None:
+        self._write_fake_model(
+            self.models_dir,
+            "en_US-lessac-medium",
+            language_code="en_US",
+            num_speakers=2,
+            sample_rate=22050,
+            noise_w=0.8,
+        )
+        sample_wav = _make_sine_wav_bytes(duration_s=0.25, sample_rate=22050)
+        with wave.open(io.BytesIO(sample_wav), "rb") as wf_in:
+            sample_pcm = wf_in.readframes(wf_in.getnframes())
+
+        # Tier 1: piper_python
+        recorded_py: dict[str, Any] = {}
+
+        class _FakeSynthesisConfig:
+            def __init__(
+                self,
+                speaker_id: int | None = None,
+                length_scale: float = 1.0,
+                noise_scale: float = 0.667,
+                noise_w: float = 0.8,
+            ) -> None:
+                self.speaker_id = speaker_id
+                self.length_scale = length_scale
+                self.noise_scale = noise_scale
+                self.noise_w = noise_w
+
+        class _FakePiperVoice:
+            @classmethod
+            def load(cls, model_path: str, config_path: str | None = None) -> _FakePiperVoice:
+                recorded_py["load"] = (model_path, config_path)
+                return cls()
+
+            def synthesize_wav(
+                self,
+                text: str,
+                wav_file: wave.Wave_write,
+                syn_config: _FakeSynthesisConfig | None = None,
+            ) -> None:
+                recorded_py["text"] = text
+                recorded_py["syn_config"] = syn_config
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(22050)
+                wav_file.writeframes(sample_pcm)
+
+        fake_piper_mod = SimpleNamespace(
+            PiperVoice=_FakePiperVoice,
+            SynthesisConfig=_FakeSynthesisConfig,
+        )
+
+        client1 = PiperTTSClient(models_dir=self.models_dir)
+        try:
+            with patch.dict(sys.modules, {"piper": fake_piper_mod}):
+                self.assertEqual(client1.detect_backend(), "piper_python")
+                wav1, fmt1 = await client1.synthesize(
+                    "Hello Piper Python",
+                    model="en_US-lessac-medium",
+                    speed=2.0,
+                    pitch=0.0,
+                    noise_scale=0.5,
+                    speaker_id=1,
+                    auto_download=False,
+                )
+        finally:
+            await client1.close()
+
+        self.assertEqual(fmt1, "wav")
+        self.assertTrue(wav1.startswith(b"RIFF"))
+        _, _, sr1, nf1, rms1 = _inspect_wav_bytes(wav1)
+        self.assertEqual(sr1, 22050)
+        self.assertGreater(nf1, 0)
+        self.assertGreater(rms1, 0.1)
+        self.assertEqual(recorded_py["text"], "Hello Piper Python")
+        self.assertEqual(recorded_py["syn_config"].length_scale, 0.5)
+        self.assertEqual(recorded_py["syn_config"].noise_scale, 0.5)
+        self.assertEqual(recorded_py["syn_config"].noise_w, 0.8)
+        self.assertEqual(recorded_py["syn_config"].speaker_id, 1)
+
+        # Tier 2: piper_cli
+        recorded_cli: dict[str, Any] = {}
+
+        class _FakePiperCliProc:
+            returncode = 0
+
+            async def communicate(self, stdin_bytes: bytes | None = None) -> tuple[bytes, bytes]:
+                recorded_cli["stdin"] = stdin_bytes
+                return sample_wav, b""
+
+        async def _fake_cli_exec(*cmd: Any, **_kwargs: Any) -> _FakePiperCliProc:
+            recorded_cli["cmd"] = [str(part) for part in cmd]
+            return _FakePiperCliProc()
+
+        def _fake_which(name: str) -> str | None:
+            if name == "piper":
+                return "/usr/local/bin/piper"
+            if name == "/usr/bin/ffmpeg":
+                return "/usr/bin/ffmpeg"
+            return None
+
+        client2 = PiperTTSClient(models_dir=self.models_dir)
+        try:
+            with (
+                patch("bytey_ai_companion.tts.piper_provider._import_piper_voice", return_value=None),
+                patch("bytey_ai_companion.tts.piper_provider.shutil.which", side_effect=_fake_which),
+                patch(
+                    "bytey_ai_companion.tts.piper_provider.asyncio.create_subprocess_exec",
+                    side_effect=_fake_cli_exec,
+                ),
+            ):
+                self.assertEqual(client2.detect_backend(), "piper_cli")
+                wav2, fmt2 = await client2.synthesize(
+                    "CLI test",
+                    model="en_US-lessac-medium",
+                    speed=0.8,
+                    pitch=-4.0,
+                    noise_scale=0.6,
+                    speaker_id=3,
+                    auto_download=False,
+                )
+        finally:
+            await client2.close()
+
+        self.assertEqual(fmt2, "wav")
+        self.assertTrue(wav2.startswith(b"RIFF"))
+        _, _, sr2, nf2, rms2 = _inspect_wav_bytes(wav2)
+        self.assertEqual(sr2, 22050)
+        self.assertGreater(nf2, 0)
+        self.assertGreater(rms2, 0.05)
+        self.assertEqual(recorded_cli["stdin"], b"CLI test")
+        cmd = recorded_cli["cmd"]
+        self.assertEqual(cmd[0], "/usr/local/bin/piper")
+        self.assertIn("--length_scale", cmd)
+        self.assertEqual(cmd[cmd.index("--length_scale") + 1], "1.25")
+        self.assertEqual(cmd[cmd.index("--noise_scale") + 1], "0.6")
+        self.assertEqual(cmd[cmd.index("--noise_w") + 1], "0.8")
+        self.assertEqual(cmd[cmd.index("--speaker") + 1], "3")
+        self.assertEqual(cmd[cmd.index("--output_file") + 1], "-")
+
+    async def test_streaming_tts_player_piper_dispatch(self) -> None:
+        expected_wav = _make_sine_wav_bytes(duration_s=0.1, sample_rate=22050)
+        synth_calls: list[dict[str, Any]] = []
+        played: list[tuple[bytes, str]] = []
+
+        class _FakePiperClient:
+            async def synthesize(self, text: str, **kwargs: Any) -> tuple[bytes, str]:
+                synth_calls.append({"text": text, **kwargs})
+                return expected_wav, "wav"
+
+            async def close(self) -> None:
+                return None
+
+        cfg_voice_out = {
+            "voice_out": {
+                "tts_muted": False,
+                "tts_provider": "piper",
+                "piper_model": "pt_PT-tugão-medium",
+                "piper_models_dir": "/tmp/custom-piper",
+                "piper_speed": 1.35,
+                "piper_pitch": 4.5,
+                "piper_noise_scale": 0.85,
+                "piper_speaker_id": 2,
+            }
+        }
+        player = StreamingTTSPlayer(
+            get_config=lambda: cfg_voice_out,
+            get_secret=lambda _k: None,
+            piper_client=_FakePiperClient(),  # type: ignore[arg-type]
+        )
+
+        async def _fake_play(audio_bytes: bytes, fmt: str, _gen: int) -> None:
+            played.append((audio_bytes, fmt))
+
+        try:
+            direct = await player._synthesize("Direct check", player._read_settings())
+            self.assertEqual(direct, (expected_wav, "wav"))
+
+            with patch.object(player, "_play_audio", side_effect=_fake_play):
+                await player.enqueue_sentence("Speak via queue!")
+                await asyncio.wait_for(player.wait_idle(), timeout=3.0)
+        finally:
+            await player.stop()
+
+        self.assertEqual(len(synth_calls), 2)
+        for call in synth_calls:
+            self.assertEqual(call["model"], "pt_PT-tugão-medium")
+            self.assertEqual(call["models_dir"], "/tmp/custom-piper")
+            self.assertEqual(call["speed"], 1.35)
+            self.assertEqual(call["pitch"], 4.5)
+            self.assertEqual(call["noise_scale"], 0.85)
+            self.assertEqual(call["speaker_id"], 2)
+        self.assertEqual(synth_calls[0]["text"], "Direct check")
+        self.assertEqual(synth_calls[1]["text"], "Speak via queue!")
+        self.assertEqual(played, [(expected_wav, "wav")])
+
+
+class TestPiperDaemonAPI(unittest.IsolatedAsyncioTestCase):
+    """REST integration tests for Piper TTS voices, download, and config patch endpoints."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp_dir.name)
+        self.fake_home = self.root / "home"
+        self.fake_home.mkdir(parents=True, exist_ok=True)
+        self.models_dir = self.root / "piper_models"
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        self._home_patcher = patch("pathlib.Path.home", return_value=self.fake_home)
+        self._home_patcher.start()
+
+        self.download_requests: list[str] = []
+        fake_cfg = json.dumps(
+            {
+                "audio": {"sample_rate": 22050, "quality": "medium"},
+                "language": {"code": "en_US"},
+                "num_speakers": 1,
+            }
+        ).encode("utf-8")
+        fake_onnx = b"DAEMON_MOCK_ONNX_MODEL"
+
+        def _piper_http(request: httpx.Request) -> httpx.Response:
+            url_str = str(request.url)
+            self.download_requests.append(url_str)
+            if url_str.endswith(".onnx.json"):
+                return httpx.Response(200, content=fake_cfg)
+            if url_str.endswith(".onnx"):
+                return httpx.Response(200, content=fake_onnx)
+            return httpx.Response(404)
+
+        self.piper_http = httpx.AsyncClient(transport=httpx.MockTransport(_piper_http))
+        self.piper_client = PiperTTSClient(models_dir=self.models_dir, http_client=self.piper_http)
+        self.daemon = ByteyDaemon(
+            host="127.0.0.1",
+            port=0,
+            config_dir=self.root / "cfg",
+            data_dir=self.root / "data",
+            enable_voice_capture=False,
+            llm_router=_MockLLMRouter(),  # type: ignore[arg-type]
+            piper_client=self.piper_client,
+        )
+        self.daemon.config_manager.update_config(
+            {"voice_out": {"tts_muted": True, "tts_provider": "disabled"}}
+        )
+        await self.daemon.start()
+        self.base_url = f"http://127.0.0.1:{self.daemon.ipc.port}"
+
+    async def asyncTearDown(self) -> None:
+        try:
+            await self.daemon.stop()
+            await self.piper_http.aclose()
+        finally:
+            self._home_patcher.stop()
+            self.tmp_dir.cleanup()
+
+    async def test_piper_voices_download_and_config_endpoints(self) -> None:
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+            # GET /api/v1/tts/voices?provider=piper&language=en
+            r_voices = await client.get("/api/v1/tts/voices", params={"provider": "piper", "language": "en"})
+            self.assertEqual(r_voices.status_code, 200)
+            payload = r_voices.json()
+            self.assertEqual(payload["models_dir"], str(self.models_dir))
+            self.assertIn(payload["backend"], ("piper_python", "piper_cli", "onnx_espeak", "unavailable"))
+            self.assertEqual(payload["presets"], PIPER_VOICE_PRESETS)
+            voice_ids = {v["id"] for v in payload["voices"]}
+            self.assertIn("en_US-lessac-medium", voice_ids)
+            self.assertIn("en_GB-alan-medium", voice_ids)
+            self.assertTrue(all(str(v["language"]).startswith("en") for v in payload["voices"]))
+
+            # POST /api/v1/tts/piper/download (valid)
+            r_dl = await client.post("/api/v1/tts/piper/download", json={"model": "en_US-lessac-medium"})
+            self.assertEqual(r_dl.status_code, 200)
+            dl_data = r_dl.json()
+            self.assertTrue(dl_data["ok"])
+            self.assertTrue(dl_data["installed"])
+            self.assertEqual(dl_data["model"], "en_US-lessac-medium")
+            self.assertEqual(len(self.download_requests), 2)
+
+            r_voices_after = await client.get(
+                "/api/v1/tts/voices", params={"provider": "piper", "language": "en"}
+            )
+            self.assertEqual(r_voices_after.status_code, 200)
+            lessac = next(v for v in r_voices_after.json()["voices"] if v["id"] == "en_US-lessac-medium")
+            self.assertTrue(lessac["installed"])
+
+            # POST /api/v1/tts/piper/download rejects traversal & empty model IDs
+            for bad_model in ("../evil", "dir/model", "   "):
+                r_bad = await client.post("/api/v1/tts/piper/download", json={"model": bad_model})
+                self.assertGreaterEqual(r_bad.status_code, 400)
+                self.assertLess(r_bad.status_code, 500)
+                self.assertIn("error", r_bad.json())
+
+            # PATCH /api/v1/config with Piper fields (voice_out + voice_output) & GET roundtrip
+            r_patch1 = await client.patch(
+                "/api/v1/config",
+                json={
+                    "voice_out": {
+                        "tts_provider": "piper",
+                        "piper_model": "en_US-lessac-medium",
+                        "piper_speed": 1.4,
+                        "piper_pitch": 6.5,
+                        "piper_noise_scale": 0.9,
+                        "piper_speaker_id": 1,
+                    }
+                },
+            )
+            self.assertEqual(r_patch1.status_code, 200)
+            cfg1 = (await client.get("/api/v1/config")).json()
+            self.assertEqual(cfg1["voice_out"]["tts_provider"], "piper")
+            self.assertEqual(cfg1["voice_out"]["piper_model"], "en_US-lessac-medium")
+            self.assertEqual(cfg1["voice_out"]["piper_speed"], 1.4)
+            self.assertEqual(cfg1["voice_out"]["piper_pitch"], 6.5)
+            self.assertEqual(cfg1["voice_out"]["piper_noise_scale"], 0.9)
+            self.assertEqual(cfg1["voice_out"]["piper_speaker_id"], 1)
+            self.assertEqual(cfg1["voice_output"]["provider"], "piper")
+            self.assertEqual(cfg1["voice_output"]["piper_speed"], 1.4)
+            self.assertEqual(cfg1["voice_output"]["piper_pitch"], 6.5)
+
+            # Out-of-range values via voice_output mirror are clamped cleanly
+            r_patch2 = await client.patch(
+                "/api/v1/config",
+                json={
+                    "voice_output": {
+                        "provider": "piper",
+                        "piper_speed": 0.1,
+                        "piper_pitch": -50,
+                        "piper_noise_scale": 9.0,
+                        "piper_speaker_id": -2,
+                    }
+                },
+            )
+            self.assertEqual(r_patch2.status_code, 200)
+            cfg2 = (await client.get("/api/v1/config")).json()
+            self.assertEqual(cfg2["voice_out"]["piper_speed"], 0.4)
+            self.assertEqual(cfg2["voice_out"]["piper_pitch"], -12.0)
+            self.assertEqual(cfg2["voice_out"]["piper_noise_scale"], 1.5)
+            self.assertEqual(cfg2["voice_out"]["piper_speaker_id"], 0)
+            self.assertEqual(cfg2["voice_output"]["piper_speed"], 0.4)
+            self.assertEqual(cfg2["voice_output"]["piper_pitch"], -12.0)
+            self.assertEqual(cfg2["voice_output"]["piper_noise_scale"], 1.5)
+            self.assertEqual(cfg2["voice_output"]["piper_speaker_id"], 0)
 
 
 if __name__ == "__main__":

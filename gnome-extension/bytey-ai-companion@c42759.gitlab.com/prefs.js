@@ -31,7 +31,18 @@ const FIXED_ALIGNMENTS = [
     'bottom-right',
 ];
 const STT_BACKENDS = ['local_whisper', 'openai_whisper', 'custom_whisper'];
-const TTS_PROVIDERS = ['kokoro', 'elevenlabs', 'disabled'];
+const TTS_PROVIDERS = ['kokoro', 'piper', 'elevenlabs', 'disabled'];
+const DEFAULT_PIPER_MODEL = 'en_US-lessac-medium';
+const PIPER_VOICE_PRESETS = [
+    {id: 'normal', label: 'Normal', speed: 1.0, pitch: 0.0, noise_scale: 0.667},
+    {id: 'chipmunk', label: 'Chipmunk', speed: 1.25, pitch: 8.0, noise_scale: 0.8},
+    {id: 'helium', label: 'Helium Squeak', speed: 1.15, pitch: 10.5, noise_scale: 0.9},
+    {id: 'deep_monster', label: 'Deep Monster', speed: 0.82, pitch: -8.0, noise_scale: 0.667},
+    {id: 'sleepy_giant', label: 'Sleepy Giant', speed: 0.68, pitch: -5.5, noise_scale: 0.55},
+    {id: 'hyper_gremlin', label: 'Hyper Gremlin', speed: 1.55, pitch: 5.5, noise_scale: 1.0},
+    {id: 'flat_robot', label: 'Flat Robot', speed: 1.05, pitch: -2.5, noise_scale: 0.1},
+    {id: 'custom', label: 'Custom', speed: null, pitch: null, noise_scale: null},
+];
 const AI_PROVIDERS = ['ollama', 'gemini', 'openai', 'anthropic', 'custom'];
 const MCP_TRANSPORTS = ['stdio', 'http', 'sse'];
 const SECRET_MASK_PLACEHOLDER = '••••••••••••••••';
@@ -108,6 +119,140 @@ function makeSpinRow(title, min, max, step) {
             value: min,
         }),
     });
+}
+
+function makeFloatSpinRow(title, subtitle, min, max, step, digits) {
+    return new Adw.SpinRow({
+        title,
+        subtitle,
+        digits,
+        adjustment: new Gtk.Adjustment({
+            lower: min,
+            upper: max,
+            step_increment: step,
+            page_increment: step * 10,
+            value: min,
+        }),
+    });
+}
+
+function matchPiperPresetIndex(speed, pitch, noiseScale) {
+    const s = Number(speed);
+    const p = Number(pitch);
+    const n = Number(noiseScale);
+    const customIdx = PIPER_VOICE_PRESETS.length - 1;
+    if (!Number.isFinite(s) || !Number.isFinite(p) || !Number.isFinite(n))
+        return customIdx;
+    for (let i = 0; i < PIPER_VOICE_PRESETS.length; i++) {
+        const preset = PIPER_VOICE_PRESETS[i];
+        if (preset.speed === null || preset.pitch === null || preset.noise_scale === null)
+            continue;
+        if (
+            Math.abs(s - preset.speed) < 0.015 &&
+            Math.abs(p - preset.pitch) < 0.1 &&
+            Math.abs(n - preset.noise_scale) < 0.015
+        )
+            return i;
+    }
+    return customIdx;
+}
+
+function sampleTextForLanguage(langCode) {
+    const raw = String(langCode ?? '').trim().toLowerCase().replace('-', '_');
+    const prefix = raw.split('_')[0];
+    const samples = {
+        en: 'Hello! I am Bytey, your desktop AI companion.',
+        es: '¡Hola! Soy Bytey, tu asistente de escritorio.',
+        fr: 'Bonjour ! Je suis Bytey, votre assistant vocal.',
+        de: 'Hallo! Ich bin Bytey, dein digitaler Begleiter.',
+        it: 'Ciao! Sono Bytey, il tuo assistente sul desktop.',
+        pt: 'Olá! Eu sou o Bytey, seu assistente de voz.',
+        nl: 'Hallo! Ik ben Bytey, jouw desktop-assistent.',
+        pl: 'Cześć! Jestem Bytey, twój asystent głosowy.',
+        ru: 'Привет! Я Байти, твой голосовой помощник.',
+        uk: 'Привіт! Я Байті, твій голосовий помічник.',
+        zh: '你好！我是 Bytey，你的桌面语音助手。',
+        ja: 'こんにちは！私はデスクトップアシスタントのバイティです。',
+        ko: '안녕하세요! 저는 데스크톱 AI 비서 바이티입니다.',
+        ar: 'مرحباً! أنا بايتي، مساعدك الصوتي.',
+        hi: 'नमस्ते! मैं बायटी हूँ, आपका डे스크टॉप सहायक।',
+        tr: 'Merhaba! Ben Bytey, masaüstü sesli asistanınım.',
+        sv: 'Hej! Jag är Bytey, din röstassistent.',
+        da: 'Hej! Jeg er Bytey, din skrivebordsassistent.',
+        no: 'Hei! Jeg er Bytey, din skrivebordsassistent.',
+        nb: 'Hei! Jeg er Bytey, din skrivebordsassistent.',
+        fi: 'Hei! Olen Bytey, työpöytäavustajasi.',
+        cs: 'Ahoj! Jsem Bytey, tvůj hlasový asistent.',
+        el: 'Γεια σου! Είμαι ο Bytey, ο βοηθός σου.',
+        ro: 'Salut! Sunt Bytey, asistentul tău vocal.',
+        hu: 'Szia! Bytey vagyok, az asztali hangasszisztensed.',
+        ca: 'Hola! Soc Bytey, el teu assistent d’escriptori.',
+        vi: 'Xin chào! Tôi là Bytey, trợ lý giọng nói của bạn.',
+    };
+    return samples[prefix] ?? samples.en;
+}
+
+function inferPiperLanguageCode(modelId) {
+    const match = String(modelId ?? '').trim().match(/^([a-z]{2,3}(?:[_-][A-Za-z0-9]+)?)-/);
+    return match ? match[1] : '';
+}
+
+function formatPiperLanguageLabel(code, rawName = '') {
+    const cleanCode = String(code ?? '').trim();
+    const cleanName = String(rawName ?? '').trim();
+    if (cleanName && cleanName !== cleanCode)
+        return cleanName.includes(cleanCode) ? cleanName : `${cleanName} (${cleanCode})`;
+    if (!cleanCode)
+        return 'Unknown';
+    try {
+        const display = new Intl.DisplayNames(['en'], {type: 'language'});
+        const resolved = display.of(cleanCode.replace('_', '-'));
+        if (resolved && resolved !== cleanCode)
+            return `${resolved} (${cleanCode})`;
+    } catch (_e) {
+        // Fallback to raw code when DisplayNames rejects non-standard tags.
+    }
+    return cleanCode;
+}
+
+function normalizePiperVoiceEntry(entry) {
+    if (typeof entry === 'string') {
+        const id = entry.trim();
+        if (!id)
+            return null;
+        return {
+            id,
+            languageCode: inferPiperLanguageCode(id),
+            languageName: '',
+            quality: '',
+            installed: false,
+        };
+    }
+    if (!entry || typeof entry !== 'object')
+        return null;
+    const id = String(entry.id ?? entry.key ?? entry.model ?? entry.name ?? '').trim();
+    if (!id)
+        return null;
+    let languageCode = '';
+    let languageName = '';
+    if (entry.language && typeof entry.language === 'object') {
+        languageCode = String(entry.language.code ?? entry.language_code ?? entry.lang ?? '').trim();
+        const eng = String(entry.language_name ?? entry.language.name_english ?? entry.language.name_native ?? '').trim();
+        const country = String(entry.language.country_english ?? '').trim();
+        languageName = eng && country ? `${eng} (${country})` : eng;
+    } else {
+        languageCode = String(entry.language_code ?? entry.language ?? entry.lang ?? '').trim();
+        languageName = String(entry.language_name ?? entry.lang_name ?? '').trim();
+    }
+    if (!languageCode)
+        languageCode = inferPiperLanguageCode(id);
+    return {
+        id,
+        languageCode,
+        languageName,
+        quality: String(entry.quality ?? '').trim(),
+        installed: Boolean(entry.installed ?? entry.downloaded ?? entry.local ?? false),
+    };
 }
 
 function parseHexChannels(hexStr) {
@@ -307,6 +452,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         const settings = this.getSettings();
         const cancellable = new Gio.Cancellable();
         const httpSession = new Soup.Session({timeout: 8});
+        const longHttpSession = new Soup.Session({timeout: 300});
         let destroyed = false;
         let loading = false;
         let settingsChangedId = 0;
@@ -314,6 +460,13 @@ export default class ByteyPreferences extends ExtensionPreferences {
         let availableModels = [];
         let currentConfiguredModel = '';
         let modelFetchSeq = 0;
+        let piperVoices = [];
+        let piperFilteredVoices = [];
+        let piperLanguageOptions = [{code: '', label: 'All Languages'}];
+        let currentPiperLanguage = '';
+        let currentPiperModel = DEFAULT_PIPER_MODEL;
+        let piperFetchSeq = 0;
+        let piperDownloading = false;
         let detectedToolsSupport = false;
         const modelToolMap = new Map();
         let currentContextSize = null;
@@ -330,7 +483,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 window.add_toast(new Adw.Toast({title, timeout: 3}));
         };
 
-        const httpJson = (method, path, body = undefined) => new Promise(resolve => {
+        const httpJson = (method, path, body = undefined, {longTimeout = false} = {}) => new Promise(resolve => {
             if (destroyed) {
                 resolve({ok: false, status: 0, data: null});
                 return;
@@ -348,7 +501,8 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 msg.set_request_body_from_bytes('application/json', payload);
             }
 
-            httpSession.send_and_read_async(
+            const sessionToUse = longTimeout ? longHttpSession : httpSession;
+            sessionToUse.send_and_read_async(
                 msg,
                 GLib.PRIORITY_DEFAULT,
                 cancellable,
@@ -391,6 +545,11 @@ export default class ByteyPreferences extends ExtensionPreferences {
             cancellable.cancel();
             try {
                 httpSession.abort();
+            } catch (_e) {
+                // Ignore abort errors on close.
+            }
+            try {
+                longHttpSession.abort();
             } catch (_e) {
                 // Ignore abort errors on close.
             }
@@ -580,11 +739,93 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
         const {row: kokoroApiKeyRow, badge: kokoroApiKeyBadge} = makeSecretRow('Kokoro API Key');
         const {row: elevenlabsApiKeyRow, badge: elevenlabsApiKeyBadge} = makeSecretRow('ElevenLabs API Key');
+
+        const piperLangRow = new Adw.ComboRow({
+            title: 'Piper Language',
+            subtitle: 'Filter voice models by language',
+            model: Gtk.StringList.new(['All Languages']),
+        });
+        const piperModelRow = new Adw.ComboRow({
+            title: 'Piper Voice Model',
+            subtitle: 'Local CPU neural voice model',
+            enable_search: true,
+            model: Gtk.StringList.new(['en_US-lessac-medium']),
+        });
+        const piperRefreshBtn = new Gtk.Button({
+            icon_name: 'view-refresh-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: 'Refresh Piper voice catalog',
+            css_classes: ['flat'],
+        });
+        const piperDownloadBtn = new Gtk.Button({
+            label: 'Download',
+            valign: Gtk.Align.CENTER,
+        });
+        piperModelRow.add_suffix(piperRefreshBtn);
+        piperModelRow.add_suffix(piperDownloadBtn);
+
+        const piperCustomModelRow = new Adw.EntryRow({
+            title: 'Active Model ID / .onnx Path',
+            show_apply_button: true,
+        });
+        piperCustomModelRow.set_text(DEFAULT_PIPER_MODEL);
+
+        const piperPresetRow = new Adw.ComboRow({
+            title: 'Voice Style (Funny Presets)',
+            subtitle: 'Quick presets for normal or funny voices',
+            model: Gtk.StringList.new(PIPER_VOICE_PRESETS.map(p => p.label)),
+        });
+        const piperSpeedRow = makeFloatSpinRow(
+            'Piper Speed',
+            'Speech rate (0.40x slow – 2.50x fast)',
+            0.4,
+            2.5,
+            0.05,
+            2
+        );
+        piperSpeedRow.set_value(1.0);
+        const piperPitchRow = makeFloatSpinRow(
+            'Piper Pitch (Semitones)',
+            'Voice pitch (-12 deep monster, 0 normal, +12 chipmunk)',
+            -12.0,
+            12.0,
+            0.5,
+            1
+        );
+        piperPitchRow.set_value(0.0);
+        const piperNoiseRow = makeFloatSpinRow(
+            'Piper Expressiveness',
+            'Tone variation (0.10 robotic – 0.67 natural – 1.20 animated)',
+            0.0,
+            1.5,
+            0.05,
+            2
+        );
+        piperNoiseRow.set_value(0.667);
+
+        const piperTestRow = new Adw.ActionRow({
+            title: 'Preview Piper Voice',
+            subtitle: 'Speak a short sample with current model, speed, and pitch',
+        });
+        const piperTestBtn = new Gtk.Button({
+            label: 'Test Voice',
+            valign: Gtk.Align.CENTER,
+        });
+        piperTestRow.add_suffix(piperTestBtn);
+
         ttsGroup.add(ttsMuteRow);
         ttsGroup.add(ttsProviderRow);
         ttsGroup.add(kokoroBaseUrlRow);
         ttsGroup.add(kokoroApiKeyRow);
         ttsGroup.add(elevenlabsApiKeyRow);
+        ttsGroup.add(piperLangRow);
+        ttsGroup.add(piperModelRow);
+        ttsGroup.add(piperCustomModelRow);
+        ttsGroup.add(piperPresetRow);
+        ttsGroup.add(piperSpeedRow);
+        ttsGroup.add(piperPitchRow);
+        ttsGroup.add(piperNoiseRow);
+        ttsGroup.add(piperTestRow);
         voicePage.add(ttsGroup);
 
         const aiGroup = new Adw.PreferencesGroup({
@@ -711,6 +952,15 @@ export default class ByteyPreferences extends ExtensionPreferences {
             kokoroBaseUrlRow.set_visible(isKokoro);
             kokoroApiKeyRow.set_visible(isKokoro);
             elevenlabsApiKeyRow.set_visible(ttsProvider === 'elevenlabs');
+            const isPiper = ttsProvider === 'piper';
+            piperLangRow.set_visible(isPiper);
+            piperModelRow.set_visible(isPiper);
+            piperCustomModelRow.set_visible(isPiper);
+            piperPresetRow.set_visible(isPiper);
+            piperSpeedRow.set_visible(isPiper);
+            piperPitchRow.set_visible(isPiper);
+            piperNoiseRow.set_visible(isPiper);
+            piperTestRow.set_visible(isPiper);
         };
 
         const syncProviderVisibility = () => {
@@ -941,6 +1191,213 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 } else if (showResultToast) {
                     showToast(`Loaded ${availableModels.length} model(s) from ${prov}`);
                 }
+            }
+        };
+
+        const syncPiperDownloadButton = () => {
+            if (piperDownloading) {
+                piperDownloadBtn.set_label('Downloading...');
+                piperDownloadBtn.set_sensitive(false);
+                piperDownloadBtn.set_tooltip_text('Downloading selected Piper voice model...');
+                return;
+            }
+            const idx = piperModelRow.get_selected();
+            const selectedVoice = idx >= 0 && idx < piperFilteredVoices.length
+                ? piperFilteredVoices[idx]
+                : null;
+
+            if (!selectedVoice) {
+                if (piperVoices.length > 0 && piperFilteredVoices.length === 0) {
+                    piperDownloadBtn.set_label('Download');
+                    piperDownloadBtn.set_sensitive(false);
+                    piperDownloadBtn.set_tooltip_text('No matching Piper voice selected');
+                    return;
+                }
+                const customVal = currentPiperModel || DEFAULT_PIPER_MODEL;
+                const looksLikePath = customVal.includes('/') || customVal.endsWith('.onnx');
+                piperDownloadBtn.set_label('Download');
+                piperDownloadBtn.set_sensitive(!looksLikePath && Boolean(customVal));
+                piperDownloadBtn.set_tooltip_text(
+                    looksLikePath
+                        ? 'Custom .onnx path configured'
+                        : 'Download selected Piper voice model'
+                );
+                return;
+            }
+
+            const countPrefix = `${piperFilteredVoices.length} voice(s)`;
+            const qualityTag = selectedVoice.quality ? ` • ${selectedVoice.quality}` : '';
+            if (selectedVoice.installed) {
+                piperDownloadBtn.set_label('Installed');
+                piperDownloadBtn.set_sensitive(false);
+                piperDownloadBtn.set_tooltip_text(`${selectedVoice.id} is already downloaded`);
+                piperModelRow.set_subtitle(`${countPrefix} • Installed locally${qualityTag}`);
+            } else {
+                piperDownloadBtn.set_label('Download');
+                piperDownloadBtn.set_sensitive(true);
+                piperDownloadBtn.set_tooltip_text(`Download ${selectedVoice.id}`);
+                piperModelRow.set_subtitle(`${countPrefix} • Click Download to install${qualityTag}`);
+            }
+        };
+
+        const rebuildPiperLanguageFilter = () => {
+            const langMap = new Map();
+            for (const v of piperVoices) {
+                if (v.languageCode && !langMap.has(v.languageCode))
+                    langMap.set(v.languageCode, formatPiperLanguageLabel(v.languageCode, v.languageName));
+            }
+            const entries = Array.from(langMap.entries())
+                .map(([code, label]) => ({code, label}))
+                .sort((a, b) => a.label.localeCompare(b.label));
+            piperLanguageOptions = [{code: '', label: 'All Languages'}, ...entries];
+            if (currentPiperLanguage && !langMap.has(currentPiperLanguage))
+                currentPiperLanguage = '';
+            const selIdx = Math.max(0, piperLanguageOptions.findIndex(o => o.code === currentPiperLanguage));
+
+            const prevLoading = loading;
+            loading = true;
+            try {
+                piperLangRow.set_model(Gtk.StringList.new(piperLanguageOptions.map(o => o.label)));
+                piperLangRow.set_selected(selIdx);
+            } finally {
+                loading = prevLoading;
+            }
+        };
+
+        const rebuildPiperModelCombo = () => {
+            if (piperVoices.length === 0) {
+                piperFilteredVoices = [];
+                const fallbackLabel = currentPiperModel || DEFAULT_PIPER_MODEL;
+                const prevLoading = loading;
+                loading = true;
+                try {
+                    piperModelRow.set_model(Gtk.StringList.new([fallbackLabel]));
+                    piperModelRow.set_selected(0);
+                    piperModelRow.set_sensitive(true);
+                    piperModelRow.set_subtitle('Local CPU neural voice model');
+                } finally {
+                    loading = prevLoading;
+                }
+                syncPiperDownloadButton();
+                return;
+            }
+
+            piperFilteredVoices = currentPiperLanguage
+                ? piperVoices.filter(v => v.languageCode === currentPiperLanguage)
+                : [...piperVoices];
+
+            if (piperFilteredVoices.length === 0) {
+                const prevLoading = loading;
+                loading = true;
+                try {
+                    piperModelRow.set_model(Gtk.StringList.new(['No voices for selected language']));
+                    piperModelRow.set_selected(0);
+                    piperModelRow.set_sensitive(false);
+                    piperModelRow.set_subtitle('0 voice(s) match language filter');
+                } finally {
+                    loading = prevLoading;
+                }
+                syncPiperDownloadButton();
+                return;
+            }
+
+            const labels = piperFilteredVoices.map(v => `${v.id}${v.installed ? ' ✓' : ''}`);
+            const matchIdx = currentPiperModel
+                ? piperFilteredVoices.findIndex(v => v.id === currentPiperModel)
+                : -1;
+            const targetIdx = matchIdx >= 0 ? matchIdx : 0;
+
+            const prevLoading = loading;
+            loading = true;
+            try {
+                piperModelRow.set_model(Gtk.StringList.new(labels));
+                piperModelRow.set_selected(targetIdx);
+                piperModelRow.set_sensitive(true);
+            } finally {
+                loading = prevLoading;
+            }
+            syncPiperDownloadButton();
+        };
+
+        const fetchPiperVoices = async ({refresh = false, showResultToast = false} = {}) => {
+            if (destroyed)
+                return;
+            const seq = ++piperFetchSeq;
+            piperModelRow.set_subtitle('Loading Piper voice catalog...');
+            piperRefreshBtn.set_sensitive(false);
+
+            const queryPath = `/api/v1/tts/voices?provider=piper${refresh ? '&refresh=1' : ''}`;
+            let resp = await httpJson('GET', queryPath, undefined, {longTimeout: refresh});
+            if (destroyed || seq !== piperFetchSeq)
+                return;
+
+            if (resp.status !== 0 && (!resp.ok || (Array.isArray(resp.data?.voices) && resp.data.voices.length === 0))) {
+                const altPath = `/api/v1/tts/piper/voices${refresh ? '?refresh=1' : ''}`;
+                const altResp = await httpJson('GET', altPath, undefined, {longTimeout: refresh});
+                if (destroyed || seq !== piperFetchSeq)
+                    return;
+                if (altResp.ok)
+                    resp = altResp;
+            }
+
+            piperRefreshBtn.set_sensitive(true);
+
+            if (!resp.ok || !resp.data) {
+                if (resp.status === 0)
+                    setOfflineState(true);
+                piperModelRow.set_subtitle('Unable to load Piper voice catalog');
+                syncPiperDownloadButton();
+                if (showResultToast)
+                    showToast('Unable to fetch Piper voice catalog');
+                return;
+            }
+            setOfflineState(false);
+
+            const rawList = Array.isArray(resp.data)
+                ? resp.data
+                : (Array.isArray(resp.data.voices)
+                    ? resp.data.voices
+                    : (Array.isArray(resp.data.models) ? resp.data.models : []));
+            const parsed = [];
+            const seen = new Set();
+            for (const entry of rawList) {
+                const normalized = normalizePiperVoiceEntry(entry);
+                if (normalized && !seen.has(normalized.id)) {
+                    seen.add(normalized.id);
+                    parsed.push(normalized);
+                }
+            }
+
+            piperVoices = parsed;
+            rebuildPiperLanguageFilter();
+            rebuildPiperModelCombo();
+            if (piperVoices.length === 0) {
+                const errHint = resp.data?.error
+                    ? String(resp.data.error)
+                    : 'No catalog voices returned (enter Model ID below)';
+                piperModelRow.set_subtitle(errHint);
+            }
+            if (showResultToast) {
+                showToast(
+                    piperVoices.length > 0
+                        ? `Loaded ${piperVoices.length} Piper voice(s)`
+                        : 'No Piper voices returned by daemon'
+                );
+            }
+        };
+
+        const syncPiperPresetFromControls = () => {
+            const matchedIdx = matchPiperPresetIndex(
+                piperSpeedRow.get_value(),
+                piperPitchRow.get_value(),
+                piperNoiseRow.get_value()
+            );
+            const prevLoading = loading;
+            loading = true;
+            try {
+                piperPresetRow.set_selected(matchedIdx);
+            } finally {
+                loading = prevLoading;
             }
         };
 
@@ -1412,6 +1869,26 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 setSecretRowState(kokoroApiKeyRow, kokoroApiKeyBadge, Boolean(secretsConfigured.KOKORO_API_KEY));
                 setSecretRowState(elevenlabsApiKeyRow, elevenlabsApiKeyBadge, Boolean(secretsConfigured.ELEVENLABS_API_KEY));
 
+                const piperModel = String(voiceOut.piper_model ?? DEFAULT_PIPER_MODEL).trim() || DEFAULT_PIPER_MODEL;
+                const rawPiperSpeed = Number(voiceOut.piper_speed ?? 1.0);
+                const piperSpeed = Number.isFinite(rawPiperSpeed)
+                    ? Math.min(2.5, Math.max(0.4, rawPiperSpeed))
+                    : 1.0;
+                const rawPiperPitch = Number(voiceOut.piper_pitch ?? 0.0);
+                const piperPitch = Number.isFinite(rawPiperPitch)
+                    ? Math.min(12.0, Math.max(-12.0, rawPiperPitch))
+                    : 0.0;
+                const rawPiperNoise = Number(voiceOut.piper_noise_scale ?? 0.667);
+                const piperNoise = Number.isFinite(rawPiperNoise)
+                    ? Math.min(1.5, Math.max(0.0, rawPiperNoise))
+                    : 0.667;
+                currentPiperModel = piperModel;
+                piperCustomModelRow.set_text(piperModel);
+                piperSpeedRow.set_value(piperSpeed);
+                piperPitchRow.set_value(piperPitch);
+                piperNoiseRow.set_value(piperNoise);
+                piperPresetRow.set_selected(matchPiperPresetIndex(piperSpeed, piperPitch, piperNoise));
+
                 setComboText(providerRow, provider.active_provider ?? llm.provider ?? 'ollama');
                 currentConfiguredModel = String(provider.model ?? llm.model ?? '').trim();
                 baseUrlRow.set_text(String(provider.base_url ?? llm.base_url ?? ''));
@@ -1429,10 +1906,13 @@ export default class ByteyPreferences extends ExtensionPreferences {
             syncSttVisibility();
             syncTtsVisibility();
             syncProviderVisibility();
+            rebuildPiperModelCombo();
             syncMcpJsonText();
             rebuildMcpList();
             updateToolsSensitivity();
             refreshContextSizeRow();
+            if (comboText(ttsProviderRow) === 'piper')
+                fetchPiperVoices({refresh: false, showResultToast: false}).catch(() => {});
             fetchModels(comboText(providerRow), baseUrlRow.get_text().trim(), {
                 autoSelectIfMissing: false,
                 showResultToast: false,
@@ -1694,8 +2174,11 @@ export default class ByteyPreferences extends ExtensionPreferences {
         }));
 
         ttsProviderRow.connect('notify::selected', () => onUserChange(() => {
+            const nextProvider = comboText(ttsProviderRow);
             syncTtsVisibility();
-            patchConfig({voice_out: {tts_provider: comboText(ttsProviderRow)}}, 'Saved TTS provider');
+            patchConfig({voice_out: {tts_provider: nextProvider}}, 'Saved TTS provider');
+            if (nextProvider === 'piper')
+                fetchPiperVoices({refresh: false, showResultToast: false}).catch(() => {});
         }));
 
         kokoroBaseUrlRow.connect('apply', () => onUserChange(() => {
@@ -1708,6 +2191,219 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         elevenlabsApiKeyRow.connect('apply', () => onUserChange(() => {
             saveSecret('ELEVENLABS_API_KEY', elevenlabsApiKeyRow, elevenlabsApiKeyBadge).catch(() => {});
+        }));
+
+        piperLangRow.connect('notify::selected', () => onUserChange(() => {
+            const idx = piperLangRow.get_selected();
+            const opt = piperLanguageOptions[idx];
+            currentPiperLanguage = opt ? opt.code : '';
+            rebuildPiperModelCombo();
+            const matchIdx = currentPiperModel
+                ? piperFilteredVoices.findIndex(v => v.id === currentPiperModel)
+                : -1;
+            if (matchIdx < 0 && piperFilteredVoices.length > 0 && piperFilteredVoices[0].installed) {
+                const chosen = piperFilteredVoices[0];
+                currentPiperModel = chosen.id;
+                loading = true;
+                try {
+                    piperCustomModelRow.set_text(chosen.id);
+                } finally {
+                    loading = false;
+                }
+                patchConfig({voice_out: {piper_model: chosen.id}}, `Saved Piper voice: ${chosen.id}`);
+            }
+        }));
+
+        piperModelRow.connect('notify::selected', () => onUserChange(() => {
+            if (piperFilteredVoices.length === 0) {
+                syncPiperDownloadButton();
+                return;
+            }
+            const idx = piperModelRow.get_selected();
+            const chosen = idx >= 0 && idx < piperFilteredVoices.length ? piperFilteredVoices[idx] : null;
+            syncPiperDownloadButton();
+            if (!chosen || !chosen.id || chosen.id === currentPiperModel)
+                return;
+            currentPiperModel = chosen.id;
+            loading = true;
+            try {
+                piperCustomModelRow.set_text(chosen.id);
+            } finally {
+                loading = false;
+            }
+            patchConfig({voice_out: {piper_model: chosen.id}}, `Saved Piper voice: ${chosen.id}`);
+        }));
+
+        piperRefreshBtn.connect('clicked', () => onUserChange(() => {
+            fetchPiperVoices({refresh: true, showResultToast: true}).catch(() => {});
+        }));
+
+        piperDownloadBtn.connect('clicked', () => onUserChange(async () => {
+            if (piperDownloading)
+                return;
+            const idx = piperModelRow.get_selected();
+            const selectedVoice = idx >= 0 && idx < piperFilteredVoices.length
+                ? piperFilteredVoices[idx]
+                : null;
+            const selectedId = selectedVoice
+                ? selectedVoice.id
+                : (piperCustomModelRow.get_text().trim() || currentPiperModel);
+            if (!selectedId) {
+                showToast('Select a Piper voice model first');
+                return;
+            }
+
+            piperDownloading = true;
+            syncPiperDownloadButton();
+            showToast(`Downloading Piper voice ${selectedId}...`);
+
+            const resp = await httpJson(
+                'POST',
+                '/api/v1/tts/piper/download',
+                {model: selectedId},
+                {longTimeout: true}
+            );
+            piperDownloading = false;
+            if (destroyed)
+                return;
+
+            if (!resp.ok || resp.data?.ok === false) {
+                if (resp.status === 0)
+                    setOfflineState(true);
+                const errMsg = resp.data?.error
+                    ? String(resp.data.error)
+                    : `HTTP ${resp.status || 'offline'}`;
+                syncPiperDownloadButton();
+                showToast(`Piper download failed: ${errMsg}`);
+                return;
+            }
+            setOfflineState(false);
+
+            const existing = piperVoices.find(v => v.id === selectedId);
+            if (existing) {
+                existing.installed = true;
+            } else {
+                piperVoices.push({
+                    id: selectedId,
+                    languageCode: inferPiperLanguageCode(selectedId),
+                    languageName: '',
+                    quality: '',
+                    installed: true,
+                });
+                rebuildPiperLanguageFilter();
+            }
+
+            currentPiperModel = selectedId;
+            loading = true;
+            try {
+                piperCustomModelRow.set_text(selectedId);
+            } finally {
+                loading = false;
+            }
+            rebuildPiperModelCombo();
+            await patchConfig({voice_out: {piper_model: selectedId}}, `Downloaded Piper voice ${selectedId}`);
+        }));
+
+        piperCustomModelRow.connect('apply', () => onUserChange(() => {
+            const modelVal = piperCustomModelRow.get_text().trim();
+            if (!modelVal) {
+                showToast('Enter a Piper model ID or .onnx path');
+                loading = true;
+                try {
+                    piperCustomModelRow.set_text(currentPiperModel || DEFAULT_PIPER_MODEL);
+                } finally {
+                    loading = false;
+                }
+                return;
+            }
+            currentPiperModel = modelVal;
+            const inCatalog = piperVoices.find(v => v.id === modelVal);
+            if (inCatalog && currentPiperLanguage && inCatalog.languageCode !== currentPiperLanguage) {
+                currentPiperLanguage = '';
+                const prevLoading = loading;
+                loading = true;
+                try {
+                    piperLangRow.set_selected(0);
+                } finally {
+                    loading = prevLoading;
+                }
+            }
+            rebuildPiperModelCombo();
+            patchConfig({voice_out: {piper_model: modelVal}}, `Saved Piper model: ${modelVal}`);
+        }));
+
+        piperPresetRow.connect('notify::selected', () => onUserChange(() => {
+            const idx = piperPresetRow.get_selected();
+            const preset = PIPER_VOICE_PRESETS[idx];
+            if (!preset || preset.id === 'custom' || preset.speed === null)
+                return;
+            loading = true;
+            try {
+                piperSpeedRow.set_value(preset.speed);
+                piperPitchRow.set_value(preset.pitch);
+                piperNoiseRow.set_value(preset.noise_scale);
+            } finally {
+                loading = false;
+            }
+            patchConfig(
+                {
+                    voice_out: {
+                        piper_speed: preset.speed,
+                        piper_pitch: preset.pitch,
+                        piper_noise_scale: preset.noise_scale,
+                    },
+                },
+                `Applied voice preset: ${preset.label}`
+            );
+        }));
+
+        piperSpeedRow.connect('notify::value', () => onUserChange(() => {
+            syncPiperPresetFromControls();
+            const val = Number(piperSpeedRow.get_value().toFixed(2));
+            patchConfig({voice_out: {piper_speed: val}}, 'Saved Piper speed');
+        }));
+
+        piperPitchRow.connect('notify::value', () => onUserChange(() => {
+            syncPiperPresetFromControls();
+            const val = Number(piperPitchRow.get_value().toFixed(1));
+            patchConfig({voice_out: {piper_pitch: val}}, 'Saved Piper pitch');
+        }));
+
+        piperNoiseRow.connect('notify::value', () => onUserChange(() => {
+            syncPiperPresetFromControls();
+            const val = Number(piperNoiseRow.get_value().toFixed(3));
+            patchConfig({voice_out: {piper_noise_scale: val}}, 'Saved Piper expressiveness');
+        }));
+
+        piperTestBtn.connect('clicked', () => onUserChange(async () => {
+            if (ttsMuteRow.get_active()) {
+                showToast('Voice output (TTS) is muted — unmute to preview');
+                return;
+            }
+            const activeModel = piperCustomModelRow.get_text().trim() || currentPiperModel;
+            const voiceObj = piperVoices.find(v => v.id === activeModel);
+            const langCode = (voiceObj && voiceObj.languageCode)
+                || inferPiperLanguageCode(activeModel)
+                || currentPiperLanguage
+                || 'en_US';
+            const text = sampleTextForLanguage(langCode);
+
+            piperTestBtn.set_sensitive(false);
+            const resp = await httpJson('POST', '/api/v1/tts/replay', {text}, {longTimeout: true});
+            if (destroyed)
+                return;
+            piperTestBtn.set_sensitive(true);
+            if (!resp.ok || resp.data?.ok === false) {
+                if (resp.status === 0)
+                    setOfflineState(true);
+                const errMsg = resp.data?.error
+                    ? String(resp.data.error)
+                    : `HTTP ${resp.status || 'offline'}`;
+                showToast(`Voice preview failed: ${errMsg}`);
+                return;
+            }
+            setOfflineState(false);
+            showToast('Playing Piper voice preview');
         }));
 
         providerRow.connect('notify::selected', () => onUserChange(async () => {
@@ -1807,6 +2503,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         syncSttVisibility();
         syncTtsVisibility();
         syncProviderVisibility();
+        syncPiperDownloadButton();
         syncMcpJsonText();
         rebuildMcpList();
         updateToolsSensitivity();

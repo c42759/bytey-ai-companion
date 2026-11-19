@@ -14,6 +14,7 @@ import wave
 import numpy as np
 
 from .chunker import SentenceChunker
+from .piper_provider import PiperTTSClient
 from .providers import ElevenLabsTTSClient, KokoroTTSClient
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,7 @@ class StreamingTTSPlayer:
         on_state_change: Callable[..., Any] | None = None,
         kokoro_client: KokoroTTSClient | None = None,
         elevenlabs_client: ElevenLabsTTSClient | None = None,
+        piper_client: PiperTTSClient | None = None,
     ) -> None:
         self._get_config = get_config
         self._get_secret = get_secret
@@ -143,6 +145,8 @@ class StreamingTTSPlayer:
         self._owns_kokoro = kokoro_client is None
         self._elevenlabs = elevenlabs_client or ElevenLabsTTSClient()
         self._owns_elevenlabs = elevenlabs_client is None
+        self._piper = piper_client or PiperTTSClient()
+        self._owns_piper = piper_client is None
 
         self._queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
@@ -228,6 +232,76 @@ class StreamingTTSPlayer:
                     ),
                     1.0,
                 )
+            ),
+            "piper_model": str(
+                _cfg_get(
+                    cfg,
+                    (
+                        ("voice_out", "piper_model"),
+                        ("voice_output", "piper_model"),
+                        ("tts", "piper_model"),
+                        ("piper_model",),
+                    ),
+                    "en_US-lessac-medium",
+                )
+            ),
+            "piper_models_dir": str(
+                _cfg_get(
+                    cfg,
+                    (
+                        ("voice_out", "piper_models_dir"),
+                        ("voice_output", "piper_models_dir"),
+                        ("tts", "piper_models_dir"),
+                        ("piper_models_dir",),
+                    ),
+                    "",
+                )
+            ),
+            "piper_speed": float(
+                _cfg_get(
+                    cfg,
+                    (
+                        ("voice_out", "piper_speed"),
+                        ("voice_output", "piper_speed"),
+                        ("tts", "piper_speed"),
+                        ("piper_speed",),
+                    ),
+                    1.0,
+                )
+            ),
+            "piper_pitch": float(
+                _cfg_get(
+                    cfg,
+                    (
+                        ("voice_out", "piper_pitch"),
+                        ("voice_output", "piper_pitch"),
+                        ("tts", "piper_pitch"),
+                        ("piper_pitch",),
+                    ),
+                    0.0,
+                )
+            ),
+            "piper_noise_scale": float(
+                _cfg_get(
+                    cfg,
+                    (
+                        ("voice_out", "piper_noise_scale"),
+                        ("voice_output", "piper_noise_scale"),
+                        ("tts", "piper_noise_scale"),
+                        ("piper_noise_scale",),
+                    ),
+                    0.667,
+                )
+            ),
+            "piper_speaker_id": _cfg_get(
+                cfg,
+                (
+                    ("voice_out", "piper_speaker_id"),
+                    ("voice_output", "piper_speaker_id"),
+                    ("tts", "piper_speaker_id"),
+                    ("piper_speaker_id",),
+                ),
+                None,
             ),
             "elevenlabs_voice_id": str(
                 _cfg_get(
@@ -360,6 +434,8 @@ class StreamingTTSPlayer:
             await self._kokoro.close()
         if self._owns_elevenlabs:
             await self._elevenlabs.close()
+        if self._owns_piper:
+            await self._piper.close()
 
     async def _synthesize(self, text: str, settings: dict[str, Any]) -> tuple[bytes, str] | None:
         provider = settings["provider"]
@@ -374,6 +450,25 @@ class StreamingTTSPlayer:
                 voice=settings["kokoro_voice"],
                 speed=settings["kokoro_speed"],
                 api_key=api_key or None,
+            )
+
+        if provider == "piper":
+            raw_sid = settings.get("piper_speaker_id")
+            if raw_sid is None or isinstance(raw_sid, bool) or raw_sid == "":
+                speaker_id: int | None = None
+            else:
+                try:
+                    speaker_id = max(0, int(raw_sid))
+                except (TypeError, ValueError):
+                    speaker_id = None
+            return await self._piper.synthesize(
+                text=text,
+                model=settings["piper_model"],
+                models_dir=settings["piper_models_dir"],
+                speed=settings["piper_speed"],
+                pitch=settings["piper_pitch"],
+                noise_scale=settings["piper_noise_scale"],
+                speaker_id=speaker_id,
             )
 
         if provider == "elevenlabs":

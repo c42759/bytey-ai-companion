@@ -15,12 +15,18 @@ from pathlib import Path
 from typing import Any
 
 from .audio import VoiceInputService
-from .config import ConfigManager, MCPServerConfig, SecretStore
+from .config import PIPER_VOICE_PRESETS, ConfigManager, MCPServerConfig, SecretStore
 from .ipc import IPCRequest, IPCResponse, IPCServer
 from .llm import LLMRouter
 from .llm.emotions import parse_emotion_prefix
 from .mcp_host import MCPClientManager, from_mcp_servers_json, to_mcp_servers_json
-from .tts import ElevenLabsTTSClient, KokoroTTSClient, SentenceChunker, StreamingTTSPlayer
+from .tts import (
+    ElevenLabsTTSClient,
+    KokoroTTSClient,
+    PiperTTSClient,
+    SentenceChunker,
+    StreamingTTSPlayer,
+)
 from .storage import StorageManager, resolve_db_path
 
 logger = logging.getLogger(__name__)
@@ -56,6 +62,12 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "kokoro_base_url": ("voice_out", "kokoro_base_url"),
     "kokoro_voice": ("voice_out", "kokoro_voice"),
     "kokoro_speed": ("voice_out", "kokoro_speed"),
+    "piper_model": ("voice_out", "piper_model"),
+    "piper_models_dir": ("voice_out", "piper_models_dir"),
+    "piper_speed": ("voice_out", "piper_speed"),
+    "piper_pitch": ("voice_out", "piper_pitch"),
+    "piper_noise_scale": ("voice_out", "piper_noise_scale"),
+    "piper_speaker_id": ("voice_out", "piper_speaker_id"),
     "elevenlabs_voice_id": ("voice_out", "elevenlabs_voice_id"),
     "elevenlabs_model_id": ("voice_out", "elevenlabs_model_id"),
     "animation_mode": ("visuals", "animation_mode"),
@@ -135,6 +147,7 @@ class ByteyDaemon:
         mcp_manager: MCPClientManager | None = None,
         kokoro_client: KokoroTTSClient | None = None,
         elevenlabs_client: ElevenLabsTTSClient | None = None,
+        piper_client: PiperTTSClient | None = None,
     ) -> None:
         self.secret_store = SecretStore(config_dir=config_dir)
         self.config_manager = ConfigManager(config_dir=config_dir, secret_store=self.secret_store)
@@ -149,6 +162,8 @@ class ByteyDaemon:
         self._owns_kokoro = kokoro_client is None
         self.elevenlabs_client = elevenlabs_client or ElevenLabsTTSClient()
         self._owns_elevenlabs = elevenlabs_client is None
+        self.piper_client = piper_client or PiperTTSClient()
+        self._owns_piper = piper_client is None
 
         self.ipc = IPCServer(host=host, port=port, on_ws_message=self._on_ws_message)
         self.tts_player = StreamingTTSPlayer(
@@ -158,6 +173,7 @@ class ByteyDaemon:
             on_state_change=self._on_subsystem_state_change,
             kokoro_client=self.kokoro_client,
             elevenlabs_client=self.elevenlabs_client,
+            piper_client=self.piper_client,
         )
         self.enable_voice_capture = enable_voice_capture
         self.voice_input = VoiceInputService(
@@ -278,6 +294,8 @@ class ByteyDaemon:
             await self.kokoro_client.close()
         if self._owns_elevenlabs:
             await self.elevenlabs_client.close()
+        if self._owns_piper:
+            await self.piper_client.close()
         await self.ipc.stop()
         await self.storage.close()
 
@@ -324,6 +342,12 @@ class ByteyDaemon:
             "kokoro_base_url": cfg.voice_out.kokoro_base_url,
             "kokoro_voice": cfg.voice_out.kokoro_voice,
             "kokoro_speed": cfg.voice_out.kokoro_speed,
+            "piper_model": cfg.voice_out.piper_model,
+            "piper_models_dir": cfg.voice_out.piper_models_dir,
+            "piper_speed": cfg.voice_out.piper_speed,
+            "piper_pitch": cfg.voice_out.piper_pitch,
+            "piper_noise_scale": cfg.voice_out.piper_noise_scale,
+            "piper_speaker_id": cfg.voice_out.piper_speaker_id,
             "elevenlabs_voice_id": cfg.voice_out.elevenlabs_voice_id,
             "elevenlabs_model_id": cfg.voice_out.elevenlabs_model_id,
         }
@@ -410,6 +434,12 @@ class ByteyDaemon:
                 "kokoro_base_url",
                 "kokoro_voice",
                 "kokoro_speed",
+                "piper_model",
+                "piper_models_dir",
+                "piper_speed",
+                "piper_pitch",
+                "piper_noise_scale",
+                "piper_speaker_id",
                 "elevenlabs_voice_id",
                 "elevenlabs_model_id",
             ):
@@ -930,6 +960,9 @@ class ByteyDaemon:
         self.ipc.register_route("POST", "/api/v1/tools/{call_id}/confirm", self._route_confirm_tool)
 
         self.ipc.register_route("GET", "/api/v1/tts/voices", self._route_list_voices)
+        self.ipc.register_route(
+            "POST", "/api/v1/tts/piper/download", self._route_download_piper_model
+        )
         self.ipc.register_route("POST", "/api/v1/tts/replay", self._route_replay_tts)
         self.ipc.register_route(
             "POST",
@@ -1107,11 +1140,48 @@ class ByteyDaemon:
             api_key = self.secret_store.get_secret("KOKORO_API_KEY")
             voices = await self.kokoro_client.list_voices(base_url=base_url, api_key=api_key)
             return {"voices": voices}
+        if provider == "piper":
+            refresh_raw = str(req.query.get("refresh") or "").strip().lower()
+            refresh = refresh_raw in ("1", "true", "yes")
+            language = str(req.query.get("language") or "").strip()
+            models_dir = (
+                str(req.query.get("models_dir") or "").strip()
+                or cfg.voice_out.piper_models_dir
+            )
+            voices = await self.piper_client.list_voices(
+                models_dir=models_dir,
+                refresh=refresh,
+                language=language,
+            )
+            return {
+                "voices": voices,
+                "models_dir": str(self.piper_client.resolve_models_dir(models_dir)),
+                "backend": self.piper_client.detect_backend(),
+                "presets": PIPER_VOICE_PRESETS,
+            }
         if provider == "elevenlabs":
             api_key = self.secret_store.get_secret("ELEVENLABS_API_KEY") or ""
             voices = await self.elevenlabs_client.list_voices(api_key=api_key)
             return {"voices": voices}
         return {"voices": []}
+
+    async def _route_download_piper_model(self, req: IPCRequest) -> dict[str, Any]:
+        body = req.json()
+        if not isinstance(body, dict):
+            raise ValueError("Request body must be a JSON object")
+        model_id = str(
+            body.get("model") or body.get("model_id") or body.get("id") or ""
+        ).strip()
+        if not model_id:
+            raise ValueError("Piper model ID is required")
+        cfg = self.config_manager.config
+        models_dir = (
+            str(body.get("models_dir") or cfg.voice_out.piper_models_dir or "").strip()
+        )
+        return await self.piper_client.download_model(
+            model_id,
+            models_dir=models_dir or None,
+        )
 
     async def _route_replay_tts(self, req: IPCRequest) -> dict[str, Any]:
         body = req.json()

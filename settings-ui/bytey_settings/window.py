@@ -34,7 +34,47 @@ PROVIDER_DEFAULT_URLS = {
     "custom": "http://localhost:8000/v1",
 }
 STT_BACKENDS = ("local_whisper", "openai_whisper", "custom_whisper")
-TTS_PROVIDERS = ("kokoro", "elevenlabs", "disabled")
+TTS_PROVIDERS = ("kokoro", "piper", "elevenlabs", "disabled")
+PIPER_VOICE_PRESETS: tuple[tuple[str, str, float | None, float | None, float | None], ...] = (
+    ("normal", "Normal", 1.0, 0.0, 0.667),
+    ("chipmunk", "Chipmunk", 1.25, 8.0, 0.8),
+    ("helium", "Helium Squeak", 1.15, 10.5, 0.9),
+    ("deep_monster", "Deep Monster", 0.82, -8.0, 0.667),
+    ("sleepy_giant", "Sleepy Giant", 0.68, -5.5, 0.55),
+    ("hyper_gremlin", "Hyper Gremlin", 1.55, 5.5, 1.0),
+    ("flat_robot", "Flat Robot", 1.05, -2.5, 0.1),
+    ("custom", "Custom", None, None, None),
+)
+_PIPER_SAMPLE_TEXTS: dict[str, str] = {
+    "en": "Hello! This is Bytey testing my Piper local voice.",
+    "es": "¡Hola! Soy Bytey probando mi voz local de Piper.",
+    "fr": "Bonjour ! Ici Bytey, je teste ma voix locale Piper.",
+    "de": "Hallo! Hier ist Bytey und ich teste meine lokale Piper-Stimme.",
+    "it": "Ciao! Sono Bytey e sto provando la mia voce locale Piper.",
+    "pt": "Olá! Aqui é o Bytey testando a minha voz local Piper.",
+    "nl": "Hallo! Dit is Bytey en ik test mijn lokale Piper-stem.",
+    "pl": "Cześć! Tu Bytey, testuję mój lokalny głos Piper.",
+    "ru": "Привет! Это Байти, я проверяю свой локальный голос Piper.",
+    "uk": "Привіт! Це Байті, я перевіряю свій локальний голос Piper.",
+    "zh": "你好！我是 Bytey，正在测试我的本地 Piper 语音。",
+    "ja": "こんにちは！Byteyです。ローカルのPiper音声をテストしています。",
+    "ko": "안녕하세요! Bytey입니다. 로컬 Piper 음성을 테스트하고 있습니다.",
+    "tr": "Merhaba! Ben Bytey, yerel Piper sesimi test ediyorum.",
+    "ar": "مرحباً! أنا بايتي، أختبر صوتي المحلي من بايبر.",
+    "hi": "नमस्ते! मैं बाइटी हूँ, अपनी लोकल पाइपर आवाज़ की जांच कर रही हूँ।",
+    "sv": "Hej! Det här är Bytey som testar min lokala Piper-röst.",
+    "da": "Hej! Det er Bytey, der tester min lokale Piper-stemme.",
+    "no": "Hei! Dette er Bytey som tester min lokale Piper-stemme.",
+    "nb": "Hei! Dette er Bytey som tester min lokale Piper-stemme.",
+    "fi": "Hei! Täällä Bytey testaa paikallista Piper-ääntäni.",
+    "cs": "Ahoj! Tady Bytey, testuji svůj lokální hlas Piper.",
+    "el": "Γεια σας! Είμαι ο Bytey και δοκιμάζω την τοπική φωνή Piper.",
+    "ro": "Salut! Sunt Bytey și îmi testez vocea locală Piper.",
+    "hu": "Szia! Bytey vagyok, a helyi Piper hangomat tesztelem.",
+    "vi": "Xin chào! Tôi là Bytey đang thử nghiệm giọng nói Piper cục bộ.",
+    "ca": "Hola! Soc en Bytey provant la meva veu local de Piper.",
+    "fa": "سلام! من بایتی هستم و صدای محلی پایپر را آزمایش می‌کنم.",
+}
 ANIMATION_MODES = ("full", "state_only", "disabled")
 POSITION_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Fixed", "fixed"),
@@ -87,6 +127,11 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "kokoro_base_url": (("voice_output", "kokoro_base_url"), ("kokoro_base_url",)),
     "kokoro_voice": (("voice_output", "kokoro_voice"), ("kokoro_voice",)),
     "kokoro_speed": (("voice_output", "kokoro_speed"), ("kokoro_speed",)),
+    "piper_model": (("voice_output", "piper_model"), ("piper_model",)),
+    "piper_models_dir": (("voice_output", "piper_models_dir"), ("piper_models_dir",)),
+    "piper_speed": (("voice_output", "piper_speed"), ("piper_speed",)),
+    "piper_pitch": (("voice_output", "piper_pitch"), ("piper_pitch",)),
+    "piper_noise_scale": (("voice_output", "piper_noise_scale"), ("piper_noise_scale",)),
     "elevenlabs_voice_id": (("voice_output", "elevenlabs_voice_id"), ("elevenlabs_voice_id",)),
     "elevenlabs_model_id": (("voice_output", "elevenlabs_model_id"), ("elevenlabs_model_id",)),
     "animation_mode": (("visuals", "animation_mode"), ("animation_mode",)),
@@ -171,12 +216,141 @@ def _set_nested(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None
     cur[path[-1]] = value
 
 
-def _make_string_combo(title: str, subtitle: str, items: tuple[str, ...] | list[str]) -> Adw.ComboRow:
-    row = Adw.ComboRow(title=title)
+def _make_string_combo(
+    title: str,
+    subtitle: str,
+    items: tuple[str, ...] | list[str],
+    *,
+    searchable: bool = False,
+) -> Adw.ComboRow:
+    row = Adw.ComboRow(title=title, enable_search=searchable)
     if subtitle:
         row.set_subtitle(subtitle)
+    if searchable:
+        row.set_expression(Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
     row.set_model(Gtk.StringList.new(list(items)))
     return row
+
+
+def _make_scale_row(
+    title: str,
+    subtitle: str,
+    min_val: float,
+    max_val: float,
+    step: float,
+    digits: int,
+    on_changed: Callable[[Gtk.Scale], None],
+) -> tuple[Adw.ActionRow, Gtk.Scale]:
+    """Create an Adw.ActionRow containing a horizontally aligned Gtk.Scale."""
+    row = Adw.ActionRow(title=title, subtitle=subtitle)
+    scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, min_val, max_val, step)
+    scale.set_size_request(200, -1)
+    scale.set_draw_value(True)
+    scale.set_digits(digits)
+    scale.set_valign(Gtk.Align.CENTER)
+    scale.connect("value-changed", on_changed)
+    row.add_suffix(scale)
+    return row, scale
+
+
+def _match_piper_preset_index(speed: float, pitch: float, noise_scale: float) -> int:
+    """Return matching PIPER_VOICE_PRESETS index, or the 'custom' preset index."""
+    for idx, (_, _, p_speed, p_pitch, p_noise) in enumerate(PIPER_VOICE_PRESETS):
+        if p_speed is None or p_pitch is None or p_noise is None:
+            continue
+        if (
+            abs(speed - p_speed) <= 0.01
+            and abs(pitch - p_pitch) <= 0.1
+            and abs(noise_scale - p_noise) <= 0.01
+        ):
+            return idx
+    return len(PIPER_VOICE_PRESETS) - 1
+
+
+def _piper_sample_text(lang_code: str) -> str:
+    """Return a short natural preview phrase matching *lang_code*."""
+    code = (lang_code or "").strip().replace("-", "_").lower()
+    prefix = code.split("_", 1)[0]
+    return _PIPER_SAMPLE_TEXTS.get(
+        prefix,
+        "Hello! This is Bytey testing my Piper local voice.",
+    )
+
+
+def _normalize_piper_voice(item: Any) -> dict[str, Any] | None:
+    """Normalize a Piper catalog item (dict or string) into canonical metadata."""
+    if isinstance(item, str):
+        vid = item.strip()
+        if not vid:
+            return None
+        lang_code = vid.split("-", 1)[0] if "-" in vid and "_" in vid.split("-", 1)[0] else ""
+        quality = vid.rsplit("-", 1)[-1] if vid.count("-") >= 2 else ""
+        return {
+            "id": vid,
+            "name": vid,
+            "lang_code": lang_code,
+            "lang_label": lang_code,
+            "quality": quality,
+            "installed": False,
+        }
+    if not isinstance(item, dict):
+        return None
+    vid = str(
+        item.get("id") or item.get("model") or item.get("voice_id") or item.get("key") or item.get("name") or ""
+    ).strip()
+    if not vid:
+        return None
+    raw_name = str(item.get("display_name") or item.get("name") or vid).strip()
+    lang_obj = item.get("language") or item.get("lang") or item.get("locale")
+    if isinstance(lang_obj, dict):
+        lang_code = str(lang_obj.get("code") or lang_obj.get("id") or "").strip()
+        lang_eng = str(lang_obj.get("name_english") or lang_obj.get("name") or "").strip()
+        country = str(lang_obj.get("country_english") or lang_obj.get("region") or "").strip()
+        lang_label = f"{lang_eng} ({country})" if lang_eng and country else (lang_eng or lang_code)
+    else:
+        lang_code = str(lang_obj or item.get("language_code") or item.get("lang_code") or "").strip()
+        lang_label = str(item.get("language_name") or item.get("lang_name") or "").strip()
+    if not lang_code and "-" in vid:
+        candidate = vid.split("-", 1)[0]
+        if "_" in candidate or len(candidate) in (2, 5):
+            lang_code = candidate
+    quality = str(item.get("quality") or "").strip()
+    if not quality and vid.count("-") >= 2:
+        quality = vid.rsplit("-", 1)[-1]
+    installed = bool(
+        item["installed"]
+        if "installed" in item
+        else item.get("downloaded", item.get("is_installed", False))
+    )
+    return {
+        "id": vid,
+        "name": raw_name or vid,
+        "lang_code": lang_code,
+        "lang_label": lang_label or lang_code,
+        "quality": quality,
+        "installed": installed,
+    }
+
+
+def _format_piper_voice_label(voice: dict[str, Any]) -> str:
+    """Format a normalized Piper voice entry for searchable ComboRow display."""
+    name = str(voice.get("name") or voice.get("id") or "")
+    lang_code = str(voice.get("lang_code") or "")
+    lang_label = str(voice.get("lang_label") or "")
+    quality = str(voice.get("quality") or "")
+    status = "Installed" if voice.get("installed") else "Download"
+
+    meta_parts: list[str] = []
+    if lang_label and lang_code and lang_label != lang_code:
+        meta_parts.append(f"{lang_label} · {lang_code}")
+    elif lang_code or lang_label:
+        meta_parts.append(lang_code or lang_label)
+    if quality:
+        meta_parts.append(quality)
+    meta = ", ".join(meta_parts)
+    if meta:
+        return f"{name} ({meta}) — {status}"
+    return f"{name} — {status}"
 
 
 def _combo_selected_text(row: Adw.ComboRow) -> str:
@@ -549,6 +723,11 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._model_context_map: dict[str, int] = {}
         self._context_preset_values: list[int | None] = [None]
         self._elevenlabs_voices: list[tuple[str, str]] = []
+        self._piper_all_voices: list[dict[str, Any]] = []
+        self._piper_filtered_voices: list[dict[str, Any]] = []
+        self._piper_languages: list[tuple[str, str]] = [("", "All Languages")]
+        self._piper_downloading = False
+        self._suppress_piper_refresh_toast = False
         self._debounce_timers: dict[str, int] = {}
         self._offline_banners: list[Adw.Banner] = []
         self._mcp_servers: dict[str, dict[str, Any]] = {}
@@ -582,14 +761,17 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             "stt_api_url": self.stt_api_url_row.get_text().strip(),
             "kokoro_base_url": self.kokoro_url_row.get_text().strip(),
             "kokoro_voice": self.kokoro_voice_row.get_text().strip(),
+            "piper_model": self.piper_model_row.get_text().strip(),
+            "piper_models_dir": self.piper_models_dir_row.get_text().strip(),
             "elevenlabs_voice_id": self.el_voice_id_row.get_text().strip(),
             "elevenlabs_model_id": self.el_model_row.get_text().strip(),
         }
         if _combo_selected_text(self.provider_row) != "gemini":
             candidates["llm_base_url"] = self.llm_base_url_row.get_text().strip()
+        allow_empty = {"piper_models_dir"}
         dirty: dict[str, Any] = {}
         for field, val in candidates.items():
-            if val and val != str(self._read_field(field, "")):
+            if (val or field in allow_empty) and val != str(self._read_field(field, "")):
                 dirty[field] = val
         if dirty:
             patch = self._build_patch(dirty)
@@ -1426,6 +1608,110 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         tts_group.add(self.tts_provider_row)
         page.add(tts_group)
 
+        # Piper Local TTS
+        self.piper_group = Adw.PreferencesGroup(
+            title="Piper Local TTS (Offline / Low-CPU)",
+            description=(
+                "Fast offline neural voices with multi-language catalog, model downloads, "
+                "custom .onnx paths, and voice style controls."
+            ),
+        )
+        self.piper_lang_combo = _make_string_combo(
+            "Voice Language",
+            "Filter available Piper voices by language",
+            ["All Languages"],
+            searchable=True,
+        )
+        self.piper_lang_combo.connect("notify::selected", self._on_piper_lang_selected)
+        self.piper_group.add(self.piper_lang_combo)
+
+        self.piper_voice_combo = _make_string_combo(
+            "Piper Voices",
+            "Select a voice model (search by name, language, or quality)",
+            [""],
+            searchable=True,
+        )
+        piper_refresh_btn = Gtk.Button(label="Refresh Catalog", valign=Gtk.Align.CENTER)
+        piper_refresh_btn.connect(
+            "clicked", lambda *_: self._refresh_tts_voices("piper", refresh=True)
+        )
+        self.piper_download_btn = Gtk.Button(label="Download", valign=Gtk.Align.CENTER)
+        self.piper_download_btn.set_sensitive(False)
+        self.piper_download_btn.connect(
+            "clicked", lambda *_: self._download_selected_piper_model()
+        )
+        self.piper_voice_combo.add_suffix(piper_refresh_btn)
+        self.piper_voice_combo.add_suffix(self.piper_download_btn)
+        self.piper_voice_combo.connect("notify::selected", self._on_piper_voice_selected)
+        self.piper_group.add(self.piper_voice_combo)
+
+        self.piper_model_row = Adw.EntryRow(
+            title="Active Piper Model / .onnx Path",
+            show_apply_button=True,
+        )
+        self.piper_model_row.connect("apply", lambda *_: self._on_piper_model_applied())
+        self.piper_group.add(self.piper_model_row)
+
+        self.piper_preset_combo = _make_string_combo(
+            "Voice Style (Funny Presets)",
+            "Quick speed, pitch, and expressiveness presets",
+            [label for _, label, _, _, _ in PIPER_VOICE_PRESETS],
+        )
+        self.piper_preset_combo.connect("notify::selected", self._on_piper_preset_selected)
+        self.piper_group.add(self.piper_preset_combo)
+
+        piper_speed_row, self.piper_speed_scale = _make_scale_row(
+            "Piper Speed",
+            "Speech rate multiplier (0.40 – 2.50, 1.00 normal)",
+            0.40,
+            2.50,
+            0.05,
+            2,
+            lambda s: self._on_piper_slider_changed(s, "piper_speed"),
+        )
+        self.piper_group.add(piper_speed_row)
+
+        piper_pitch_row, self.piper_pitch_scale = _make_scale_row(
+            "Piper Pitch",
+            "Voice pitch in semitones (-12 deep monster, 0 normal, +12 chipmunk)",
+            -12.0,
+            12.0,
+            0.5,
+            1,
+            lambda s: self._on_piper_slider_changed(s, "piper_pitch"),
+        )
+        self.piper_group.add(piper_pitch_row)
+
+        piper_noise_row, self.piper_noise_scale = _make_scale_row(
+            "Piper Expressiveness",
+            "Expressiveness (0.10 robotic – 0.67 natural – 1.20 animated)",
+            0.0,
+            1.5,
+            0.05,
+            2,
+            lambda s: self._on_piper_slider_changed(s, "piper_noise_scale"),
+        )
+        self.piper_group.add(piper_noise_row)
+
+        piper_test_row = Adw.ActionRow(
+            title="Preview Piper Voice",
+            subtitle="Speak a sample phrase using the active Piper voice and style",
+        )
+        self.piper_test_btn = Gtk.Button(label="Test Voice", valign=Gtk.Align.CENTER)
+        self.piper_test_btn.connect("clicked", lambda *_: self._test_piper_voice())
+        piper_test_row.add_suffix(self.piper_test_btn)
+        self.piper_group.add(piper_test_row)
+
+        self.piper_models_dir_row = Adw.EntryRow(
+            title="Piper Models Directory (Optional)",
+            show_apply_button=True,
+        )
+        self.piper_models_dir_row.connect(
+            "apply", lambda *_: self._on_piper_models_dir_applied()
+        )
+        self.piper_group.add(self.piper_models_dir_row)
+        page.add(self.piper_group)
+
         # Kokoro
         kokoro_group = Adw.PreferencesGroup(title="Kokoro HTTP")
         self.kokoro_url_row = Adw.EntryRow(title="Kokoro Base URL", show_apply_button=True)
@@ -1524,10 +1810,12 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         page.add(el_group)
         self.add(page)
 
-    def _refresh_tts_voices(self, provider: str) -> None:
+    def _refresh_tts_voices(self, provider: str, *, refresh: bool = False) -> None:
+        quiet = provider == "piper" and self._suppress_piper_refresh_toast
         base_url = self.kokoro_url_row.get_text().strip() if provider == "kokoro" else ""
         pending_secret_key = ""
         pending_secret_val = ""
+        pending_piper_patch: dict[str, Any] | None = None
         if provider == "kokoro":
             pending_secret_val = self.kokoro_api_key_row.get_text().strip()
             if pending_secret_val and not _is_masked_placeholder(pending_secret_val):
@@ -1542,14 +1830,22 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
                 pending_secret_key = "ELEVENLABS_API_KEY"
             else:
                 pending_secret_val = ""
-        self._toast(f"Fetching {provider} voices...")
+        elif provider == "piper":
+            models_dir = self.piper_models_dir_row.get_text().strip()
+            if models_dir != str(self._read_field("piper_models_dir", "")):
+                pending_piper_patch = self._build_patch({"piper_models_dir": models_dir})
+        if not quiet:
+            action = "Refreshing" if refresh else "Fetching"
+            self._toast(f"{action} {provider} voices...")
 
         def fetch_task() -> ApiResult:
             if pending_secret_key and pending_secret_val:
                 sec_res = self.client.put_secrets({pending_secret_key: pending_secret_val})
                 if sec_res.ok:
                     self._secrets_configured[pending_secret_key] = True
-            return self.client.list_tts_voices(provider, base_url)
+            if pending_piper_patch:
+                self.client.patch_config(pending_piper_patch)
+            return self.client.list_tts_voices(provider, base_url, refresh=refresh)
 
         def on_done(res: ApiResult) -> None:
             if pending_secret_key and self._secrets_configured.get(pending_secret_key):
@@ -1561,8 +1857,13 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
                 self._loading = False
             self._set_offline(res.offline)
             if not res.ok:
-                self._toast(f"Voice fetch failed: {res.error}")
+                if not quiet:
+                    self._toast(f"Voice fetch failed: {res.error}")
                 return
+            if provider == "piper":
+                self._apply_piper_voices_payload(res.data, quiet=quiet)
+                return
+
             raw = res.data
             if isinstance(raw, dict):
                 raw = raw.get("voices", [])
@@ -1610,6 +1911,352 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
                 self._toast(f"Loaded {len(pairs)} ElevenLabs voice(s)")
 
         self._run_async(fetch_task, on_done)
+
+    def _apply_piper_voices_payload(self, data: Any, *, quiet: bool = False) -> None:
+        payload = data if isinstance(data, dict) else {"voices": data}
+        voices_raw = payload.get("voices", []) if isinstance(payload, dict) else []
+        langs_raw = payload.get("languages", []) if isinstance(payload, dict) else []
+        backend = str(payload.get("backend") or "").strip() if isinstance(payload, dict) else ""
+        models_dir = str(payload.get("models_dir") or "").strip() if isinstance(payload, dict) else ""
+
+        normalized: list[dict[str, Any]] = []
+        if isinstance(voices_raw, list):
+            for item in voices_raw:
+                parsed = _normalize_piper_voice(item)
+                if parsed is not None:
+                    normalized.append(parsed)
+        self._piper_all_voices = normalized
+
+        meta_parts: list[str] = []
+        if backend:
+            meta_parts.append(f"Backend: {backend}")
+        if models_dir:
+            meta_parts.append(f"Models dir: {models_dir}")
+        self.piper_voice_combo.set_subtitle(
+            " · ".join(meta_parts)
+            if meta_parts
+            else "Select a voice model (search by name, language, or quality)"
+        )
+
+        lang_map: dict[str, str] = {}
+        if isinstance(langs_raw, list):
+            for item in langs_raw:
+                if isinstance(item, dict):
+                    code = str(item.get("code") or item.get("id") or "").strip()
+                    label = str(item.get("label") or item.get("name") or "").strip()
+                elif isinstance(item, (tuple, list)) and len(item) >= 2:
+                    code = str(item[0]).strip()
+                    label = str(item[1]).strip()
+                elif isinstance(item, str):
+                    code = item.strip()
+                    label = ""
+                else:
+                    continue
+                if code:
+                    lang_map.setdefault(code, label or code)
+        for voice in normalized:
+            code = str(voice.get("lang_code") or "").strip()
+            if code and code not in lang_map:
+                lang_map[code] = str(voice.get("lang_label") or code)
+
+        prev_lang = self._selected_piper_language_code()
+        languages: list[tuple[str, str]] = [("", "All Languages")]
+        for code, label in sorted(lang_map.items(), key=lambda kv: (kv[1].lower(), kv[0].lower())):
+            display = f"{label} · {code}" if label and label != code else code
+            languages.append((code, display))
+        self._piper_languages = languages
+
+        selected_lang_idx = next(
+            (i for i, (code, _) in enumerate(languages) if code == prev_lang),
+            0,
+        )
+        was_loading = self._loading
+        self._loading = True
+        try:
+            self.piper_lang_combo.set_model(
+                Gtk.StringList.new([lbl for _, lbl in languages])
+            )
+            self.piper_lang_combo.set_selected(selected_lang_idx)
+        finally:
+            self._loading = was_loading
+
+        self._apply_piper_language_filter()
+        if not quiet:
+            self._toast(f"Loaded {len(normalized)} Piper voice(s)")
+
+    def _selected_piper_language_code(self) -> str:
+        idx = self.piper_lang_combo.get_selected()
+        if 0 <= idx < len(self._piper_languages):
+            return self._piper_languages[idx][0]
+        return ""
+
+    def _selected_piper_voice(self) -> dict[str, Any] | None:
+        idx = self.piper_voice_combo.get_selected()
+        if 0 <= idx < len(self._piper_filtered_voices):
+            return self._piper_filtered_voices[idx]
+        return None
+
+    def _apply_piper_language_filter(self) -> None:
+        lang_code = self._selected_piper_language_code()
+        if lang_code:
+            filtered = [v for v in self._piper_all_voices if v.get("lang_code") == lang_code]
+        else:
+            filtered = list(self._piper_all_voices)
+        self._piper_filtered_voices = filtered
+
+        labels = [_format_piper_voice_label(v) for v in filtered] or [""]
+        current_model = self.piper_model_row.get_text().strip()
+        match_idx = next(
+            (i for i, v in enumerate(filtered) if v.get("id") == current_model),
+            0,
+        )
+        was_loading = self._loading
+        self._loading = True
+        try:
+            self.piper_voice_combo.set_model(Gtk.StringList.new(labels))
+            self.piper_voice_combo.set_selected(match_idx)
+        finally:
+            self._loading = was_loading
+        self._sync_piper_download_button()
+
+    def _sync_piper_download_button(self) -> None:
+        if self._piper_downloading:
+            return
+        voice = self._selected_piper_voice()
+        if voice is not None:
+            installed = bool(voice.get("installed"))
+            self.piper_download_btn.set_label("Installed" if installed else "Download")
+            self.piper_download_btn.set_sensitive(not installed)
+            return
+
+        entry_val = self.piper_model_row.get_text().strip()
+        matching = next(
+            (v for v in self._piper_all_voices if v.get("id") == entry_val),
+            None,
+        )
+        if matching is not None:
+            installed = bool(matching.get("installed"))
+            self.piper_download_btn.set_label("Installed" if installed else "Download")
+            self.piper_download_btn.set_sensitive(not installed)
+        else:
+            self.piper_download_btn.set_label("Download")
+            self.piper_download_btn.set_sensitive(False)
+
+    def _on_piper_lang_selected(self, *_: object) -> None:
+        if self._loading:
+            return
+        self._apply_piper_language_filter()
+
+    def _on_piper_voice_selected(self, *_: object) -> None:
+        if self._loading:
+            return
+        voice = self._selected_piper_voice()
+        if voice is None:
+            self._sync_piper_download_button()
+            return
+        vid = str(voice.get("id") or "").strip()
+        if not vid:
+            return
+        self._loading = True
+        self.piper_model_row.set_text(vid)
+        self._loading = False
+        self._sync_piper_download_button()
+        self._patch_fields({"piper_model": vid}, f"Piper voice: {vid}")
+
+    def _on_piper_model_applied(self) -> None:
+        val = self.piper_model_row.get_text().strip()
+        if not val:
+            self._toast("Piper model cannot be empty")
+            return
+        match_idx = next(
+            (i for i, v in enumerate(self._piper_filtered_voices) if v.get("id") == val),
+            None,
+        )
+        if match_idx is not None:
+            self._loading = True
+            self.piper_voice_combo.set_selected(match_idx)
+            self._loading = False
+        self._sync_piper_download_button()
+        self._patch_fields({"piper_model": val}, f"Saved Piper model: {val}")
+
+    def _on_piper_models_dir_applied(self) -> None:
+        if self._loading:
+            return
+        models_dir = self.piper_models_dir_row.get_text().strip()
+        patch = self._build_patch({"piper_models_dir": models_dir})
+
+        def save_task() -> ApiResult:
+            return self.client.patch_config(patch)
+
+        def on_done(res: ApiResult) -> None:
+            self._on_patch_done(res, "Saved Piper models directory")
+            if res.ok and not res.offline:
+                self._suppress_piper_refresh_toast = True
+                try:
+                    self._refresh_tts_voices("piper", refresh=False)
+                finally:
+                    self._suppress_piper_refresh_toast = False
+
+        self._run_async(save_task, on_done)
+
+    def _download_selected_piper_model(self) -> None:
+        voice = self._selected_piper_voice()
+        if voice is not None:
+            model_id = str(voice.get("id") or "").strip()
+        else:
+            entry_val = self.piper_model_row.get_text().strip()
+            model_id = (
+                entry_val
+                if entry_val and not entry_val.endswith(".onnx") and "/" not in entry_val
+                else ""
+            )
+        if not model_id:
+            self._toast("Select a Piper catalog voice to download")
+            return
+
+        self._piper_downloading = True
+        self.piper_download_btn.set_sensitive(False)
+        self.piper_download_btn.set_label("Downloading...")
+        self._toast(f"Downloading Piper voice {model_id}...")
+
+        def on_done(res: ApiResult) -> None:
+            self._piper_downloading = False
+            self._set_offline(res.offline)
+            if not res.ok:
+                self._sync_piper_download_button()
+                self._toast(f"Download failed: {res.error}")
+                return
+            for item in self._piper_all_voices:
+                if item.get("id") == model_id:
+                    item["installed"] = True
+            self._loading = True
+            self.piper_model_row.set_text(model_id)
+            self._loading = False
+            self._apply_piper_language_filter()
+            self._patch_fields({"piper_model": model_id})
+            self._toast(f"Downloaded Piper voice: {model_id}")
+            self._suppress_piper_refresh_toast = True
+            try:
+                self._refresh_tts_voices("piper", refresh=False)
+            finally:
+                self._suppress_piper_refresh_toast = False
+
+        self._run_async(lambda: self.client.download_piper_model(model_id), on_done)
+
+    def _sync_piper_preset_combo(
+        self, speed: float, pitch: float, noise_scale: float
+    ) -> None:
+        idx = _match_piper_preset_index(speed, pitch, noise_scale)
+        was_loading = self._loading
+        self._loading = True
+        try:
+            self.piper_preset_combo.set_selected(idx)
+        finally:
+            self._loading = was_loading
+
+    def _on_piper_preset_selected(self, *_: object) -> None:
+        if self._loading:
+            return
+        idx = self.piper_preset_combo.get_selected()
+        if not (0 <= idx < len(PIPER_VOICE_PRESETS)):
+            return
+        _, label, speed, pitch, noise = PIPER_VOICE_PRESETS[idx]
+        if speed is None or pitch is None or noise is None:
+            return
+        for key in ("piper_speed", "piper_pitch", "piper_noise_scale"):
+            timer_id = self._debounce_timers.pop(key, None)
+            if timer_id is not None:
+                GLib.source_remove(timer_id)
+        self._loading = True
+        try:
+            self.piper_speed_scale.set_value(speed)
+            self.piper_pitch_scale.set_value(pitch)
+            self.piper_noise_scale.set_value(noise)
+        finally:
+            self._loading = False
+        self._patch_fields(
+            {
+                "piper_speed": speed,
+                "piper_pitch": pitch,
+                "piper_noise_scale": noise,
+            },
+            f"Piper style: {label}",
+        )
+
+    def _on_piper_slider_changed(self, _scale: Gtk.Scale, field: str) -> None:
+        if self._loading:
+            return
+        speed = round(self.piper_speed_scale.get_value(), 2)
+        pitch = round(self.piper_pitch_scale.get_value(), 1)
+        noise = round(self.piper_noise_scale.get_value(), 3)
+        self._sync_piper_preset_combo(speed, pitch, noise)
+        values = {
+            "piper_speed": speed,
+            "piper_pitch": pitch,
+            "piper_noise_scale": noise,
+        }
+        val = values[field]
+        self._patch_debounced(field, lambda: {field: val})
+
+    def _test_piper_voice(self) -> None:
+        if self.tts_muted_row.get_active():
+            self._toast("Voice (TTS) is muted — unmute TTS to preview Piper voice")
+            return
+        if _combo_selected_text(self.tts_provider_row) != "piper":
+            self._toast("Select 'piper' as TTS Provider above to preview Piper voice")
+            return
+
+        for key in ("piper_speed", "piper_pitch", "piper_noise_scale"):
+            timer_id = self._debounce_timers.pop(key, None)
+            if timer_id is not None:
+                GLib.source_remove(timer_id)
+
+        speed = round(self.piper_speed_scale.get_value(), 2)
+        pitch = round(self.piper_pitch_scale.get_value(), 1)
+        noise = round(self.piper_noise_scale.get_value(), 3)
+        model_txt = self.piper_model_row.get_text().strip()
+        models_dir_txt = self.piper_models_dir_row.get_text().strip()
+
+        dirty: dict[str, Any] = {}
+        if speed != float(self._read_field("piper_speed", 1.0)):
+            dirty["piper_speed"] = speed
+        if pitch != float(self._read_field("piper_pitch", 0.0)):
+            dirty["piper_pitch"] = pitch
+        if noise != float(self._read_field("piper_noise_scale", 0.667)):
+            dirty["piper_noise_scale"] = noise
+        if model_txt and model_txt != str(self._read_field("piper_model", "")):
+            dirty["piper_model"] = model_txt
+        if models_dir_txt != str(self._read_field("piper_models_dir", "")):
+            dirty["piper_models_dir"] = models_dir_txt
+        pending_patch = self._build_patch(dirty) if dirty else None
+
+        voice = self._selected_piper_voice()
+        if voice is not None and voice.get("id") == model_txt:
+            lang_code = str(voice.get("lang_code") or "")
+        else:
+            lang_code = self._selected_piper_language_code() or model_txt
+        sample_text = _piper_sample_text(lang_code)
+
+        self.piper_test_btn.set_sensitive(False)
+        self.piper_test_btn.set_label("Playing...")
+
+        def preview_task() -> ApiResult:
+            if pending_patch:
+                patch_res = self.client.patch_config(pending_patch)
+                if not patch_res.ok:
+                    return patch_res
+            return self.client.replay_tts(sample_text)
+
+        def on_done(res: ApiResult) -> None:
+            self.piper_test_btn.set_sensitive(True)
+            self.piper_test_btn.set_label("Test Voice")
+            self._set_offline(res.offline)
+            if not res.ok:
+                self._toast(f"Preview failed: {res.error}")
+            else:
+                self._toast("Playing Piper voice preview")
+
+        self._run_async(preview_task, on_done)
 
     def _on_kokoro_combo_selected(self, *_: object) -> None:
         if self._loading:
@@ -1888,6 +2535,12 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             {str(k): bool(v) for k, v in secrets_meta.items()} if isinstance(secrets_meta, dict) else {}
         )
         self._populate_fields()
+        if not res.offline:
+            self._suppress_piper_refresh_toast = True
+            try:
+                self._refresh_tts_voices("piper", refresh=False)
+            finally:
+                self._suppress_piper_refresh_toast = False
 
     def _on_mcp_loaded(self, res: ApiResult) -> None:
         self._set_offline(res.offline)
@@ -1947,6 +2600,25 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             # Voice Output
             self.tts_muted_row.set_active(bool(self._read_field("tts_muted", False)))
             _set_combo_text(self.tts_provider_row, str(self._read_field("tts_provider", "kokoro")))
+            piper_model = str(self._read_field("piper_model", "en_US-lessac-medium"))
+            self.piper_model_row.set_text(piper_model)
+            if self._piper_all_voices:
+                self._apply_piper_language_filter()
+            elif piper_model:
+                self.piper_voice_combo.set_model(Gtk.StringList.new([piper_model]))
+                self.piper_voice_combo.set_selected(0)
+            else:
+                self.piper_voice_combo.set_model(Gtk.StringList.new([""]))
+                self.piper_voice_combo.set_selected(0)
+            self.piper_models_dir_row.set_text(str(self._read_field("piper_models_dir", "")))
+            p_speed = float(self._read_field("piper_speed", 1.0))
+            p_pitch = float(self._read_field("piper_pitch", 0.0))
+            p_noise = float(self._read_field("piper_noise_scale", 0.667))
+            self.piper_speed_scale.set_value(p_speed)
+            self.piper_pitch_scale.set_value(p_pitch)
+            self.piper_noise_scale.set_value(p_noise)
+            self._sync_piper_preset_combo(p_speed, p_pitch, p_noise)
+            self._sync_piper_download_button()
             self.kokoro_url_row.set_text(str(self._read_field("kokoro_base_url", "http://localhost:8880/v1")))
             _set_secret_row_state(
                 self.kokoro_api_key_row,

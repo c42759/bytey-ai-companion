@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -40,6 +41,45 @@ _VISUAL_COLOR_DEFAULTS: dict[str, str] = {
     "border_color": DEFAULT_BORDER_COLOR,
 }
 VALID_POSITION_MODES: tuple[str, ...] = ("fixed", "floating", "notch")
+VALID_TTS_PROVIDERS: tuple[str, ...] = ("kokoro", "piper", "elevenlabs", "disabled")
+PIPER_SPEED_RANGE: tuple[float, float] = (0.4, 2.5)
+PIPER_PITCH_RANGE: tuple[float, float] = (-12.0, 12.0)
+PIPER_NOISE_SCALE_RANGE: tuple[float, float] = (0.0, 1.5)
+PIPER_VOICE_PRESETS: dict[str, dict[str, Any]] = {
+    "normal": {"label": "Normal", "speed": 1.0, "pitch": 0.0, "noise_scale": 0.667},
+    "chipmunk": {"label": "Chipmunk", "speed": 1.25, "pitch": 8.0, "noise_scale": 0.8},
+    "helium": {"label": "Helium Squeak", "speed": 1.15, "pitch": 10.5, "noise_scale": 0.9},
+    "deep_monster": {"label": "Deep Monster", "speed": 0.82, "pitch": -8.0, "noise_scale": 0.667},
+    "sleepy_giant": {"label": "Sleepy Giant", "speed": 0.68, "pitch": -5.5, "noise_scale": 0.55},
+    "hyper_gremlin": {"label": "Hyper Gremlin", "speed": 1.55, "pitch": 5.5, "noise_scale": 1.0},
+    "flat_robot": {"label": "Flat Robot", "speed": 1.05, "pitch": -2.5, "noise_scale": 0.1},
+}
+_PIPER_FLOAT_SPECS: dict[str, tuple[float, tuple[float, float]]] = {
+    "piper_speed": (1.0, PIPER_SPEED_RANGE),
+    "piper_pitch": (0.0, PIPER_PITCH_RANGE),
+    "piper_noise_scale": (0.667, PIPER_NOISE_SCALE_RANGE),
+}
+
+
+def _coerce_clamped_float(
+    value: Any, default: float, bounds: tuple[float, float]
+) -> float:
+    """Coerce value to a finite float clamped to [lo, hi], or fall back to default."""
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return default
+        value = cleaned
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(num):
+        return default
+    lo, hi = bounds
+    return max(lo, min(hi, num))
 
 
 def _normalize_hex_color(value: Any, default: str) -> str:
@@ -148,8 +188,64 @@ class VoiceOutConfig(BaseModel):
     kokoro_base_url: str = "http://localhost:8880/v1"
     kokoro_voice: str = "af_heart"
     kokoro_speed: float = 1.0
+    piper_model: str = "en_US-lessac-medium"
+    piper_models_dir: str = ""
+    piper_speed: float = 1.0
+    piper_pitch: float = 0.0
+    piper_noise_scale: float = 0.667
+    piper_speaker_id: int | None = None
     elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
     elevenlabs_model_id: str = "eleven_flash_v2_5"
+
+    @field_validator("tts_provider", mode="before")
+    @classmethod
+    def _validate_tts_provider(cls, value: Any) -> str:
+        """Normalize tts_provider to stripped lowercase string, defaulting empty/None to 'kokoro'."""
+        if value is None or isinstance(value, bool):
+            return "kokoro"
+        cleaned = str(value).strip().lower()
+        return cleaned or "kokoro"
+
+    @field_validator("piper_model", mode="before")
+    @classmethod
+    def _validate_piper_model(cls, value: Any) -> str:
+        """Strip piper_model and fall back to default model ID when empty or None."""
+        if value is None or isinstance(value, bool):
+            return "en_US-lessac-medium"
+        cleaned = str(value).strip()
+        return cleaned or "en_US-lessac-medium"
+
+    @field_validator("piper_models_dir", mode="before")
+    @classmethod
+    def _validate_piper_models_dir(cls, value: Any) -> str:
+        """Normalize piper_models_dir to a stripped string."""
+        if value is None or isinstance(value, bool):
+            return ""
+        return str(value).strip()
+
+    @field_validator("piper_speed", "piper_pitch", "piper_noise_scale", mode="before")
+    @classmethod
+    def _validate_piper_float(cls, value: Any, info: ValidationInfo) -> float:
+        """Coerce and clamp Piper float parameters to their supported ranges."""
+        field_name = info.field_name or "piper_speed"
+        default, bounds = _PIPER_FLOAT_SPECS[field_name]
+        return _coerce_clamped_float(value, default, bounds)
+
+    @field_validator("piper_speaker_id", mode="before")
+    @classmethod
+    def _validate_piper_speaker_id(cls, value: Any) -> int | None:
+        """Normalize piper_speaker_id to None or a non-negative integer."""
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            value = cleaned
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return None
 
 
 class VisualsConfig(BaseModel):
