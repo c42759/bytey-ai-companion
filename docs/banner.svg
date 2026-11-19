@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320">
+  <defs>
+    <clipPath id="card-clip">
+      <rect x="12" y="12" width="1176" height="296" rx="24" ry="24"/>
+    </clipPath>
+    <clipPath id="pill-outer-clip">
+      <rect x="86" y="76" width="280" height="168" rx="84" ry="84"/>
+    </clipPath>
+    <clipPath id="pill-inner-clip">
+      <rect x="98" y="88" width="256" height="144" rx="72" ry="72"/>
+    </clipPath>
+
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#090B10"/>
+      <stop offset="55%" stop-color="#0E121D"/>
+      <stop offset="100%" stop-color="#131624"/>
+    </linearGradient>
+
+    <radialGradient id="ambient-cyan" cx="220" cy="160" r="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22D3EE" stop-opacity="0.22"/>
+      <stop offset="55%" stop-color="#6366F1" stop-opacity="0.09"/>
+      <stop offset="100%" stop-color="#090B10" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="ambient-magenta" cx="1060" cy="70" r="290" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A855F7" stop-opacity="0.16"/>
+      <stop offset="55%" stop-color="#EC4899" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#090B10" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="ambient-amber" cx="980" cy="290" r="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FB923C" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#090B10" stop-opacity="0"/>
+    </radialGradient>
+
+    <pattern id="dot-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="12" cy="12" r="1" fill="#94A3B8" opacity="0.12"/>
+    </pattern>
+
+    <linearGradient id="bevel-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2A2E3B"/>
+      <stop offset="100%" stop-color="#06070B"/>
+    </linearGradient>
+
+    <linearGradient id="rainbow-base" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="50%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#FB923C"/>
+    </linearGradient>
+    <radialGradient id="pool-cyan" cx="104" cy="160" r="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22D3EE" stop-opacity="1"/>
+      <stop offset="50%" stop-color="#38BDF8" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pool-indigo" cx="176" cy="76" r="105" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366F1" stop-opacity="1"/>
+      <stop offset="50%" stop-color="#8B5CF6" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pool-magenta" cx="276" cy="76" r="105" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#EC4899" stop-opacity="1"/>
+      <stop offset="50%" stop-color="#F43F5E" stop-opacity="0.82"/>
+      <stop offset="100%" stop-color="#F43F5E" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pool-orange" cx="350" cy="160" r="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FB923C" stop-opacity="1"/>
+      <stop offset="50%" stop-color="#F59E0B" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#F59E0B" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pool-yellow" cx="276" cy="244" r="105" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FACC15" stop-opacity="1"/>
+      <stop offset="50%" stop-color="#84CC16" stop-opacity="0.82"/>
+      <stop offset="100%" stop-color="#84CC16" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="pool-emerald" cx="174" cy="244" r="105" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22C55E" stop-opacity="1"/>
+      <stop offset="50%" stop-color="#14B8A6" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#14B8A6" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="rim-highlight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.38"/>
+      <stop offset="45%" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.18"/>
+    </linearGradient>
+
+    <linearGradient id="obsidian-face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#151720"/>
+      <stop offset="35%" stop-color="#0A0B0F"/>
+      <stop offset="100%" stop-color="#050608"/>
+    </linearGradient>
+
+    <linearGradient id="glass-sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.11"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="eye-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E5F0FF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Card background -->
+  <g clip-path="url(#card-clip)">
+    <rect x="12" y="12" width="1176" height="296" fill="url(#bg-grad)"/>
+    <rect x="12" y="12" width="1176" height="296" fill="url(#dot-grid)"/>
+    <rect x="12" y="12" width="1176" height="296" fill="url(#ambient-cyan)"/>
+    <rect x="12" y="12" width="1176" height="296" fill="url(#ambient-magenta)"/>
+    <rect x="12" y="12" width="1176" height="296" fill="url(#ambient-amber)"/>
+  </g>
+  <rect x="12.5" y="12.5" width="1175" height="295" rx="23.5" ry="23.5"
+        fill="none" stroke="#262B3D" stroke-width="1"/>
+
+  <!-- Ground shadow under Dynamic Island -->
+  <ellipse cx="226" cy="254" rx="105" ry="8" fill="#000000" opacity="0.35"/>
+
+  <!-- Dynamic Island 3D bottom bevel -->
+  <rect x="86" y="84" width="280" height="168" rx="84" ry="84" fill="url(#bevel-grad)"/>
+
+  <!-- 360-degree rainbow gradient rim -->
+  <g clip-path="url(#pill-outer-clip)">
+    <rect x="86" y="76" width="280" height="168" fill="url(#rainbow-base)"/>
+    <rect x="86" y="76" width="280" height="168" fill="url(#pool-indigo)"/>
+    <rect x="86" y="76" width="280" height="168" fill="url(#pool-magenta)"/>
+    <rect x="86" y="76" width="280" height="168" fill="url(#pool-orange)"/>
+    <rect x="86" y="76" width="280" height="168" fill="url(#pool-yellow)"/>
+    <rect x="86" y="76" width="280" height="168" fill="url(#pool-emerald)"/>
+    <rect x="86" y="76" width="280" height="168" fill="url(#pool-cyan)"/>
+  </g>
+
+  <!-- Specular rim stroke -->
+  <rect x="87.2" y="77.2" width="277.6" height="165.6" rx="82.8" ry="82.8"
+        fill="none" stroke="url(#rim-highlight)" stroke-width="2"/>
+
+  <!-- Matte-obsidian interior -->
+  <rect x="98" y="88" width="256" height="144" rx="72" ry="72" fill="url(#obsidian-face)"/>
+
+  <!-- Top glass sheen -->
+  <g clip-path="url(#pill-inner-clip)">
+    <ellipse cx="226" cy="86" rx="132" ry="38" fill="url(#glass-sheen)"/>
+  </g>
+
+  <!-- Inner edge separator -->
+  <rect x="98.5" y="88.5" width="255" height="143" rx="71.5" ry="71.5"
+        fill="none" stroke="#000000" stroke-opacity="0.55" stroke-width="1.5"/>
+
+  <!-- Soft eye ambient glow -->
+  <rect x="163" y="130" width="42" height="60" rx="21" ry="21" fill="#BAE6FD" opacity="0.16"/>
+  <rect x="247" y="130" width="42" height="60" rx="21" ry="21" fill="#BAE6FD" opacity="0.16"/>
+
+  <!-- Expressive Grok-style Bytey eyes -->
+  <rect x="167" y="134" width="34" height="52" rx="17" ry="17" fill="url(#eye-fill)"/>
+  <rect x="251" y="134" width="34" height="52" rx="17" ry="17" fill="url(#eye-fill)"/>
+
+  <!-- Typography & feature pills -->
+  <text x="432" y="134"
+        font-family="Inter, Cantarell, 'DejaVu Sans', sans-serif"
+        font-size="54" font-weight="700" letter-spacing="-0.8" fill="#F8FAFC">Bytey AI Companion</text>
+
+  <text x="434" y="176"
+        font-family="Inter, Cantarell, 'DejaVu Sans', sans-serif"
+        font-size="22" font-weight="400" fill="#94A3B8">Dynamic Island Desktop AI Assistant for GNOME Shell</text>
+
+  <!-- Feature pill 1 -->
+  <rect x="432" y="206" width="150" height="34" rx="17" ry="17"
+        fill="#161B2B" stroke="#38BDF8" stroke-opacity="0.45" stroke-width="1.2"/>
+  <text x="507" y="228" text-anchor="middle"
+        font-family="Inter, Cantarell, 'DejaVu Sans', sans-serif"
+        font-size="14" font-weight="600" fill="#E0F2FE">GNOME 48–50</text>
+
+  <!-- Feature pill 2 -->
+  <rect x="596" y="206" width="194" height="34" rx="17" ry="17"
+        fill="#161B2B" stroke="#A855F7" stroke-opacity="0.45" stroke-width="1.2"/>
+  <text x="693" y="228" text-anchor="middle"
+        font-family="Inter, Cantarell, 'DejaVu Sans', sans-serif"
+        font-size="14" font-weight="600" fill="#F3E8FF">Wayland · PipeWire</text>
+
+  <!-- Feature pill 3 -->
+  <rect x="804" y="206" width="186" height="34" rx="17" ry="17"
+        fill="#161B2B" stroke="#FB923C" stroke-opacity="0.45" stroke-width="1.2"/>
+  <text x="897" y="228" text-anchor="middle"
+        font-family="Inter, Cantarell, 'DejaVu Sans', sans-serif"
+        font-size="14" font-weight="600" fill="#FFEDD5">MCP · Multi-LLM</text>
+</svg>

@@ -1,7 +1,7 @@
 # Bytey AI Companion
 
 <div align="center">
-  <img src="./gnome-extension/bytey-ai-companion@c42759.gitlab.com/icons/bytey-ai-companion.svg" alt="Bytey AI Companion" width="112" height="112" />
+  <img src="./docs/banner.svg" alt="Bytey AI Companion Banner" width="100%" />
   <p><strong>Always-on-top Dynamic Island desktop AI assistant for GNOME Shell 48–50 (Wayland / PipeWire)</strong></p>
 </div>
 
