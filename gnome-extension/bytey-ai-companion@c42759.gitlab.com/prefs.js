@@ -49,6 +49,27 @@ const PIPER_VOICE_PRESETS = [
     {id: 'custom', label: 'Custom', speed: null, pitch: null, noise_scale: null},
 ];
 const AI_PROVIDERS = ['ollama', 'gemini', 'openai', 'anthropic', 'custom'];
+const TEST_ANIMATION_STATES = [
+    'IDLE',
+    'LISTENING',
+    'THINKING',
+    'TOOL_CALLING',
+    'SPEAKING',
+    'MUTED',
+    'ERROR',
+];
+const TEST_ANIMATION_EMOTIONS = [
+    'neutral',
+    'happy',
+    'love',
+    'annoyed',
+    'sleepy',
+    'focus',
+    'astonished',
+    'curious',
+    'surprised',
+    'error',
+];
 const MCP_TRANSPORTS = ['stdio', 'http', 'sse'];
 const SECRET_MASK_PLACEHOLDER = '••••••••••••••••';
 const PROVIDER_SECRET_MAP = {
@@ -746,6 +767,38 @@ export default class ByteyPreferences extends ExtensionPreferences {
         drawerGroup.add(chatWidthRow);
         drawerGroup.add(chatHeightRow);
         visualsPage.add(drawerGroup);
+
+        const testAnimGroup = new Adw.PreferencesGroup({
+            title: 'Test Animations',
+            description: 'Preview eye emotions and island states live on the companion.',
+        });
+        const testStateRow = makeComboRow('Animation State', TEST_ANIMATION_STATES);
+        const testEmotionRow = makeComboRow('Emotion', TEST_ANIMATION_EMOTIONS);
+        const testAnimActionRow = new Adw.ActionRow({
+            title: 'Live Preview',
+            subtitle: 'Trigger the selected state and emotion on the island.',
+        });
+        const testAnimBtnBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 8,
+            valign: Gtk.Align.CENTER,
+        });
+        const resetAnimBtn = new Gtk.Button({
+            label: 'Reset',
+            valign: Gtk.Align.CENTER,
+        });
+        const previewAnimBtn = new Gtk.Button({
+            label: 'Preview',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['suggested-action'],
+        });
+        testAnimBtnBox.append(resetAnimBtn);
+        testAnimBtnBox.append(previewAnimBtn);
+        testAnimActionRow.add_suffix(testAnimBtnBox);
+        testAnimGroup.add(testStateRow);
+        testAnimGroup.add(testEmotionRow);
+        testAnimGroup.add(testAnimActionRow);
+        visualsPage.add(testAnimGroup);
 
         // 3. Voice & AI Page
         const voicePage = new Adw.PreferencesPage({
@@ -2418,6 +2471,26 @@ export default class ByteyPreferences extends ExtensionPreferences {
         chatHeightRow.connect('notify::value', () => onUserChange(() => {
             patchConfig({visuals: {chat_height: Math.round(chatHeightRow.get_value())}}, 'Saved chat height');
         }));
+
+        previewAnimBtn.connect('clicked', async () => {
+            const state = comboText(testStateRow) || 'IDLE';
+            const emotion = comboText(testEmotionRow) || 'neutral';
+            try {
+                await httpJson('POST', '/api/v1/visuals/preview', {state, emotion});
+                showToast(`Previewing ${state} (${emotion})`);
+            } catch (err) {
+                showToast(`Preview failed: ${err.message}`, true);
+            }
+        });
+
+        resetAnimBtn.connect('clicked', async () => {
+            try {
+                await httpJson('POST', '/api/v1/visuals/preview', {reset: true});
+                showToast('Reset animation to idle');
+            } catch (err) {
+                showToast(`Reset failed: ${err.message}`, true);
+            }
+        });
 
         posModeRow.connect('notify::selected', () => onUserChange(() => {
             syncPlacementSensitivity();

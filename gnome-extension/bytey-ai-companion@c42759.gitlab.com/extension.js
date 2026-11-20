@@ -125,7 +125,6 @@ export default class ByteyExtension extends Extension {
             onOpenPreferences: () => this.openPreferences(),
             onToggleMicMute: muted => this._patchConfig({voice_in: {mic_muted: muted}}),
             onToggleTtsMute: muted => this._patchConfig({voice_out: {tts_muted: muted}}),
-            onToggleFloating: floating => this._toggleFloatingMode(floating),
             onNewChat: () => this._handleNewChat(),
             onExit: () => this._handleExit(),
         });
@@ -340,20 +339,6 @@ export default class ByteyExtension extends Extension {
                 float_y: roundedY,
             },
         }).catch(() => {});
-    }
-
-    _toggleFloatingMode(floating) {
-        if (String(this._config?.visuals?.position_mode ?? 'fixed').toLowerCase().trim() === 'notch')
-            return;
-        const bounds = this._islandWidget?.getBounds() ?? {x: 500, y: 40};
-        const visualsPatch = {
-            position_mode: floating ? 'floating' : 'fixed',
-        };
-        if (floating) {
-            visualsPatch.float_x = Math.round(bounds.x);
-            visualsPatch.float_y = Math.round(bounds.y);
-        }
-        this._patchConfig({visuals: visualsPatch}).catch(() => {});
     }
 
     async _handleSendText(text) {

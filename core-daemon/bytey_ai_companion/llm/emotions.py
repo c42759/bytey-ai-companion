@@ -19,6 +19,10 @@ VALID_EMOTIONS: tuple[str, ...] = (
     "sleepy",
     "error",
     "neutral",
+    "annoyed",
+    "love",
+    "focus",
+    "astonished",
 )
 
 _DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).with_name("default_system_prompt.md")

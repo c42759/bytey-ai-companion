@@ -3938,5 +3938,98 @@ class TestSystemPromptAndConfigReplace(unittest.IsolatedAsyncioTestCase):
                 await daemon.stop()
 
 
+class TestExpandedEmotionsAndPreview(unittest.IsolatedAsyncioTestCase):
+    """Tests for expanded mood tags, idle/cadence rules, system prompt, and visuals preview API."""
+
+    def test_valid_emotions_and_parser_support_new_tags(self) -> None:
+        from bytey_ai_companion.llm.emotions import DEFAULT_SYSTEM_PROMPT
+
+        for tag in ("happy", "annoyed", "love", "sleepy", "focus", "astonished"):
+            self.assertIn(tag, VALID_EMOTIONS)
+            self.assertIn(f"[emotion:{tag}]", DEFAULT_SYSTEM_PROMPT)
+
+            seen: list[str] = []
+            parser = EmotionStreamParser(on_emotion=seen.append)
+            out = parser.feed(f"[emotion:{tag}] ") + parser.feed("Hello!") + parser.flush()
+            self.assertEqual(parser.emotion, tag)
+            self.assertEqual(seen, [tag])
+            self.assertEqual(out, "Hello!")
+
+    def test_idle_emotion_schedule_daytime_vs_nighttime(self) -> None:
+        from bytey_ai_companion.main import ByteyDaemon
+
+        # Under 60 minutes -> None
+        self.assertIsNone(ByteyDaemon.evaluate_idle_emotion(3599.0, 12))
+        self.assertIsNone(ByteyDaemon.evaluate_idle_emotion(1800.0, 22))
+
+        # 8:00 AM to 7:59 PM (>= 60 min) -> annoyed
+        self.assertEqual(ByteyDaemon.evaluate_idle_emotion(3600.0, 8), "annoyed")
+        self.assertEqual(ByteyDaemon.evaluate_idle_emotion(4000.0, 15), "annoyed")
+        self.assertEqual(ByteyDaemon.evaluate_idle_emotion(3600.0, 19), "annoyed")
+
+        # 8:00 PM to 7:59 AM (>= 60 min) -> sleepy
+        self.assertEqual(ByteyDaemon.evaluate_idle_emotion(3600.0, 20), "sleepy")
+        self.assertEqual(ByteyDaemon.evaluate_idle_emotion(3600.0, 23), "sleepy")
+        self.assertEqual(ByteyDaemon.evaluate_idle_emotion(3600.0, 0), "sleepy")
+        self.assertEqual(ByteyDaemon.evaluate_idle_emotion(3600.0, 7), "sleepy")
+
+    async def test_interaction_cadence_and_visuals_preview_endpoint(self) -> None:
+        from bytey_ai_companion.main import ByteyDaemon
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=tmp_path / "cfg",
+                data_dir=tmp_path / "data",
+                enable_voice_capture=False,
+            )
+            await daemon.start()
+            try:
+                # Rapid interactions within 5 minutes
+                daemon._record_interaction(1000.0)
+                daemon._record_interaction(1060.0)
+                daemon._record_interaction(1120.0)
+                _, count = daemon._record_interaction(1180.0)
+                self.assertEqual(count, 4)
+
+                # Old interactions pruned after 5 minutes
+                _, pruned_count = daemon._record_interaction(1600.0)
+                self.assertEqual(pruned_count, 1)
+
+                base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+                async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
+                    r_ok = await client.post(
+                        "/api/v1/visuals/preview",
+                        json={"state": "THINKING", "emotion": "astonished"},
+                    )
+                    self.assertEqual(r_ok.status_code, 200)
+                    self.assertEqual(r_ok.json()["state"], "THINKING")
+                    self.assertEqual(r_ok.json()["emotion"], "astonished")
+
+                    r_love = await client.post(
+                        "/api/v1/visuals/preview",
+                        json={"state": "IDLE", "emotion": "love"},
+                    )
+                    self.assertEqual(r_love.status_code, 200)
+                    self.assertEqual(r_love.json()["emotion"], "love")
+
+                    r_bad = await client.post(
+                        "/api/v1/visuals/preview",
+                        json={"state": "IDLE", "emotion": "not_a_mood"},
+                    )
+                    self.assertEqual(r_bad.status_code, 400)
+
+                    r_reset = await client.post(
+                        "/api/v1/visuals/preview",
+                        json={"reset": True},
+                    )
+                    self.assertEqual(r_reset.status_code, 200)
+                    self.assertEqual(r_reset.json()["emotion"], "neutral")
+            finally:
+                await daemon.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

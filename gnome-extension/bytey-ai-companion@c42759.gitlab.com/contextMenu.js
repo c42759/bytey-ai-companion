@@ -14,7 +14,6 @@ export class IslandContextMenu {
      * @param {() => void} [callbacks.onOpenPreferences]
      * @param {(muted: boolean) => void} [callbacks.onToggleMicMute]
      * @param {(muted: boolean) => void} [callbacks.onToggleTtsMute]
-     * @param {(floating: boolean) => void} [callbacks.onToggleFloating]
      * @param {() => void} [callbacks.onNewChat]
      * @param {() => void} [callbacks.onExit]
      */
@@ -71,13 +70,6 @@ export class IslandContextMenu {
         });
         this._menu.addMenuItem(this._ttsMuteItem);
 
-        this._floatingItem = new PopupMenu.PopupSwitchMenuItem('Floating Position', false);
-        this._connect(this._floatingItem, 'toggled', (_item, state) => {
-            if (!this._syncing)
-                this._callbacks?.onToggleFloating?.(Boolean(state));
-        });
-        this._menu.addMenuItem(this._floatingItem);
-
         this._menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         const newChatItem = new PopupMenu.PopupMenuItem('New Chat Session');
@@ -107,16 +99,11 @@ export class IslandContextMenu {
 
         const micMuted = Boolean(config.voice_in?.mic_muted ?? config.voice_input?.mic_muted ?? false);
         const ttsMuted = Boolean(config.voice_out?.tts_muted ?? config.voice_output?.tts_muted ?? false);
-        const mode = String(config.visuals?.position_mode ?? 'fixed').toLowerCase().trim();
-        const isNotch = mode === 'notch';
-        const isFloating = mode === 'floating';
 
         this._syncing = true;
         try {
             this._micMuteItem.setToggleState(micMuted);
             this._ttsMuteItem.setToggleState(ttsMuted);
-            this._floatingItem.setToggleState(isFloating);
-            this._floatingItem.setSensitive(!isNotch);
         } finally {
             this._syncing = false;
         }

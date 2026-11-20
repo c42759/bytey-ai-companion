@@ -22,6 +22,10 @@ const VALID_EMOTIONS = new Set([
     'surprised',
     'sleepy',
     'error',
+    'annoyed',
+    'love',
+    'focus',
+    'astonished',
 ]);
 
 const VALID_ANIM_MODES = new Set(['full', 'state_only', 'disabled']);
@@ -465,6 +469,11 @@ export class EyeRenderer {
         if (this._state === 'LISTENING' || this._state === 'THINKING' ||
             this._state === 'TOOL_CALLING' || this._state === 'SPEAKING')
             return true;
+        if (this._state !== 'MUTED' && this._state !== 'ERROR' &&
+            (this._emotion === 'love' || this._emotion === 'focus' ||
+             this._emotion === 'astonished' || this._emotion === 'annoyed' ||
+             this._emotion === 'happy' || this._emotion === 'sleepy'))
+            return true;
         if (this._state === 'IDLE' && this._cursorTracking && this._needsGazeEase())
             return true;
         return false;
@@ -678,30 +687,137 @@ export class EyeRenderer {
             leftTilt = 0.24;
             rightTilt = -0.24;
         } else if (state !== 'MUTED' && state !== 'ERROR') {
+            const faceCy = height * 0.42;
+            const mouthX = cx + offsetX * 0.7;
+            const mouthY = height * 0.74 + offsetY * 0.5;
+            const blushY = faceCy + height * 0.18 + offsetY * 0.7;
+            const blushSpread = sep + baseW * 0.78;
+
             if (emotion === 'happy' && !this._blinking) {
+                const bounceY = isFull ? Math.sin(this._phase * 6.0) * (height * 0.04) : 0;
                 this._drawHappyArcs(
                     cr,
                     cx - sep + offsetX,
-                    cy + offsetY,
+                    faceCy + offsetY + bounceY,
                     cx + sep + offsetX,
-                    cy + offsetY,
-                    baseW * 0.72,
+                    faceCy + offsetY + bounceY,
+                    baseW * 0.7,
                     color,
                     alpha
                 );
+                this._drawBlushCheeks(cr, cx + offsetX, blushY + bounceY * 0.6, blushSpread, baseW * 0.52, alpha);
+                this._drawMouth(cr, mouthX, mouthY + bounceY * 0.6, 'open_smile', baseW * 0.62, color, alpha);
+                if (isFull) {
+                    const s1 = 0.4 + 0.6 * Math.abs(Math.sin(this._phase * 3.4));
+                    const s2 = 0.4 + 0.6 * Math.abs(Math.cos(this._phase * 2.7));
+                    this._drawSparkle(cr, cx - sep - baseW * 1.15, faceCy - height * 0.16, 2.6 * s1, color, alpha * s1);
+                    this._drawSparkle(cr, cx + sep + baseW * 1.15, faceCy - height * 0.2, 2.9 * s2, color, alpha * s2);
+                }
+                return;
+            }
+            if (emotion === 'love' && !this._blinking) {
+                const beat = isFull ? (1.0 + 0.12 * Math.max(0, Math.sin(this._phase * 5.2))) : 1.05;
+                this._drawHeartEyes(
+                    cr,
+                    cx - sep + offsetX,
+                    faceCy + offsetY,
+                    cx + sep + offsetX,
+                    faceCy + offsetY,
+                    Math.min(baseW, baseH) * 0.54 * beat,
+                    color,
+                    alpha
+                );
+                this._drawBlushCheeks(cr, cx + offsetX, blushY, blushSpread, baseW * 0.52, alpha);
+                this._drawMouth(cr, mouthX, mouthY, 'smile', baseW * 0.56, color, alpha);
+                if (isFull) {
+                    const t = (this._phase * 0.7) % 1.0;
+                    const floatY = (faceCy - height * 0.12) - t * (height * 0.28);
+                    const floatAlpha = alpha * Math.sin(t * Math.PI);
+                    this._drawMiniHeart(cr, cx + sep + baseW * 1.05, floatY, 2.6, floatAlpha);
+                }
+                return;
+            }
+            if (emotion === 'astonished' && !this._blinking) {
+                const tremorX = isFull ? Math.sin(this._phase * 22.0) * 1.0 : 0;
+                const tremorY = isFull ? Math.cos(this._phase * 19.0) * 0.7 : 0;
+                const pulse = isFull ? (1.0 + 0.05 * Math.sin(this._phase * 10.0)) : 1.0;
+                this._drawAstonishedEyes(
+                    cr,
+                    cx - sep + offsetX + tremorX,
+                    faceCy + offsetY + tremorY,
+                    cx + sep + offsetX + tremorX,
+                    faceCy + offsetY + tremorY,
+                    baseW * 0.62 * pulse,
+                    baseH * 0.68 * pulse,
+                    color,
+                    alpha
+                );
+                this._drawMouth(cr, mouthX + tremorX * 0.5, mouthY + tremorY * 0.5, 'o', baseW * 0.34, color, alpha);
                 return;
             }
             if (emotion === 'surprised' && !this._blinking) {
                 this._drawSurprisedRings(
                     cr,
                     cx - sep + offsetX,
-                    cy + offsetY,
+                    faceCy + offsetY,
                     cx + sep + offsetX,
-                    cy + offsetY,
-                    Math.min(baseW, baseH) * 0.68,
+                    faceCy + offsetY,
+                    Math.min(baseW, baseH) * 0.62,
                     color,
                     alpha
                 );
+                this._drawMouth(cr, mouthX, mouthY, 'o', baseW * 0.3, color, alpha);
+                return;
+            }
+            if (emotion === 'focus') {
+                const scanX = isFull ? Math.sin(this._phase * 3.8) * (maxTravelX * 0.22) : 0;
+                this._drawHalfMoonEye(
+                    cr,
+                    cx - sep + offsetX + scanX,
+                    faceCy + offsetY,
+                    baseW * 1.05,
+                    baseH * 0.56,
+                    0,
+                    color,
+                    alpha
+                );
+                this._drawHalfMoonEye(
+                    cr,
+                    cx + sep + offsetX + scanX,
+                    faceCy + offsetY,
+                    baseW * 1.05,
+                    baseH * 0.56,
+                    0,
+                    color,
+                    alpha
+                );
+                this._drawMouth(cr, mouthX + scanX * 0.5, mouthY, 'flat', baseW * 0.48, color, alpha);
+                return;
+            }
+            if (emotion === 'annoyed') {
+                const glanceX = isFull ? Math.sin(this._phase * 1.8) * (maxTravelX * 0.35) : 0;
+                const annoyedColor = [1.0, 0.72, 0.38];
+                this._drawHalfMoonEye(
+                    cr,
+                    cx - sep + offsetX + glanceX,
+                    faceCy + offsetY,
+                    baseW * 1.06,
+                    baseH * 0.5,
+                    0.18,
+                    annoyedColor,
+                    alpha
+                );
+                this._drawHalfMoonEye(
+                    cr,
+                    cx + sep + offsetX + glanceX,
+                    faceCy + offsetY,
+                    baseW * 1.06,
+                    baseH * 0.5,
+                    -0.18,
+                    annoyedColor,
+                    alpha
+                );
+                this._drawMouth(cr, mouthX + glanceX * 0.4, mouthY, 'flat', baseW * 0.5, annoyedColor, alpha);
                 return;
             }
             if (emotion === 'curious') {
@@ -715,11 +831,33 @@ export class EyeRenderer {
                 rightDy += height * 0.04;
                 rightTilt += 0.07;
             } else if (emotion === 'sleepy') {
-                alpha = Math.min(alpha, 0.72 * this._eyeColor[3]);
-                leftScaleY *= 0.42;
-                rightScaleY *= 0.42;
-                leftDy += height * 0.07;
-                rightDy += height * 0.07;
+                const bob = isFull ? Math.sin(this._phase * 1.6) * (height * 0.03) : 0;
+                const sleepyAlpha = Math.min(alpha, 0.78 * this._eyeColor[3]);
+                this._drawSleepyV(
+                    cr,
+                    cx - sep + offsetX,
+                    faceCy + offsetY + bob,
+                    baseW * 0.85,
+                    color,
+                    sleepyAlpha
+                );
+                this._drawSleepyV(
+                    cr,
+                    cx + sep + offsetX,
+                    faceCy + offsetY + bob,
+                    baseW * 0.85,
+                    color,
+                    sleepyAlpha
+                );
+                this._drawMouth(cr, mouthX, mouthY + bob * 0.6, 'dot', baseW * 0.22, color, sleepyAlpha);
+                if (isFull) {
+                    const t = (this._phase * 0.55) % 1.0;
+                    const zX = cx + sep + baseW * 0.95 + t * 5.0;
+                    const zY = (faceCy - height * 0.08) - t * (height * 0.26);
+                    const zAlpha = sleepyAlpha * Math.sin(t * Math.PI);
+                    this._drawFloatingZ(cr, zX, zY, 4.5 + t * 1.5, color, zAlpha);
+                }
+                return;
             }
         }
 
@@ -808,6 +946,168 @@ export class EyeRenderer {
             cr.arc(ex, ey, radius, 0, 2 * Math.PI);
             cr.stroke();
         }
+    }
+
+    _drawHeartEyes(cr, lx, ly, rx, ry, size, color, alpha) {
+        const [r, g, b] = color;
+        for (const [ex, ey] of [[lx, ly], [rx, ry]]) {
+            const halo = new Cairo.RadialGradient(ex, ey, size * 0.25, ex, ey, size * 1.5);
+            halo.addColorStopRGBA(0, 1.0, 0.36, 0.56, 0.32 * alpha);
+            halo.addColorStopRGBA(1, 1.0, 0.36, 0.56, 0.0);
+            cr.setSource(halo);
+            cr.arc(ex, ey, size * 1.5, 0, 2 * Math.PI);
+            cr.fill();
+
+            cr.save();
+            cr.translate(ex, ey - size * 0.12);
+            cr.setSourceRGBA(r, g, b, alpha);
+            cr.newSubPath();
+            cr.moveTo(0, size * 0.72);
+            cr.curveTo(-size * 1.15, size * 0.05, -size * 0.95, -size * 0.85, 0, -size * 0.25);
+            cr.curveTo(size * 0.95, -size * 0.85, size * 1.15, size * 0.05, 0, size * 0.72);
+            cr.closePath();
+            cr.fill();
+            cr.restore();
+        }
+    }
+
+    _drawAstonishedEyes(cr, lx, ly, rx, ry, rxRadius, ryRadius, color, alpha) {
+        const [hr, hg, hb] = this._eyeColor;
+        const specs = [
+            [lx, ly, rxRadius * 1.18, ryRadius * 1.18],
+            [rx, ry, rxRadius * 0.96, ryRadius * 0.96],
+        ];
+        for (const [ex, ey, ew, eh] of specs) {
+            const haloR = Math.max(ew, eh) * 1.5;
+            const halo = new Cairo.RadialGradient(ex, ey, ew * 0.3, ex, ey, haloR);
+            halo.addColorStopRGBA(0, hr, hg, hb, 0.35 * alpha);
+            halo.addColorStopRGBA(1, hr, hg, hb, 0.0);
+            cr.setSource(halo);
+            cr.arc(ex, ey, haloR, 0, 2 * Math.PI);
+            cr.fill();
+
+            cr.setSourceRGBA(color[0], color[1], color[2], alpha);
+            this._fillCapsule(cr, ex, ey, ew * 1.65, eh * 1.65, 0.5);
+        }
+    }
+
+    _drawHalfMoonEye(cr, x, y, w, h, tiltRad, color, alpha) {
+        cr.save();
+        cr.translate(x, y);
+        if (tiltRad !== 0)
+            cr.rotate(tiltRad);
+        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
+        const hw = w * 0.5;
+        cr.newSubPath();
+        cr.moveTo(-hw, -h * 0.3);
+        cr.lineTo(hw, -h * 0.3);
+        cr.curveTo(hw, h * 0.65, -hw, h * 0.65, -hw, -h * 0.3);
+        cr.closePath();
+        cr.fill();
+        cr.restore();
+    }
+
+    _drawSleepyV(cr, x, y, w, color, alpha) {
+        cr.save();
+        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setLineWidth(Math.max(1.8, w * 0.22));
+        cr.newSubPath();
+        cr.arc(x, y - w * 0.2, w * 0.52, Math.PI * 0.18, Math.PI * 0.82);
+        cr.stroke();
+        cr.restore();
+    }
+
+    _drawBlushCheeks(cr, cx, y, spread, w, alpha) {
+        cr.save();
+        cr.setSourceRGBA(1.0, 0.36, 0.48, 0.82 * alpha);
+        const h = Math.max(2.2, w * 0.48);
+        this._fillCapsule(cr, cx - spread, y, w, h, 0.5);
+        this._fillCapsule(cr, cx + spread, y, w, h, 0.5);
+        cr.restore();
+    }
+
+    _drawMouth(cr, x, y, kind, size, color, alpha) {
+        cr.save();
+        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        if (kind === 'open_smile') {
+            const hw = size * 0.5;
+            cr.newSubPath();
+            cr.moveTo(x - hw, y - size * 0.12);
+            cr.lineTo(x + hw, y - size * 0.12);
+            cr.curveTo(x + hw * 0.85, y + size * 0.52, x - hw * 0.85, y + size * 0.52, x - hw, y - size * 0.12);
+            cr.closePath();
+            cr.fill();
+        } else if (kind === 'smile') {
+            cr.setLineWidth(Math.max(1.5, size * 0.22));
+            cr.newSubPath();
+            cr.arc(x, y - size * 0.18, size * 0.46, Math.PI * 0.18, Math.PI * 0.82);
+            cr.stroke();
+        } else if (kind === 'flat') {
+            cr.setLineWidth(Math.max(1.5, size * 0.24));
+            cr.newSubPath();
+            cr.moveTo(x - size * 0.45, y);
+            cr.lineTo(x + size * 0.45, y);
+            cr.stroke();
+        } else if (kind === 'o') {
+            cr.newSubPath();
+            cr.arc(x, y, Math.max(1.5, size * 0.38), 0, 2 * Math.PI);
+            cr.fill();
+        } else if (kind === 'dot') {
+            cr.newSubPath();
+            cr.arc(x, y, Math.max(1.2, size * 0.32), 0, 2 * Math.PI);
+            cr.fill();
+        }
+        cr.restore();
+    }
+
+    _drawMiniHeart(cr, x, y, size, alpha) {
+        cr.save();
+        cr.translate(x, y);
+        cr.setSourceRGBA(0.65, 0.92, 1.0, alpha);
+        cr.newSubPath();
+        cr.moveTo(0, size * 0.72);
+        cr.curveTo(-size * 1.15, size * 0.05, -size * 0.95, -size * 0.85, 0, -size * 0.25);
+        cr.curveTo(size * 0.95, -size * 0.85, size * 1.15, size * 0.05, 0, size * 0.72);
+        cr.closePath();
+        cr.fill();
+        cr.restore();
+    }
+
+    _drawSparkle(cr, x, y, size, color, alpha) {
+        cr.save();
+        cr.translate(x, y);
+        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
+        const inner = size * 0.28;
+        cr.newSubPath();
+        cr.moveTo(0, -size);
+        cr.lineTo(inner, -inner);
+        cr.lineTo(size, 0);
+        cr.lineTo(inner, inner);
+        cr.lineTo(0, size);
+        cr.lineTo(-inner, inner);
+        cr.lineTo(-size, 0);
+        cr.lineTo(-inner, -inner);
+        cr.closePath();
+        cr.fill();
+        cr.restore();
+    }
+
+    _drawFloatingZ(cr, x, y, size, color, alpha) {
+        cr.save();
+        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setLineJoin(Cairo.LineJoin.ROUND);
+        cr.setLineWidth(Math.max(1.2, size * 0.22));
+        const hs = size * 0.5;
+        cr.newSubPath();
+        cr.moveTo(x - hs, y - hs);
+        cr.lineTo(x + hs, y - hs);
+        cr.lineTo(x - hs, y + hs);
+        cr.lineTo(x + hs, y + hs);
+        cr.stroke();
+        cr.restore();
     }
 
     _drawDroopingLidEye(cr, x, y, w, h) {

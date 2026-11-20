@@ -76,6 +76,27 @@ _PIPER_SAMPLE_TEXTS: dict[str, str] = {
     "fa": "سلام! من بایتی هستم و صدای محلی پایپر را آزمایش می‌کنم.",
 }
 ANIMATION_MODES = ("full", "state_only", "disabled")
+TEST_ANIMATION_STATES = (
+    "IDLE",
+    "LISTENING",
+    "THINKING",
+    "TOOL_CALLING",
+    "SPEAKING",
+    "MUTED",
+    "ERROR",
+)
+TEST_ANIMATION_EMOTIONS = (
+    "neutral",
+    "happy",
+    "love",
+    "annoyed",
+    "sleepy",
+    "focus",
+    "astonished",
+    "curious",
+    "surprised",
+    "error",
+)
 POSITION_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("Fixed", "fixed"),
     ("Floating", "floating"),
@@ -2425,6 +2446,30 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         chat_group.add(self.chat_height_row)
         page.add(chat_group)
 
+        test_anim_group = Adw.PreferencesGroup(
+            title="Test Animations",
+            description="Preview eye emotions and island states live on the companion.",
+        )
+        self.test_anim_state_row = _make_string_combo("Animation State", "", TEST_ANIMATION_STATES)
+        self.test_anim_emotion_row = _make_string_combo("Emotion", "", TEST_ANIMATION_EMOTIONS)
+        test_action_row = Adw.ActionRow(
+            title="Live Preview",
+            subtitle="Trigger the selected state and emotion on the island.",
+        )
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, valign=Gtk.Align.CENTER)
+        reset_anim_btn = Gtk.Button(label="Reset", valign=Gtk.Align.CENTER)
+        reset_anim_btn.connect("clicked", self._on_reset_animation_preview)
+        preview_anim_btn = Gtk.Button(label="Preview", valign=Gtk.Align.CENTER)
+        preview_anim_btn.add_css_class("suggested-action")
+        preview_anim_btn.connect("clicked", self._on_preview_animation)
+        btn_box.append(reset_anim_btn)
+        btn_box.append(preview_anim_btn)
+        test_action_row.add_suffix(btn_box)
+        test_anim_group.add(self.test_anim_state_row)
+        test_anim_group.add(self.test_anim_emotion_row)
+        test_anim_group.add(test_action_row)
+        page.add(test_anim_group)
+
         self.add(page)
 
     def _make_color_row(self, title: str, field_key: str, default_hex: str) -> Adw.ActionRow:
@@ -2465,6 +2510,36 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             },
             "Reset colors to defaults",
         )
+
+    def _on_preview_animation(self, *_: object) -> None:
+        """Send selected state and emotion to the daemon for live preview."""
+        state = _combo_selected_text(self.test_anim_state_row) or "IDLE"
+        emotion = _combo_selected_text(self.test_anim_emotion_row) or "neutral"
+
+        def worker() -> ApiResult:
+            return self._client.preview_animation(state=state, emotion=emotion)
+
+        def on_done(res: ApiResult) -> None:
+            if res.ok:
+                self._toast(f"Previewing {state} ({emotion})")
+            else:
+                self._toast(res.error or "Preview failed")
+
+        self._run_async(worker, on_done)
+
+    def _on_reset_animation_preview(self, *_: object) -> None:
+        """Reset the live preview back to idle neutral."""
+
+        def worker() -> ApiResult:
+            return self._client.preview_animation(reset=True)
+
+        def on_done(res: ApiResult) -> None:
+            if res.ok:
+                self._toast("Reset animation to idle")
+            else:
+                self._toast(res.error or "Reset failed")
+
+        self._run_async(worker, on_done)
 
     def _selected_position_mode(self) -> str:
         """Return the config position_mode value for the selected Mode row."""

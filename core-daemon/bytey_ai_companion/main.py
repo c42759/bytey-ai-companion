@@ -10,7 +10,10 @@ import logging
 import os
 import shlex
 import signal
+import time
 import uuid
+from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +21,7 @@ from .audio import VoiceInputService
 from .config import PIPER_VOICE_PRESETS, ConfigManager, MCPServerConfig, SecretStore
 from .ipc import IPCRequest, IPCResponse, IPCServer
 from .llm import LLMRouter
-from .llm.emotions import DEFAULT_SYSTEM_PROMPT, parse_emotion_prefix
+from .llm.emotions import DEFAULT_SYSTEM_PROMPT, VALID_EMOTIONS, parse_emotion_prefix
 from .mcp_host import MCPClientManager, from_mcp_servers_json, to_mcp_servers_json
 from .tts import (
     ElevenLabsTTSClient,
@@ -191,6 +194,15 @@ class ByteyDaemon:
         self.emotion: str = "neutral"
         self.emotion_reset_delay_s: float = 3.0
         self._emotion_reset_task: asyncio.Task[None] | None = None
+        self.idle_annoyed_after_s: float = 3600.0
+        self.love_window_s: float = 300.0
+        self.love_interaction_threshold: int = 4
+        self.focus_data_threshold_chars: int = 3500
+        self.astonished_data_threshold_chars: int = 16000
+        self.idle_check_interval_s: float = 30.0
+        self._last_interaction_wall: float = time.time()
+        self._recent_interaction_walls: deque[float] = deque(maxlen=32)
+        self._idle_mood_task: asyncio.Task[None] | None = None
         self._active_session_id: str | None = None
         self._detected_tools_support: bool = False
         self._detected_context_length: int | None = None
@@ -258,6 +270,7 @@ class ByteyDaemon:
         await self.ipc.start()
         if self.enable_voice_capture:
             await self.voice_input.start()
+        self._idle_mood_task = self._track_task(self._idle_mood_loop())
         self._started = True
         logger.info("Bytey AI Companion daemon listening on http://%s:%s", self.ipc.host, self.ipc.port)
 
@@ -272,6 +285,11 @@ class ByteyDaemon:
             if not fut.done():
                 fut.set_result(False)
             self._pending_confirmations.pop(call_id, None)
+
+        self._cancel_emotion_reset()
+        if self._idle_mood_task is not None and not self._idle_mood_task.done():
+            self._idle_mood_task.cancel()
+        self._idle_mood_task = None
 
         current_task = asyncio.current_task()
         other_tasks = [
@@ -531,6 +549,51 @@ class ByteyDaemon:
 
         self._emotion_reset_task = self._track_task(_reset_worker())
 
+    @staticmethod
+    def evaluate_idle_emotion(
+        idle_seconds: float,
+        local_hour: int,
+        *,
+        threshold_s: float = 3600.0,
+    ) -> str | None:
+        """Return idle emotion when inactive > 60m: annoyed (8AM-8PM) or sleepy (8PM-8AM)."""
+        if idle_seconds < threshold_s:
+            return None
+        if 8 <= local_hour < 20:
+            return "annoyed"
+        return "sleepy"
+
+    def _record_interaction(self, now_wall: float | None = None) -> tuple[float, int]:
+        """Record a user interaction timestamp and return (idle_seconds_before, recent_5m_count)."""
+        now = time.time() if now_wall is None else float(now_wall)
+        idle_before_s = max(0.0, now - self._last_interaction_wall)
+        self._last_interaction_wall = now
+        self._recent_interaction_walls.append(now)
+        cutoff = now - self.love_window_s
+        while self._recent_interaction_walls and self._recent_interaction_walls[0] < cutoff:
+            self._recent_interaction_walls.popleft()
+        return idle_before_s, len(self._recent_interaction_walls)
+
+    async def _idle_mood_loop(self) -> None:
+        """Periodically update idle emotion after prolonged user inactivity."""
+        try:
+            while not self._stop_event.is_set():
+                await asyncio.sleep(max(1.0, float(self.idle_check_interval_s)))
+                if not self._started or self._chat_lock.locked():
+                    continue
+                if self.state not in ("IDLE", "MUTED"):
+                    continue
+                idle_s = max(0.0, time.time() - self._last_interaction_wall)
+                target_emotion = self.evaluate_idle_emotion(
+                    idle_s,
+                    datetime.now().hour,
+                    threshold_s=self.idle_annoyed_after_s,
+                )
+                if target_emotion and self.emotion != target_emotion:
+                    await self._set_state(self.state, emotion=target_emotion)
+        except asyncio.CancelledError:
+            pass
+
     async def _on_subsystem_state_change(self, state: str) -> None:
         prev_state = self.state
         norm = str(state or "IDLE").upper()
@@ -705,6 +768,36 @@ class ByteyDaemon:
                     tools = []
 
             chunker = SentenceChunker()
+            idle_before_s, recent_count = self._record_interaction()
+            now_dt = datetime.now()
+            data_volume_chars = len(text) + sum(
+                len(str(m.get("content") or "")) for m in llm_messages[-6:]
+            )
+            initial_emotion = "focus" if data_volume_chars >= self.focus_data_threshold_chars else "neutral"
+            if initial_emotion != "neutral":
+                await self._set_state("THINKING", emotion=initial_emotion)
+
+            mood_hints: list[str] = [
+                f"local_time={now_dt.strftime('%H:%M')}",
+                f"interactions_last_5m={recent_count}",
+                f"idle_minutes_before_turn={int(idle_before_s // 60)}",
+                f"input_chars={data_volume_chars}",
+            ]
+            if recent_count >= self.love_interaction_threshold:
+                mood_hints.append("high_cadence_under_5m=true (consider [emotion:love])")
+            if idle_before_s >= self.idle_annoyed_after_s:
+                if 8 <= now_dt.hour < 20:
+                    mood_hints.append("long_idle_daytime=true (consider [emotion:annoyed])")
+                else:
+                    mood_hints.append("long_idle_nighttime=true (consider [emotion:sleepy])")
+            if data_volume_chars >= self.astonished_data_threshold_chars:
+                mood_hints.append("overwhelming_data=true (consider [emotion:astonished])")
+            elif data_volume_chars >= self.focus_data_threshold_chars:
+                mood_hints.append("heavy_information=true (consider [emotion:focus])")
+
+            runtime_context_note = f"\n\n[Runtime Mood Context: {'; '.join(mood_hints)}]"
+            effective_system_prompt = (cfg.general.system_prompt or "") + runtime_context_note
+
             final_emotion = "neutral"
             accumulated_parts: list[str] = []
 
@@ -736,7 +829,7 @@ class ByteyDaemon:
                 for _round in range(6):
                     chat_kwargs: dict[str, Any] = {
                         "messages": llm_messages,
-                        "system_prompt": cfg.general.system_prompt,
+                        "system_prompt": effective_system_prompt,
                         "provider": cfg.provider.active_provider,
                         "model": cfg.provider.model,
                         "base_url": cfg.provider.base_url,
@@ -826,6 +919,17 @@ class ByteyDaemon:
                             else ("denied" if tool_res.get("denied") else "error")
                         )
                         summary = str(tool_res.get("content") or tool_res.get("error") or "")
+                        data_volume_chars += len(summary)
+                        if (
+                            data_volume_chars >= self.astonished_data_threshold_chars
+                            and final_emotion in ("neutral", "curious", "focus")
+                        ):
+                            final_emotion = "astonished"
+                        elif (
+                            (data_volume_chars >= self.focus_data_threshold_chars or len(tool_calls) >= 2 or _round >= 1)
+                            and final_emotion == "neutral"
+                        ):
+                            final_emotion = "focus"
                         await self.storage.update_tool_call(call_id, status_str, summary)
                         await self.ipc.connection_manager.broadcast(
                             {
@@ -853,6 +957,16 @@ class ByteyDaemon:
                 tail = chunker.flush()
                 if tail:
                     await self.tts_player.enqueue_sentence(tail)
+
+                if final_emotion == "neutral":
+                    if data_volume_chars >= self.astonished_data_threshold_chars:
+                        final_emotion = "astonished"
+                    elif recent_count >= self.love_interaction_threshold:
+                        final_emotion = "love"
+                    elif data_volume_chars >= self.focus_data_threshold_chars:
+                        final_emotion = "focus"
+                    else:
+                        final_emotion = "happy"
 
                 full_content = "".join(accumulated_parts).strip()
                 updated_msg = await self.storage.update_message(
@@ -982,6 +1096,7 @@ class ByteyDaemon:
 
         self.ipc.register_route("POST", "/api/v1/voice/trigger", self._route_voice_trigger)
         self.ipc.register_route("POST", "/api/v1/voice/barge-in", self._route_voice_barge_in)
+        self.ipc.register_route("POST", "/api/v1/visuals/preview", self._route_visuals_preview)
         self.ipc.register_route("POST", "/api/v1/system/exit", self._route_system_exit)
 
     async def _route_health(self, _req: IPCRequest) -> dict[str, Any]:
@@ -1311,6 +1426,35 @@ class ByteyDaemon:
         await self.tts_player.barge_in()
         await self._set_state("MUTED" if self.config_manager.config.voice_in.mic_muted else "IDLE")
         return {"ok": True}
+
+    async def _route_visuals_preview(self, req: IPCRequest) -> dict[str, Any]:
+        body = req.json()
+        valid_states = {"IDLE", "LISTENING", "THINKING", "TOOL_CALLING", "SPEAKING", "MUTED", "ERROR"}
+        if body.get("reset"):
+            target_state = "MUTED" if self.config_manager.config.voice_in.mic_muted else "IDLE"
+            self._cancel_emotion_reset()
+            await self._set_state(target_state, emotion="neutral")
+            return {"ok": True, "state": self.state, "emotion": self.emotion}
+
+        raw_state = body.get("state")
+        target_state = str(raw_state).strip().upper() if raw_state is not None else self.state
+        if target_state not in valid_states:
+            return IPCResponse(status=400, body={"error": f"Invalid state: {target_state}"})  # type: ignore[return-value]
+
+        raw_emotion = body.get("emotion")
+        target_emotion = (
+            str(raw_emotion).strip().lower() if raw_emotion is not None else self.emotion
+        )
+        if target_emotion not in VALID_EMOTIONS:
+            return IPCResponse(status=400, body={"error": f"Invalid emotion: {target_emotion}"})  # type: ignore[return-value]
+
+        label = str(body["label"])[:60] if body.get("label") is not None else None
+        self._cancel_emotion_reset()
+        await self._set_state(target_state, emotion=target_emotion, label=label)
+        auto_reset_s = body.get("auto_reset_s")
+        if isinstance(auto_reset_s, (int, float)) and float(auto_reset_s) > 0:
+            self._schedule_emotion_reset(float(auto_reset_s), reset_error_state=True)
+        return {"ok": True, "state": self.state, "emotion": self.emotion}
 
     async def _route_system_exit(self, _req: IPCRequest) -> dict[str, Any]:
         await self.ipc.connection_manager.broadcast({"type": "shutdown"})

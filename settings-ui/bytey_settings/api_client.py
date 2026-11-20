@@ -645,6 +645,23 @@ class DaemonClient:
             default_data={"ok": True},
         )
 
+    def preview_animation(
+        self,
+        state: str = "IDLE",
+        emotion: str = "neutral",
+        *,
+        reset: bool = False,
+    ) -> ApiResult:
+        """Trigger or reset a live eye/island animation preview on the daemon."""
+        payload: dict[str, Any] = {"reset": True} if reset else {"state": state, "emotion": emotion}
+        return self._post_json_action(
+            "/api/v1/visuals/preview",
+            payload,
+            timeout=5.0,
+            offline_error="Daemon offline: cannot preview animation",
+            default_data={"ok": True},
+        )
+
 
 def _extract_mcp_servers(payload: Any) -> dict[str, Any]:
     """Normalize mcpServers dict from varied API or config shapes."""
