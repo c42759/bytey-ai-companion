@@ -803,9 +803,9 @@ export default class ByteyPreferences extends ExtensionPreferences {
         testAnimGroup.add(testAnimActionRow);
         visualsPage.add(testAnimGroup);
 
-        // 3. Voice & AI Page
+        // 3. Voice Page
         const voicePage = new Adw.PreferencesPage({
-            title: 'Voice & AI',
+            title: 'Voice',
             icon_name: 'audio-input-microphone-symbolic',
         });
 
@@ -952,6 +952,12 @@ export default class ByteyPreferences extends ExtensionPreferences {
         ttsGroup.add(piperTestRow);
         voicePage.add(ttsGroup);
 
+        // 4. AI Page
+        const aiPage = new Adw.PreferencesPage({
+            title: 'AI',
+            icon_name: 'system-run-symbolic',
+        });
+
         const aiGroup = new Adw.PreferencesGroup({
             title: 'AI Provider',
             description: 'API keys stay securely in your core daemon .env or OS keyring.',
@@ -1004,7 +1010,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             subtitle: 'Override detection and expose MCP tools to this model',
         });
         aiGroup.add(forceToolsRow);
-        voicePage.add(aiGroup);
+        aiPage.add(aiGroup);
 
         const mcpGroup = new Adw.PreferencesGroup({
             title: 'MCP Servers',
@@ -1016,7 +1022,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             css_classes: ['flat'],
         });
         mcpGroup.set_header_suffix(addMcpBtn);
-        voicePage.add(mcpGroup);
+        aiPage.add(mcpGroup);
 
         const mcpJsonGroup = new Adw.PreferencesGroup({
             title: 'Raw mcpServers JSON',
@@ -1046,7 +1052,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
         applyMcpJsonBox.append(applyMcpJsonBtn);
         mcpJsonGroup.add(applyMcpJsonBox);
-        voicePage.add(mcpJsonGroup);
+        aiPage.add(mcpJsonGroup);
 
         // 4. Import / Export Page
         const importExportPage = new Adw.PreferencesPage({
@@ -1234,6 +1240,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         window.add(generalPage);
         window.add(visualsPage);
         window.add(voicePage);
+        window.add(aiPage);
         window.add(skillsPage);
         window.add(workspacePage);
         window.add(importExportPage);

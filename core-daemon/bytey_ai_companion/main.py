@@ -1007,6 +1007,8 @@ class ByteyDaemon:
             merge_section("visuals", raw_patch["visuals"])
         if isinstance(raw_patch.get("skills"), dict):
             merge_section("skills", raw_patch["skills"])
+        if isinstance(raw_patch.get("workspace"), dict):
+            merge_section("workspace", raw_patch["workspace"])
 
         # settings-ui `llm` mirror
         if isinstance(raw_patch.get("llm"), dict):

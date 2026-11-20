@@ -18,11 +18,6 @@ const THEME_BASE_PX_FALLBACK = 14;
 const SIDEBAR_ANIM_DURATION_MS = 220;
 
 const DENSITY_ORDER = ['compact', 'comfortable', 'spacious'];
-const DENSITY_LABELS = {
-    compact: 'Compact',
-    comfortable: 'Comfort',
-    spacious: 'Spacious',
-};
 const DENSITY_SCALE_FACTORS = {
     compact: 0.9,
     comfortable: 1.0,
@@ -52,7 +47,7 @@ export class TranscriptDrawer {
      * @param {() => void} [callbacks.onManualMic]
      * @param {(callId: string, approved: boolean) => void} [callbacks.onConfirmTool]
      * @param {(width: number, height: number) => void} [callbacks.onResizeCommit]
-     * @param {(density: string) => void} [callbacks.onDensityChange]
+     * @param {(enabled: boolean) => void} [callbacks.onAutoAcceptChange]
      * @param {(isOpen: boolean) => void} [callbacks.onOpenChanged]
      * @param {(sessionId: string) => void} [callbacks.onSelectSession]
      * @param {(sessionId: string) => void} [callbacks.onDeleteSession]
@@ -76,6 +71,7 @@ export class TranscriptDrawer {
         this._drawerWidth = DRAWER_WIDTH_FALLBACK;
         this._drawerHeight = DRAWER_HEIGHT_FALLBACK;
         this._density = 'comfortable';
+        this._autoAccept = false;
         this._lastIslandBounds = {x: 500, y: 12, width: 112, height: 38};
 
         this._resizing = false;
@@ -322,16 +318,18 @@ export class TranscriptDrawer {
 
         header.add_child(new St.Widget({x_expand: true}));
 
-        this._densityBtn = new St.Button({
-            style_class: 'bytey-density-btn',
-            label: DENSITY_LABELS[this._density] ?? 'Comfort',
+        this._autoAcceptBtn = new St.Button({
+            style_class: 'bytey-auto-accept-btn',
+            label: 'Auto-Accept',
+            toggle_mode: true,
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
+            accessible_name: 'Toggle auto-accept code review and workspace actions',
         });
-        this._connect(this._densityBtn, 'clicked', () => {
-            this._cycleDensity();
+        this._connect(this._autoAcceptBtn, 'clicked', () => {
+            this._toggleAutoAccept();
         });
-        header.add_child(this._densityBtn);
+        header.add_child(this._autoAcceptBtn);
 
         const clearBtn = new St.Button({
             style_class: 'bytey-clear-btn',
@@ -923,16 +921,32 @@ export class TranscriptDrawer {
 
         const rawDensity = String(config.visuals?.chat_density ?? config.chat_density ?? '').toLowerCase().trim();
         if (DENSITY_ORDER.includes(rawDensity))
-            this._applyDensity(rawDensity, false);
+            this._applyDensity(rawDensity);
+
+        const wsCfg = config.workspace ?? {};
+        const requireWrite = wsCfg.require_write_approval ?? true;
+        const requireCmd = wsCfg.require_command_approval ?? true;
+        this._syncAutoAccept(!requireWrite && !requireCmd);
     }
 
-    _cycleDensity() {
-        const idx = DENSITY_ORDER.indexOf(this._density);
-        const nextDensity = DENSITY_ORDER[(idx + 1) % DENSITY_ORDER.length];
-        this._applyDensity(nextDensity, true);
+    _toggleAutoAccept() {
+        const next = !this._autoAccept;
+        this._syncAutoAccept(next);
+        this._callbacks.onAutoAcceptChange?.(next);
     }
 
-    _applyDensity(density, notifyCallback = false) {
+    _syncAutoAccept(enabled) {
+        this._autoAccept = Boolean(enabled);
+        if (!this._autoAcceptBtn || this._destroyed)
+            return;
+        this._autoAcceptBtn.set_checked(this._autoAccept);
+        if (this._autoAccept)
+            this._autoAcceptBtn.add_style_class_name('bytey-auto-accept-active');
+        else
+            this._autoAcceptBtn.remove_style_class_name('bytey-auto-accept-active');
+    }
+
+    _applyDensity(density) {
         if (this._destroyed || !this._container || !DENSITY_ORDER.includes(density))
             return;
         this._density = density;
@@ -940,15 +954,9 @@ export class TranscriptDrawer {
             this._container.remove_style_class_name(`bytey-density-${mode}`);
         this._container.add_style_class_name(`bytey-density-${density}`);
 
-        if (this._densityBtn)
-            this._densityBtn.label = DENSITY_LABELS[density] ?? 'Comfort';
-
         this._syncAllIconSizes();
         this._syncEntryHeight();
         this._renderSessions();
-
-        if (notifyCallback)
-            this._callbacks.onDensityChange?.(density);
     }
 
     _onResizePress(event) {
@@ -1923,7 +1931,7 @@ export class TranscriptDrawer {
         this._skillSuggestIdx = 0;
         this._sendIcon = null;
         this._providerLabel = null;
-        this._densityBtn = null;
+        this._autoAcceptBtn = null;
         this._closeIcon = null;
         this._micBtn = null;
         this._micIcon = null;

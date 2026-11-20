@@ -94,10 +94,11 @@ export default class ByteyExtension extends Extension {
                     },
                 }).catch(() => {});
             },
-            onDensityChange: density => {
+            onAutoAcceptChange: enabled => {
                 this._patchConfig({
-                    visuals: {
-                        chat_density: String(density),
+                    workspace: {
+                        require_write_approval: !enabled,
+                        require_command_approval: !enabled,
                     },
                 }).catch(() => {});
             },
@@ -304,6 +305,7 @@ export default class ByteyExtension extends Extension {
             voice_in: {...(this._config?.voice_in ?? {}), ...(config.voice_in ?? {})},
             voice_out: {...(this._config?.voice_out ?? {}), ...(config.voice_out ?? {})},
             visuals: {...(this._config?.visuals ?? {}), ...(config.visuals ?? {})},
+            workspace: {...(this._config?.workspace ?? {}), ...(config.workspace ?? {})},
         };
 
         this._islandWidget?.applyVisualsConfig(this._config.visuals);
