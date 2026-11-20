@@ -137,6 +137,66 @@
   color: #e4e4ec;
 }
 
+.bytey-workspace-pill {
+  background-color: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-radius: 8px;
+  height: 26px;
+  padding: 0 10px;
+  max-width: 155px;
+  color: #e0f2fe;
+  transition: 120ms ease;
+}
+
+.bytey-workspace-pill:hover {
+  background-color: rgba(56, 189, 248, 0.22);
+  border-color: rgba(56, 189, 248, 0.45);
+}
+
+.bytey-workspace-pill-label {
+  max-width: 135px;
+  font-size: 8.5pt;
+  font-weight: 600;
+  color: #e0f2fe;
+}
+
+.bytey-workspace-menu {
+  background-color: rgba(15, 23, 42, 0.96);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  padding: 6px;
+  margin-top: 6px;
+  spacing: 4px;
+}
+
+.bytey-workspace-menu-item {
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 8.5pt;
+  color: #e2e8f0;
+  text-align: left;
+}
+
+.bytey-workspace-menu-item:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.bytey-workspace-menu-item-active {
+  background-color: rgba(56, 189, 248, 0.16);
+  color: #bae6fd;
+  font-weight: 600;
+}
+
+.bytey-workspace-menu-clear {
+  color: #fca5a5;
+}
+
+.bytey-workspace-menu-sep {
+  height: 1px;
+  background-color: rgba(255, 255, 255, 0.1);
+  margin: 2px 4px;
+}
+
 .bytey-status-indicator {
   width: 20px;
   height: 20px;
@@ -435,12 +495,59 @@
   color: #d8b4fe;
 }
 
+.bytey-msg-body {
+  spacing: 6px;
+}
+
 .bytey-msg-text {
   font-size: 9.5pt;
   color: #f8fafc;
 }
 
-.bytey-replay-btn {
+.bytey-code-block {
+  background-color: rgba(2, 6, 23, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 8px;
+  padding: 6px 8px;
+  spacing: 4px;
+}
+
+.bytey-code-header {
+  spacing: 6px;
+}
+
+.bytey-code-lang {
+  font-size: 7.5pt;
+  font-weight: 700;
+  color: #94a3b8;
+}
+
+.bytey-code-copy-btn {
+  background-color: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 5px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: #cbd5e1;
+}
+
+.bytey-code-copy-btn:hover {
+  background-color: rgba(56, 189, 248, 0.25);
+  color: #ffffff;
+}
+
+.bytey-code-text {
+  font-family: monospace;
+  font-size: 8.5pt;
+  color: #e2e8f0;
+}
+
+.bytey-replay-btn,
+.bytey-copy-btn,
+.bytey-msg-delete-btn,
+.bytey-msg-confirm-delete-btn,
+.bytey-msg-cancel-delete-btn {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 6px;
@@ -451,9 +558,36 @@
   transition: 120ms ease;
 }
 
-.bytey-replay-btn:hover {
+.bytey-replay-btn:hover,
+.bytey-copy-btn:hover {
   background-color: rgba(56, 189, 248, 0.25);
   color: #ffffff;
+}
+
+.bytey-msg-delete-btn:hover {
+  background-color: rgba(255, 90, 95, 0.22);
+  color: #ff6b70;
+}
+
+.bytey-msg-confirm-delete-btn {
+  background-color: rgba(34, 197, 94, 0.18);
+  border-color: rgba(34, 197, 94, 0.35);
+  color: #4ade80;
+}
+
+.bytey-msg-confirm-delete-btn:hover {
+  background-color: rgba(34, 197, 94, 0.34);
+  color: #86efac;
+}
+
+.bytey-msg-cancel-delete-btn {
+  background-color: rgba(255, 90, 95, 0.14);
+  color: #ff6b70;
+}
+
+.bytey-msg-cancel-delete-btn:hover {
+  background-color: rgba(255, 90, 95, 0.28);
+  color: #ff8a8e;
 }
 
 /* Tool-Call Badges */
@@ -513,13 +647,38 @@
   padding-top: 2px;
 }
 
+.bytey-confirm-card {
+  background-color: rgba(2, 6, 23, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 8px;
+  padding: 6px;
+  margin-top: 4px;
+}
+
+.bytey-confirm-scroll {
+  max-height: 180px;
+}
+
+.bytey-confirm-diff,
+.bytey-confirm-cmd {
+  font-family: monospace;
+  font-size: 8pt;
+  color: #e2e8f0;
+}
+
+.bytey-confirm-cmd {
+  color: #bae6fd;
+}
+
 .bytey-confirm-row {
   spacing: 6px;
   padding-top: 4px;
 }
 
 .bytey-btn-allow,
-.bytey-btn-deny {
+.bytey-btn-deny,
+.bytey-confirm-approve-btn,
+.bytey-confirm-reject-btn {
   border-radius: 8px;
   height: 28px;
   padding: 0 12px;
@@ -773,7 +932,15 @@
   font-size: 8.5pt;
 }
 
-.bytey-density-compact .bytey-replay-btn {
+.bytey-density-compact .bytey-code-text {
+  font-size: 7.5pt;
+}
+
+.bytey-density-compact .bytey-replay-btn,
+.bytey-density-compact .bytey-copy-btn,
+.bytey-density-compact .bytey-msg-delete-btn,
+.bytey-density-compact .bytey-msg-confirm-delete-btn,
+.bytey-density-compact .bytey-msg-cancel-delete-btn {
   width: 20px;
   height: 20px;
   border-radius: 5px;
@@ -940,7 +1107,15 @@
   font-size: 10.5pt;
 }
 
-.bytey-density-spacious .bytey-replay-btn {
+.bytey-density-spacious .bytey-code-text {
+  font-size: 9.5pt;
+}
+
+.bytey-density-spacious .bytey-replay-btn,
+.bytey-density-spacious .bytey-copy-btn,
+.bytey-density-spacious .bytey-msg-delete-btn,
+.bytey-density-spacious .bytey-msg-confirm-delete-btn,
+.bytey-density-spacious .bytey-msg-cancel-delete-btn {
   width: 28px;
   height: 28px;
   border-radius: 8px;

@@ -179,6 +179,12 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
     "skills_dir": (("skills", "skills_dir"), ("skills_dir",)),
     "skills_extra_dirs": (("skills", "extra_dirs"), ("skills_extra_dirs",)),
+    "workspace_active_path": (("workspace", "active_path"), ()),
+    "workspace_recent_paths": (("workspace", "recent_paths"), ()),
+    "workspace_auto_load_skills": (("workspace", "auto_load_skills"), ()),
+    "workspace_auto_load_rules": (("workspace", "auto_load_rules"), ()),
+    "workspace_require_write_approval": (("workspace", "require_write_approval"), ()),
+    "workspace_require_command_approval": (("workspace", "require_command_approval"), ()),
 }
 
 
@@ -764,11 +770,14 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._mcp_rows: list[Gtk.Widget] = []
         self._skills: list[dict[str, Any]] = []
         self._skill_rows: list[Gtk.Widget] = []
+        self._workspace_recent_paths: list[str] = []
+        self._workspace_updating = False
         self._color_controls: dict[str, tuple[Adw.ActionRow, Gtk.ColorDialogButton, str]] = {}
 
         self._build_general_page()
         self._build_ai_mcp_page()
         self._build_skills_page()
+        self._build_workspace_page()
         self._build_voice_input_page()
         self._build_voice_output_page()
         self._build_visuals_page()
@@ -1997,6 +2006,179 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             dlg.set_default_response("cancel")
             dlg.connect("response", lambda _d, resp: _do_delete() if resp == "delete" else None)
             dlg.present()
+
+    # ------------------------------------------------------------------
+    # Page 3b: Workspace / Coding
+    # ------------------------------------------------------------------
+
+    def _build_workspace_page(self) -> None:
+        page = Adw.PreferencesPage(title="Workspace", icon_name="folder-symbolic")
+        page.set_name("workspace")
+
+        banner_group = Adw.PreferencesGroup()
+        banner_group.add(self._create_offline_banner())
+        page.add(banner_group)
+
+        folder_group = Adw.PreferencesGroup(
+            title="Work Folder",
+            description="Bind a project folder for workspace skills, project rules, and coding tools.",
+        )
+
+        self.workspace_active_row = Adw.ActionRow(
+            title="Active Work Folder",
+            subtitle="None (General Assistant)",
+        )
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, valign=Gtk.Align.CENTER)
+        choose_btn = Gtk.Button(label="Choose Folder")
+        choose_btn.add_css_class("suggested-action")
+        choose_btn.connect("clicked", self._on_workspace_choose_clicked)
+        self.workspace_clear_btn = Gtk.Button(label="Clear", sensitive=False)
+        self.workspace_clear_btn.connect("clicked", lambda *_: self._set_workspace_path(""))
+        btn_box.append(choose_btn)
+        btn_box.append(self.workspace_clear_btn)
+        self.workspace_active_row.add_suffix(btn_box)
+        folder_group.add(self.workspace_active_row)
+
+        self.workspace_recent_row = Adw.ComboRow(
+            title="Recent Work Folders",
+            subtitle="Quickly switch to a previously used folder",
+            model=Gtk.StringList.new(["None"]),
+        )
+        self.workspace_recent_row.connect("notify::selected", self._on_workspace_recent_selected)
+        folder_group.add(self.workspace_recent_row)
+        page.add(folder_group)
+
+        policy_group = Adw.PreferencesGroup(title="Coding & Agent Policy")
+
+        self.workspace_auto_skills_row = Adw.SwitchRow(
+            title="Auto-Load Workspace Skills",
+            subtitle="Discover skills in .agents/skills and .bytey/skills inside the active folder",
+        )
+        self.workspace_auto_skills_row.connect(
+            "notify::active",
+            lambda *_: self._patch_fields(
+                {"workspace_auto_load_skills": self.workspace_auto_skills_row.get_active()}, "Saved"
+            ),
+        )
+        policy_group.add(self.workspace_auto_skills_row)
+
+        self.workspace_auto_rules_row = Adw.SwitchRow(
+            title="Auto-Load Project Rules",
+            subtitle="Inject AGENTS.md or .agents/GEMINI.md conventions into context",
+        )
+        self.workspace_auto_rules_row.connect(
+            "notify::active",
+            lambda *_: self._patch_fields(
+                {"workspace_auto_load_rules": self.workspace_auto_rules_row.get_active()}, "Saved"
+            ),
+        )
+        policy_group.add(self.workspace_auto_rules_row)
+
+        self.workspace_write_approval_row = Adw.SwitchRow(
+            title="Require Approval for File Edits",
+            subtitle="Show diff preview and require confirmation before modifying files",
+        )
+        self.workspace_write_approval_row.connect(
+            "notify::active",
+            lambda *_: self._patch_fields(
+                {"workspace_require_write_approval": self.workspace_write_approval_row.get_active()},
+                "Saved",
+            ),
+        )
+        policy_group.add(self.workspace_write_approval_row)
+
+        self.workspace_cmd_approval_row = Adw.SwitchRow(
+            title="Require Approval for Commands",
+            subtitle="Require confirmation before running shell commands in the workspace",
+        )
+        self.workspace_cmd_approval_row.connect(
+            "notify::active",
+            lambda *_: self._patch_fields(
+                {"workspace_require_command_approval": self.workspace_cmd_approval_row.get_active()},
+                "Saved",
+            ),
+        )
+        policy_group.add(self.workspace_cmd_approval_row)
+
+        page.add(policy_group)
+        self.add(page)
+
+    def _sync_workspace_controls(self) -> None:
+        active_path = str(self._read_field("workspace_active_path", "") or "").strip()
+        recent_raw = self._read_field("workspace_recent_paths", [])
+        recent_paths = [str(p).strip() for p in recent_raw if str(p).strip()] if isinstance(recent_raw, list) else []
+
+        self.workspace_active_row.set_subtitle(active_path or "None (General Assistant)")
+        self.workspace_clear_btn.set_sensitive(bool(active_path))
+
+        self._workspace_updating = True
+        try:
+            self._workspace_recent_paths = recent_paths
+            items = ["None (General Assistant)", *recent_paths]
+            self.workspace_recent_row.set_model(Gtk.StringList.new(items))
+            if active_path and active_path in recent_paths:
+                self.workspace_recent_row.set_selected(recent_paths.index(active_path) + 1)
+            else:
+                self.workspace_recent_row.set_selected(0)
+        finally:
+            self._workspace_updating = False
+
+    def _on_workspace_choose_clicked(self, *_: object) -> None:
+        dlg = Gtk.FileDialog(title="Select Work Folder")
+
+        def _on_done(dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+            try:
+                gfile = dialog.select_folder_finish(result)
+            except GLib.Error as exc:
+                if exc.code != Gtk.DialogError.DISMISSED:
+                    self._toast(f"Folder selection failed: {exc.message}")
+                return
+            path = gfile.get_path() if gfile else None
+            if path:
+                self._set_workspace_path(path)
+
+        dlg.select_folder(self, None, _on_done)
+
+    def _on_workspace_recent_selected(self, *_: object) -> None:
+        if self._loading or self._workspace_updating:
+            return
+        idx = self.workspace_recent_row.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION:
+            return
+        if idx == 0:
+            self._set_workspace_path("")
+        elif 1 <= idx <= len(self._workspace_recent_paths):
+            self._set_workspace_path(self._workspace_recent_paths[idx - 1])
+
+    def _set_workspace_path(self, path: str) -> None:
+        if self._loading:
+            return
+        cleaned = path.strip()
+
+        def on_done(res: ApiResult) -> None:
+            self._set_offline(res.offline)
+            if not res.ok:
+                self._toast(f"Workspace update failed: {res.error}")
+                self._sync_workspace_controls()
+                return
+            if isinstance(res.data, dict):
+                ws = self._config.setdefault("workspace", {})
+                if "active_path" in res.data:
+                    ws["active_path"] = res.data["active_path"]
+                else:
+                    ws["active_path"] = cleaned
+                if isinstance(res.data.get("recent_paths"), list):
+                    ws["recent_paths"] = res.data["recent_paths"]
+            else:
+                self._config.setdefault("workspace", {})["active_path"] = cleaned
+            self._sync_workspace_controls()
+            suffix = " (offline)" if res.offline else ""
+            if cleaned:
+                self._toast(f"Workspace set to {Path(cleaned).name or cleaned}{suffix}")
+            else:
+                self._toast(f"Workspace cleared{suffix}")
+
+        self._run_async(lambda: self.client.set_workspace(cleaned), on_done)
 
     # ------------------------------------------------------------------
     # Page 3: Voice Input
@@ -3388,6 +3570,21 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
                 self.skills_extra_dirs_row.set_text(", ".join(str(d) for d in extra_dirs if str(d).strip()))
             else:
                 self.skills_extra_dirs_row.set_text(str(extra_dirs or ""))
+
+            # Workspace
+            self.workspace_auto_skills_row.set_active(
+                bool(self._read_field("workspace_auto_load_skills", True))
+            )
+            self.workspace_auto_rules_row.set_active(
+                bool(self._read_field("workspace_auto_load_rules", True))
+            )
+            self.workspace_write_approval_row.set_active(
+                bool(self._read_field("workspace_require_write_approval", True))
+            )
+            self.workspace_cmd_approval_row.set_active(
+                bool(self._read_field("workspace_require_command_approval", True))
+            )
+            self._sync_workspace_controls()
         finally:
             self._loading = False
 

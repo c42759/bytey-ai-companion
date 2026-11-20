@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _KEY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MERGE_SECTIONS = ("general", "provider", "voice_in", "voice_out", "visuals", "skills")
+_MERGE_SECTIONS = ("general", "provider", "voice_in", "voice_out", "visuals", "skills", "workspace")
 
 DEFAULT_EYE_COLOR = "#F7FAFF"
 DEFAULT_BG_COLOR = "#0A0A0C"
@@ -341,6 +341,60 @@ class SkillsConfig(BaseModel):
     overrides: dict[str, SkillOverrideConfig] = Field(default_factory=dict)
 
 
+class WorkspaceConfig(BaseModel):
+    """Active project workspace directory and coding/agent policy settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    active_path: str = ""
+    recent_paths: list[str] = Field(default_factory=list)
+    auto_load_skills: bool = True
+    auto_load_rules: bool = True
+    require_write_approval: bool = True
+    require_command_approval: bool = True
+
+    @field_validator("active_path", mode="before")
+    @classmethod
+    def _validate_active_path(cls, value: Any) -> str:
+        """Normalize active_path; when non-empty, verify it resolves to an existing directory."""
+        if value is None or isinstance(value, bool):
+            return ""
+        cleaned = str(value).strip()
+        if not cleaned:
+            return ""
+        resolved = Path(cleaned).expanduser().resolve()
+        if not resolved.is_dir():
+            raise ValueError(f"Workspace path is not an existing directory: {cleaned!r}")
+        return str(resolved)
+
+    @field_validator("recent_paths", mode="before")
+    @classmethod
+    def _validate_recent_paths(cls, value: Any) -> list[str]:
+        """Normalize recent_paths to at most 10 unique resolved directory strings."""
+        if value is None:
+            return []
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("recent_paths must be a list of paths")
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in value:
+            if item is None or isinstance(item, bool):
+                continue
+            cleaned = str(item).strip()
+            if not cleaned:
+                continue
+            try:
+                resolved = str(Path(cleaned).expanduser().resolve())
+            except OSError:
+                continue
+            if resolved not in seen:
+                seen.add(resolved)
+                result.append(resolved)
+            if len(result) >= 10:
+                break
+        return result
+
+
 class ByteyConfig(BaseModel):
     """Root non-secret configuration schema persisted to config.json."""
 
@@ -353,6 +407,7 @@ class ByteyConfig(BaseModel):
     visuals: VisualsConfig = Field(default_factory=VisualsConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
 
 
 class SecretStore:

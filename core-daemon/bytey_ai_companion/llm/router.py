@@ -648,11 +648,13 @@ class LLMRouter:
         effective_prompt = system_prompt
         if tools:
             tool_rule = (
-                "\nIMPORTANT TOOL RULE: When a question requires external or up-to-date information "
-                "(such as web search, weather, location, or website fetch), invoke the matching tool "
-                "function directly right away. Never reply with a text message saying you are going "
-                "to use a tool without calling the tool first; only output your [emotion:<tag>] "
-                "spoken reply after receiving the tool result."
+                "\nIMPORTANT TOOL RULE: When a request requires external or up-to-date information "
+                "(such as web search, weather, location, or website fetch) OR involves creating, "
+                "writing, editing, reading, searching, or running files/scripts/commands in an "
+                "active workspace, invoke the matching tool function directly right away. Never "
+                "paste a requested file/script only in chat or say you are going to use a tool "
+                "without calling the tool first; only output your [emotion:<tag>] spoken reply "
+                "after receiving the tool result."
             )
             effective_prompt = f"{system_prompt.rstrip()}\n{tool_rule}" if system_prompt else tool_rule.lstrip()
 

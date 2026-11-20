@@ -18,7 +18,7 @@ MAX_RESOURCE_BYTES = 64 * 1024  # 64 KiB
 MAX_IMPORT_BYTES = 10 * 1024 * 1024  # 10 MiB
 MAX_IMPORT_FILES = 256
 
-SkillSource = Literal["user", "extra", "builtin"]
+SkillSource = Literal["workspace", "user", "extra", "builtin"]
 
 
 def is_valid_skill_slug(name: str) -> bool:
@@ -416,10 +416,14 @@ class SkillRegistry:
         skills_dir: str = "",
         extra_dirs: list[str] | None = None,
         overrides: dict[str, SkillOverrideConfig | dict[str, Any]] | None = None,
+        workspace_dir: str = "",
+        auto_load_workspace_skills: bool = True,
     ) -> None:
         self._skills_dir = skills_dir
         self._extra_dirs = list(extra_dirs or [])
         self._overrides = dict(overrides or {})
+        self._workspace_dir = workspace_dir
+        self._auto_load_workspace_skills = auto_load_workspace_skills
         self._skills: dict[str, SkillDefinition] = {}
 
     @staticmethod
@@ -475,16 +479,33 @@ class SkillRegistry:
         skills_dir: str | None = None,
         extra_dirs: list[str] | None = None,
         overrides: dict[str, SkillOverrideConfig | dict[str, Any]] | None = None,
+        workspace_dir: str | None = None,
+        auto_load_workspace_skills: bool | None = None,
     ) -> list[SkillDefinition]:
-        """Re-scan user, extra, and built-in skill directories by precedence."""
+        """Re-scan workspace, user, extra, and built-in skill directories by precedence."""
         if skills_dir is not None:
             self._skills_dir = skills_dir
         if extra_dirs is not None:
             self._extra_dirs = list(extra_dirs)
         if overrides is not None:
             self._overrides = dict(overrides)
+        if workspace_dir is not None:
+            self._workspace_dir = workspace_dir
+        if auto_load_workspace_skills is not None:
+            self._auto_load_workspace_skills = auto_load_workspace_skills
 
         self._skills.clear()
+        ws_cleaned = (self._workspace_dir or "").strip()
+        if ws_cleaned and self._auto_load_workspace_skills:
+            ws_root = Path(ws_cleaned).expanduser()
+            if ws_root.is_dir():
+                for candidate in (
+                    ws_root / ".agents" / "skills",
+                    ws_root / ".bytey" / "skills",
+                    ws_root / "skills",
+                ):
+                    self._scan_root(candidate, "workspace")
+
         self._scan_root(self.user_skills_dir(), "user")
         for raw_extra in self._extra_dirs:
             cleaned = (raw_extra or "").strip()

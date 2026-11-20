@@ -45,6 +45,7 @@ from .tts import (
     StreamingTTSPlayer,
 )
 from .storage import StorageManager, resolve_db_path
+from .workspace.tools import WorkspaceToolchain, detect_git_branch, load_workspace_rules
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,7 @@ class ByteyDaemon:
         self.mcp_manager = mcp_manager or MCPClientManager(secret_resolver=self.secret_store)
         self._owns_mcp_manager = mcp_manager is None
         cfg_init = self.config_manager.config
+        self.mcp_manager.set_workspace_path(cfg_init.workspace.active_path)
         self.skill_registry = SkillRegistry(
             skills_dir=cfg_init.skills.skills_dir,
             extra_dirs=cfg_init.skills.extra_dirs,
@@ -241,6 +243,7 @@ class ByteyDaemon:
         self._recent_interaction_walls: deque[float] = deque(maxlen=32)
         self._idle_mood_task: asyncio.Task[None] | None = None
         self._active_session_id: str | None = None
+        self._speaking_message_id: str | None = None
         self._detected_tools_support: bool = False
         self._detected_context_length: int | None = None
         self._pending_confirmations: dict[str, asyncio.Future[bool]] = {}
@@ -252,13 +255,67 @@ class ByteyDaemon:
         self._register_routes()
 
     def _rescan_skills(self) -> list[SkillDefinition]:
-        """Re-scan user, extra, and built-in skills using current config."""
+        """Re-scan workspace, user, extra, and built-in skills using current config."""
         cfg = self.config_manager.config
         return self.skill_registry.rescan(
             skills_dir=cfg.skills.skills_dir,
             extra_dirs=cfg.skills.extra_dirs,
             overrides=cfg.skills.overrides,
+            workspace_dir=cfg.workspace.active_path,
+            auto_load_workspace_skills=cfg.workspace.auto_load_skills,
         )
+
+    def _build_workspace_payload(self) -> dict[str, Any]:
+        """Build the current workspace status payload for REST and WebSocket events."""
+        cfg = self.config_manager.config
+        active_path = (cfg.workspace.active_path or "").strip()
+        git_branch = detect_git_branch(Path(active_path)) if active_path else None
+        workspace_skills_count = sum(
+            1
+            for s in self.skill_registry.list_skills(include_disabled=True)
+            if s.source == "workspace"
+        )
+        return {
+            "active_path": active_path,
+            "recent_paths": list(cfg.workspace.recent_paths),
+            "git_branch": git_branch,
+            "workspace_skills_count": workspace_skills_count,
+        }
+
+    async def _set_active_workspace(
+        self, path: str, bind_session: bool = True
+    ) -> dict[str, Any]:
+        """Validate, persist, and broadcast a new active workspace path (or clear with '')."""
+        cleaned = (path or "").strip()
+        if cleaned:
+            resolved = Path(cleaned).expanduser().resolve()
+            if not resolved.is_dir():
+                raise ValueError(f"Workspace path is not an existing directory: {path!r}")
+            resolved_str = str(resolved)
+        else:
+            resolved_str = ""
+
+        recent = list(self.config_manager.config.workspace.recent_paths)
+        if resolved_str:
+            recent = [resolved_str] + [p for p in recent if p != resolved_str]
+            recent = recent[:10]
+
+        self.config_manager.update_config(
+            {"workspace": {"active_path": resolved_str, "recent_paths": recent}}
+        )
+        if bind_session and self._active_session_id:
+            await self.storage.set_session_workspace(
+                self._active_session_id, resolved_str or None
+            )
+
+        self.mcp_manager.set_workspace_path(resolved_str)
+        self._rescan_skills()
+        await self._broadcast_skills_updated()
+        payload = self._build_workspace_payload()
+        await self.ipc.connection_manager.broadcast(
+            {"type": "workspace_updated", **payload}
+        )
+        return payload
 
     @staticmethod
     def _serialize_skill(
@@ -488,6 +545,285 @@ class ByteyDaemon:
             }
 
         return {"ok": False, "error": f"Unknown skill tool: {tool_name!r}"}
+
+    @staticmethod
+    def _build_workspace_tools() -> list[dict[str, Any]]:
+        """Build OpenAI-style built-in pseudo-tool schemas for active workspace operations."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_workspace__list_files",
+                    "description": "List files inside the active workspace directory.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "rel_path": {
+                                "type": "string",
+                                "description": "Relative directory path inside the workspace (default '.').",
+                            },
+                            "max_depth": {
+                                "type": "integer",
+                                "description": "Maximum directory traversal depth (default 3).",
+                            },
+                        },
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "list_files",
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_workspace__grep_search",
+                    "description": "Search workspace files for a regex pattern.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {
+                                "type": "string",
+                                "description": "Regular expression pattern to search for.",
+                            },
+                            "rel_path": {
+                                "type": "string",
+                                "description": "Relative file or directory path inside the workspace (default '.').",
+                            },
+                        },
+                        "required": ["pattern"],
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "grep_search",
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_workspace__read_file",
+                    "description": "Read numbered lines from a file inside the active workspace.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "rel_path": {
+                                "type": "string",
+                                "description": "Relative path to the file inside the workspace.",
+                            },
+                            "start_line": {
+                                "type": "integer",
+                                "description": "1-based starting line number (default 1).",
+                            },
+                            "end_line": {
+                                "type": "integer",
+                                "description": "1-based ending line number (default 200).",
+                            },
+                        },
+                        "required": ["rel_path"],
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "read_file",
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_workspace__propose_edit",
+                    "description": "Replace an exact target snippet in an existing workspace file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "rel_path": {
+                                "type": "string",
+                                "description": "Relative path to the file inside the workspace.",
+                            },
+                            "target": {
+                                "type": "string",
+                                "description": "Exact existing text to replace.",
+                            },
+                            "replacement": {
+                                "type": "string",
+                                "description": "Replacement text.",
+                            },
+                        },
+                        "required": ["rel_path", "target", "replacement"],
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "propose_edit",
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_workspace__write_file",
+                    "description": "Create or overwrite a file inside the active workspace.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "rel_path": {
+                                "type": "string",
+                                "description": "Relative path to the file inside the workspace.",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Full file content to write.",
+                            },
+                        },
+                        "required": ["rel_path", "content"],
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "write_file",
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_workspace__run_command",
+                    "description": "Execute a shell command inside the active workspace root.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "description": "Shell command to run in the workspace directory.",
+                            },
+                        },
+                        "required": ["command"],
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "run_command",
+            },
+        ]
+
+    async def _execute_workspace_tool(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        cfg: Any,
+        confirm_cb: Any,
+    ) -> dict[str, Any]:
+        """Execute a bytey_workspace__* tool call with optional user approval."""
+        active_ws = (cfg.workspace.active_path or "").strip()
+        if not active_ws:
+            return {"ok": False, "error": "No active workspace is configured."}
+        try:
+            toolchain = WorkspaceToolchain(active_ws)
+            if tool_name == "list_files":
+                rel_path = str(args.get("rel_path") or ".")
+                max_depth = int(args.get("max_depth", 3))
+                entries = toolchain.list_files(rel_path=rel_path, max_depth=max_depth)
+                return {
+                    "ok": True,
+                    "content": "\n".join(entries) if entries else "(no files found)",
+                }
+            if tool_name == "grep_search":
+                pattern = str(args.get("pattern") or "")
+                rel_path = str(args.get("rel_path") or ".")
+                matches = toolchain.grep_search(pattern=pattern, rel_path=rel_path)
+                lines = [f"{m['path']}:{m['line']}: {m['text']}" for m in matches]
+                return {
+                    "ok": True,
+                    "content": "\n".join(lines) if lines else "(no matches)",
+                }
+            if tool_name == "read_file":
+                rel_path = str(args.get("rel_path") or "")
+                start_line = int(args.get("start_line", 1))
+                end_line = int(args.get("end_line", 200))
+                content = toolchain.read_file(
+                    rel_path=rel_path, start_line=start_line, end_line=end_line
+                )
+                return {"ok": True, "content": content}
+            if tool_name == "propose_edit":
+                rel_path = str(args.get("rel_path") or "")
+                target = str(args.get("target") or "")
+                replacement = str(args.get("replacement") or "")
+                preview = toolchain.preview_edit(rel_path, target, replacement)
+                if not preview.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(preview.get("error") or "Edit preview failed"),
+                    }
+                if cfg.workspace.require_write_approval:
+                    approved = await confirm_cb(
+                        "bytey_workspace",
+                        "propose_edit",
+                        args,
+                        {"diff": preview["diff"], "rel_path": preview["rel_path"]},
+                    )
+                    if not approved:
+                        return {
+                            "ok": False,
+                            "denied": True,
+                            "error": "User rejected the proposed change/command.",
+                        }
+                res = toolchain.apply_edit(rel_path, target, replacement)
+                if not res.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(res.get("error") or "Edit failed"),
+                    }
+                return {"ok": True, "content": res.get("diff") or f"Edited {rel_path}"}
+            if tool_name == "write_file":
+                rel_path = str(args.get("rel_path") or "")
+                content = str(args.get("content") or "")
+                preview = toolchain.preview_write(rel_path, content)
+                if not preview.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(preview.get("error") or "Write preview failed"),
+                    }
+                if cfg.workspace.require_write_approval:
+                    approved = await confirm_cb(
+                        "bytey_workspace",
+                        "write_file",
+                        args,
+                        {"diff": preview["diff"], "rel_path": preview["rel_path"]},
+                    )
+                    if not approved:
+                        return {
+                            "ok": False,
+                            "denied": True,
+                            "error": "User rejected the proposed change/command.",
+                        }
+                res = toolchain.apply_write(rel_path, content)
+                if not res.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(res.get("error") or "Write failed"),
+                    }
+                return {"ok": True, "content": res.get("diff") or f"Wrote {rel_path}"}
+            if tool_name == "run_command":
+                command = str(args.get("command") or "").strip()
+                if not command:
+                    return {"ok": False, "error": "Command must not be empty"}
+                if cfg.workspace.require_command_approval:
+                    approved = await confirm_cb(
+                        "bytey_workspace",
+                        "run_command",
+                        args,
+                        {"command": command, "rel_path": "."},
+                    )
+                    if not approved:
+                        return {
+                            "ok": False,
+                            "denied": True,
+                            "error": "User rejected the proposed change/command.",
+                        }
+                res = await toolchain.run_command(command)
+                parts = [f"exit_code={res['returncode']}"]
+                if res.get("timed_out"):
+                    parts.append("timed_out=true")
+                if res.get("stdout"):
+                    parts.append(f"stdout:\n{res['stdout']}")
+                if res.get("stderr"):
+                    parts.append(f"stderr:\n{res['stderr']}")
+                ok = bool(res.get("ok"))
+                return {
+                    "ok": ok,
+                    "content": "\n".join(parts),
+                    "error": str(res.get("stderr") or "") if not ok else "",
+                }
+        except (ValueError, FileNotFoundError, NotADirectoryError, PermissionError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": f"Unknown workspace tool: {tool_name!r}"}
 
     def _track_task(self, coro: Any) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
@@ -785,6 +1121,7 @@ class ByteyDaemon:
             "type": "state_changed",
             "state": self.state,
             "emotion": self.emotion,
+            "speaking_message_id": self._speaking_message_id,
         }
         if label is not None:
             payload["label"] = label
@@ -876,6 +1213,23 @@ class ByteyDaemon:
         norm = str(state or "IDLE").upper()
         if norm == "IDLE" and self.config_manager.config.voice_in.mic_muted:
             norm = "MUTED"
+        if norm == "SPEAKING":
+            await self.ipc.connection_manager.broadcast(
+                {
+                    "type": "tts_playback",
+                    "status": "playing",
+                    "message_id": self._speaking_message_id,
+                }
+            )
+        elif prev_state == "SPEAKING" and norm in ("IDLE", "MUTED"):
+            self._speaking_message_id = None
+            await self.ipc.connection_manager.broadcast(
+                {
+                    "type": "tts_playback",
+                    "status": "idle",
+                    "message_id": None,
+                }
+            )
         if prev_state == "SPEAKING" and norm in ("IDLE", "MUTED") and not self._chat_lock.locked():
             await self._set_state(norm, emotion="neutral")
             return
@@ -945,24 +1299,26 @@ class ByteyDaemon:
         server_name: str,
         tool_name: str,
         arguments: dict[str, Any],
+        extra_payload: dict[str, Any] | None = None,
     ) -> bool:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[bool] = loop.create_future()
         self._pending_confirmations[call_id] = fut
 
         await self.storage.update_tool_call(call_id, "awaiting_confirm")
-        await self.ipc.connection_manager.broadcast(
-            {
-                "type": "tool_call_status",
-                "call_id": call_id,
-                "message_id": message_id,
-                "server": server_name,
-                "tool": tool_name,
-                "arguments": arguments,
-                "status": "awaiting_confirm",
-                "summary": "Waiting for user approval...",
-            }
-        )
+        payload: dict[str, Any] = {
+            "type": "tool_call_status",
+            "call_id": call_id,
+            "message_id": message_id,
+            "server": server_name,
+            "tool": tool_name,
+            "arguments": arguments,
+            "status": "awaiting_confirm",
+            "summary": "Waiting for user approval...",
+        }
+        if extra_payload:
+            payload.update(extra_payload)
+        await self.ipc.connection_manager.broadcast(payload)
         try:
             approved = await asyncio.wait_for(fut, timeout=60.0)
             return bool(approved)
@@ -1008,6 +1364,63 @@ class ByteyDaemon:
                 }
             )
 
+            ws_parts = text.split(None, 1)
+            ws_cmd = ws_parts[0].lower()
+            if ws_cmd in ("/workspace", "/cd"):
+                ws_arg = ws_parts[1].strip() if len(ws_parts) > 1 else ""
+                reply_emotion = "happy"
+                if not ws_arg and ws_cmd == "/workspace":
+                    cur = self._build_workspace_payload()
+                    if cur["active_path"]:
+                        branch_note = f" (branch: {cur['git_branch']})" if cur["git_branch"] else ""
+                        reply_text = f"Active workspace: `{cur['active_path']}`{branch_note}."
+                    else:
+                        reply_text = "No active workspace is set."
+                elif ws_arg.lower() == "clear":
+                    await self._set_active_workspace("")
+                    reply_text = "Workspace cleared."
+                elif not ws_arg:
+                    reply_emotion = "confused"
+                    reply_text = "Usage: `/cd <path>` or `/workspace <path|clear>`."
+                else:
+                    try:
+                        ws_payload = await self._set_active_workspace(ws_arg)
+                        branch_note = (
+                            f" (branch: {ws_payload['git_branch']})"
+                            if ws_payload.get("git_branch")
+                            else ""
+                        )
+                        reply_text = (
+                            f"Active workspace set to `{ws_payload['active_path']}`{branch_note}."
+                        )
+                    except (ValueError, OSError) as exc:
+                        reply_emotion = "error"
+                        reply_text = f"Workspace error: {exc}"
+                reply_msg = await self.storage.add_message(
+                    sid,
+                    role="assistant",
+                    content=reply_text,
+                    input_mode=input_mode,
+                    emotion=reply_emotion,
+                )
+                await self.ipc.connection_manager.broadcast(
+                    {
+                        "type": "transcript_delta",
+                        "session_id": sid,
+                        "message_id": reply_msg["id"],
+                        "role": "assistant",
+                        "source": input_mode,
+                        "text": reply_text,
+                        "emotion": reply_emotion,
+                        "is_final": True,
+                    }
+                )
+                return {
+                    "session_id": sid,
+                    "user_message": user_msg,
+                    "assistant_message": reply_msg,
+                }
+
             await self._set_state("THINKING", emotion="neutral")
 
             history = await self.storage.list_messages(sid, limit=40)
@@ -1025,6 +1438,7 @@ class ByteyDaemon:
                 emotion="neutral",
             )
             assistant_id = str(assistant_msg["id"])
+            self._speaking_message_id = assistant_id
 
             cfg = self.config_manager.config
             api_key = self._get_provider_api_key(cfg.provider.active_provider)
@@ -1055,8 +1469,12 @@ class ByteyDaemon:
                 except Exception as exc:
                     logger.warning("Failed listing active MCP tools: %s", exc)
                     tools = []
+            active_ws = (cfg.workspace.active_path or "").strip()
+            ws_valid = bool(active_ws and Path(active_ws).is_dir())
             if supports_tools and cfg.skills.enabled:
                 tools.extend(self._build_skill_tools(cfg))
+            if supports_tools and ws_valid:
+                tools.extend(self._build_workspace_tools())
 
             chunker = SentenceChunker()
             idle_before_s, recent_count = self._record_interaction()
@@ -1087,12 +1505,31 @@ class ByteyDaemon:
                 mood_hints.append("heavy_information=true (consider [emotion:focus])")
 
             runtime_context_note = f"\n\n[Runtime Mood Context: {'; '.join(mood_hints)}]"
+            if ws_valid:
+                ws_branch = detect_git_branch(Path(active_ws))
+                branch_suffix = f" (git branch: {ws_branch})" if ws_branch else ""
+                runtime_context_note += f"\n[Active Workspace: {active_ws}{branch_suffix}]"
+                if supports_tools:
+                    runtime_context_note += (
+                        "\n[Workspace Tool Rule: When the user asks to create, write, edit, inspect, "
+                        "or run files/scripts in the workspace, ALWAYS invoke bytey_workspace__write_file, "
+                        "bytey_workspace__propose_edit, bytey_workspace__list_files, "
+                        "bytey_workspace__read_file, or bytey_workspace__run_command instead of only "
+                        "pasting code in chat. The user will review and approve writes in the UI.]"
+                    )
             if needs_auto_title:
                 runtime_context_note += (
                     "\n[Runtime Title Request: This is a new conversation. Begin your reply with "
                     "[title: <2-5 word topic>] alongside your [emotion:<tag>] tag.]"
                 )
             effective_system_prompt = (cfg.general.system_prompt or "") + runtime_context_note
+            if ws_valid and cfg.workspace.auto_load_rules:
+                ws_rules = load_workspace_rules(Path(active_ws))
+                if ws_rules:
+                    rules_body = "\n\n".join(
+                        f"## {rel}\n{content}" for rel, content in ws_rules
+                    )
+                    effective_system_prompt += f"\n\n<workspace_rules>\n{rules_body}\n</workspace_rules>"
             if cfg.skills.enabled:
                 skill_catalog = self.skill_registry.format_prompt_catalog()
                 if skill_catalog:
@@ -1178,9 +1615,13 @@ class ByteyDaemon:
                         args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
                         call_id = str(uuid.uuid4())
                         is_skill_tool = ns_name.startswith("bytey_skill__")
+                        is_workspace_tool = ns_name.startswith("bytey_workspace__")
                         if is_skill_tool:
                             srv_name = "bytey_skill"
                             tool_name = ns_name[len("bytey_skill__") :]
+                        elif is_workspace_tool:
+                            srv_name = "bytey_workspace"
+                            tool_name = ns_name[len("bytey_workspace__") :]
                         else:
                             split = self.mcp_manager._split_namespaced_tool(ns_name, cfg.mcp_servers)
                             srv_name, tool_name = split if split else ("mcp", ns_name)
@@ -1211,10 +1652,11 @@ class ByteyDaemon:
                             c_srv: str,
                             c_tool: str,
                             c_args: dict[str, Any],
+                            c_extra: dict[str, Any] | None = None,
                             _cid: str = call_id,
                         ) -> bool:
                             approved = await self._request_tool_confirmation(
-                                _cid, assistant_id, c_srv, c_tool, c_args
+                                _cid, assistant_id, c_srv, c_tool, c_args, c_extra
                             )
                             if approved:
                                 await self.storage.update_tool_call(_cid, "running")
@@ -1234,6 +1676,13 @@ class ByteyDaemon:
 
                         if is_skill_tool:
                             tool_res = await self._execute_skill_tool(
+                                tool_name,
+                                args,
+                                cfg,
+                                confirm_cb,
+                            )
+                        elif is_workspace_tool:
+                            tool_res = await self._execute_workspace_tool(
                                 tool_name,
                                 args,
                                 cfg,
@@ -1340,6 +1789,8 @@ class ByteyDaemon:
                     and self.enable_voice_capture
                 )
                 if cfg.voice_out.tts_muted or cfg.voice_out.tts_provider == "disabled":
+                    if self._speaking_message_id == assistant_id:
+                        self._speaking_message_id = None
                     if continue_voice:
                         self.emotion = final_emotion
                         await self.voice_input.start_followup_listen()
@@ -1353,6 +1804,11 @@ class ByteyDaemon:
                 else:
                     t0 = asyncio.get_running_loop().time()
                     await self.tts_player.wait_idle()
+                    if self._speaking_message_id == assistant_id:
+                        self._speaking_message_id = None
+                        await self.ipc.connection_manager.broadcast(
+                            {"type": "tts_playback", "status": "idle", "message_id": None}
+                        )
                     tts_elapsed = asyncio.get_running_loop().time() - t0
                     if tts_elapsed >= 0.35:
                         # Audio reproduction completed: return mood back to neutral immediately.
@@ -1425,6 +1881,8 @@ class ByteyDaemon:
         self.ipc.register_route("POST", "/api/v1/tools/{call_id}/confirm", self._route_confirm_tool)
 
         self.ipc.register_route("GET", "/api/v1/skills", self._route_list_skills)
+        self.ipc.register_route("GET", "/api/v1/workspace", self._route_get_workspace)
+        self.ipc.register_route("PUT", "/api/v1/workspace", self._route_put_workspace)
         self.ipc.register_route("POST", "/api/v1/skills/rescan", self._route_rescan_skills)
         self.ipc.register_route("POST", "/api/v1/skills/import", self._route_import_skill)
         self.ipc.register_route("POST", "/api/v1/skills", self._route_create_skill)
@@ -1438,6 +1896,7 @@ class ByteyDaemon:
             "POST", "/api/v1/tts/piper/download", self._route_download_piper_model
         )
         self.ipc.register_route("POST", "/api/v1/tts/replay", self._route_replay_tts)
+        self.ipc.register_route("POST", "/api/v1/tts/pause", self._route_pause_tts)
         self.ipc.register_route(
             "POST",
             "/api/v1/sessions/{session_id}/messages/{message_id}/replay",
@@ -1453,6 +1912,11 @@ class ByteyDaemon:
         )
         self.ipc.register_route("PATCH", "/api/v1/sessions/{session_id}", self._route_patch_session)
         self.ipc.register_route("POST", "/api/v1/sessions/{session_id}/messages", self._route_post_message)
+        self.ipc.register_route(
+            "DELETE",
+            "/api/v1/sessions/{session_id}/messages/{message_id}",
+            self._route_delete_message,
+        )
         self.ipc.register_route("DELETE", "/api/v1/sessions/{session_id}", self._route_delete_session)
         self.ipc.register_route("POST", "/api/v1/chat", self._route_chat)
 
@@ -1492,6 +1956,8 @@ class ByteyDaemon:
         if updated.voice_in.mic_muted != prev_muted:
             await self.voice_input.set_muted(updated.voice_in.mic_muted)
 
+        self.mcp_manager.set_workspace_path(updated.workspace.active_path)
+
         if refresh_skills:
             self._rescan_skills()
             await self._broadcast_skills_updated()
@@ -1516,7 +1982,7 @@ class ByteyDaemon:
             prev_muted,
             refresh_provider="provider" in canonical_patch,
             broadcast_visuals="visuals" in canonical_patch,
-            refresh_skills="skills" in canonical_patch,
+            refresh_skills="skills" in canonical_patch or "workspace" in canonical_patch,
             tools_hint=tools_hint,
         )
 
@@ -1646,6 +2112,24 @@ class ByteyDaemon:
             )
         fut.set_result(approved)
         return {"ok": True, "call_id": call_id, "approved": approved}
+
+    async def _route_get_workspace(self, _req: IPCRequest) -> dict[str, Any]:
+        return self._build_workspace_payload()
+
+    async def _route_put_workspace(self, req: IPCRequest) -> dict[str, Any]:
+        body = req.json()
+        if not isinstance(body, dict) or not isinstance(body.get("path"), str):
+            return IPCResponse(  # type: ignore[return-value]
+                status=400,
+                body={"error": "Request body must be a JSON object with string 'path'"},
+            )
+        try:
+            return await self._set_active_workspace(body["path"])
+        except (ValueError, OSError) as exc:
+            return IPCResponse(  # type: ignore[return-value]
+                status=400,
+                body={"error": str(exc)},
+            )
 
     async def _route_list_skills(self, _req: IPCRequest) -> dict[str, Any]:
         cfg = self.config_manager.config
@@ -1871,10 +2355,46 @@ class ByteyDaemon:
         if not text:
             raise ValueError("No text available to replay")
         await self.tts_player.barge_in()
+        self._speaking_message_id = str(msg_id) if msg_id else None
         if replay_emotion and replay_emotion != "neutral":
             await self._set_state(self.state, emotion=replay_emotion)
         await self.tts_player.speak_text(text)
         return {"ok": True}
+
+    async def _route_pause_tts(self, req: IPCRequest) -> dict[str, Any]:
+        body = req.json()
+        if isinstance(body, dict) and "paused" in body and body["paused"] is not None:
+            if bool(body["paused"]):
+                await self.tts_player.pause()
+            else:
+                await self.tts_player.resume()
+        elif self.tts_player.is_paused:
+            await self.tts_player.resume()
+        else:
+            await self.tts_player.pause()
+
+        if self.tts_player.is_paused:
+            await self.ipc.connection_manager.broadcast(
+                {
+                    "type": "tts_playback",
+                    "status": "paused",
+                    "message_id": self._speaking_message_id,
+                }
+            )
+        else:
+            status = "playing" if self.tts_player.is_playing else "idle"
+            await self.ipc.connection_manager.broadcast(
+                {
+                    "type": "tts_playback",
+                    "status": status,
+                    "message_id": self._speaking_message_id,
+                }
+            )
+        return {
+            "ok": True,
+            "paused": self.tts_player.is_paused,
+            "message_id": self._speaking_message_id,
+        }
 
     async def _route_list_sessions(self, _req: IPCRequest) -> dict[str, Any]:
         sid = await self._ensure_active_session()
@@ -1926,6 +2446,17 @@ class ByteyDaemon:
                 body={"error": f"Session not found: {sid}"},
             )
         self._active_session_id = sid
+        session_ws = str(session.get("workspace_path") or "").strip()
+        if session_ws:
+            try:
+                resolved_ws = Path(session_ws).expanduser().resolve()
+                if (
+                    resolved_ws.is_dir()
+                    and str(resolved_ws) != self.config_manager.config.workspace.active_path
+                ):
+                    await self._set_active_workspace(str(resolved_ws), bind_session=False)
+            except OSError:
+                pass
         messages = await self.storage.list_messages(sid, limit=100)
         await self.ipc.connection_manager.broadcast(
             {
@@ -1953,6 +2484,26 @@ class ByteyDaemon:
             )
         await self._broadcast_sessions_updated()
         return {"session": updated}
+
+    async def _route_delete_message(self, req: IPCRequest) -> dict[str, Any]:
+        raw_sid = req.path_params.get("session_id")
+        sid = (
+            await self._ensure_active_session()
+            if raw_sid in (None, "", "active")
+            else str(raw_sid)
+        )
+        mid = str(req.path_params["message_id"])
+        deleted = await self.storage.delete_message(sid, mid)
+        if not deleted:
+            return IPCResponse(  # type: ignore[return-value]
+                status=404,
+                body={"error": f"Message not found: {mid}"},
+            )
+        await self.ipc.connection_manager.broadcast(
+            {"type": "message_deleted", "session_id": sid, "message_id": mid}
+        )
+        await self._broadcast_sessions_updated()
+        return {"deleted": mid, "session_id": sid}
 
     async def _route_delete_session(self, req: IPCRequest) -> dict[str, Any]:
         sid = req.path_params["session_id"]
@@ -1989,6 +2540,10 @@ class ByteyDaemon:
 
     async def _route_voice_barge_in(self, _req: IPCRequest) -> dict[str, Any]:
         await self.tts_player.barge_in()
+        self._speaking_message_id = None
+        await self.ipc.connection_manager.broadcast(
+            {"type": "tts_playback", "status": "idle", "message_id": None}
+        )
         await self._set_state("MUTED" if self.config_manager.config.voice_in.mic_muted else "IDLE")
         return {"ok": True}
 

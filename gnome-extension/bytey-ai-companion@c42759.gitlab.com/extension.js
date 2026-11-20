@@ -82,6 +82,8 @@ export default class ByteyExtension extends Extension {
             onSendText: text => this._handleSendText(text),
             onClearChat: () => this._handleNewChat(),
             onReplayTts: (messageId, text) => this._handleReplayTts(messageId, text),
+            onDeleteMessage: messageId => this._handleDeleteMessage(messageId),
+            onTogglePauseTts: () => this._handleTogglePauseTts(),
             onManualMic: () => this._handleManualMic(),
             onConfirmTool: (callId, approved) => this._handleConfirmTool(callId, approved),
             onResizeCommit: (width, height) => {
@@ -100,7 +102,7 @@ export default class ByteyExtension extends Extension {
                 }).catch(() => {});
             },
             onOpenChanged: isOpen => {
-                if (isOpen)
+                if (isOpen && !this._drawer?.hasPendingConfirmation() && !this._isDaemonBusy())
                     this._refreshActiveSession().catch(() => {});
             },
             onSelectSession: sessionId => this._handleSelectSession(sessionId),
@@ -111,6 +113,8 @@ export default class ByteyExtension extends Extension {
                 if (isOpen)
                     this._refreshSessionsList().catch(() => {});
             },
+            onSelectWorkspace: path => this._handleSelectWorkspace(path),
+            onOpenWorkspaceSettings: () => this.openPreferences(),
         });
 
         this._islandWidget = new IslandWidget(this._positionManager, {
@@ -361,6 +365,27 @@ export default class ByteyExtension extends Extension {
 
         await this._refreshSessionsList();
         await this._refreshSkillsList();
+        await this._refreshWorkspace();
+    }
+
+    async _refreshWorkspace() {
+        const resp = await this._httpJson('GET', '/api/v1/workspace');
+        if (this._disabled || !resp.ok || !resp.data)
+            return;
+        this._drawer?.setWorkspace(resp.data);
+    }
+
+    async _handleSelectWorkspace(path) {
+        if (this._disabled)
+            return;
+        const resp = await this._httpJson('PUT', '/api/v1/workspace', {
+            path: String(path ?? '').trim(),
+        });
+        if (this._disabled || !resp.ok)
+            return;
+        if (resp.data)
+            this._drawer?.setWorkspace(resp.data);
+        this._refreshSkillsList().catch(() => {});
     }
 
     async _refreshSkillsList() {
@@ -572,6 +597,24 @@ export default class ByteyExtension extends Extension {
         }
     }
 
+    async _handleDeleteMessage(messageId) {
+        if (this._disabled || !messageId)
+            return;
+        const sid = encodeURIComponent(this._activeSessionId ?? 'active');
+        const mid = encodeURIComponent(messageId);
+        const resp = await this._httpJson('DELETE', `/api/v1/sessions/${sid}/messages/${mid}`);
+        if (this._disabled || !resp.ok)
+            return;
+        this._drawer?.removeMessage(messageId);
+        await this._refreshSessionsList();
+    }
+
+    async _handleTogglePauseTts() {
+        if (this._disabled)
+            return;
+        await this._httpJson('POST', '/api/v1/tts/pause', {});
+    }
+
     async _handleManualMic() {
         const state = this._islandWidget?.state ?? 'IDLE';
         if (state === 'SPEAKING')
@@ -580,15 +623,21 @@ export default class ByteyExtension extends Extension {
             await this._httpJson('POST', '/api/v1/voice/trigger', {});
     }
 
-    async _handleConfirmTool(callId, approved) {
-        let resp = await this._httpJson('POST', '/api/v1/mcp/confirm', {
-            call_id: callId,
+    async _handleConfirmTool(requestId, approved) {
+        let resp = await this._httpJson('POST', '/api/v1/tools/confirm', {
+            request_id: requestId,
             approved: Boolean(approved),
         });
         if (!resp.ok && resp.status === 404) {
+            resp = await this._httpJson('POST', '/api/v1/mcp/confirm', {
+                call_id: requestId,
+                approved: Boolean(approved),
+            });
+        }
+        if (!resp.ok && resp.status === 404) {
             resp = await this._httpJson(
                 'POST',
-                `/api/v1/tools/${encodeURIComponent(callId)}/confirm`,
+                `/api/v1/tools/${encodeURIComponent(requestId)}/confirm`,
                 {approved: Boolean(approved)}
             );
         }
@@ -798,6 +847,21 @@ export default class ByteyExtension extends Extension {
             this._daemonState = String(state).toUpperCase();
             this._islandWidget?.setState(state, event.emotion, event.label);
             this._drawer?.setListening(this._daemonState === 'LISTENING');
+            if (this._daemonState !== 'SPEAKING')
+                this._drawer?.setSpeakingMessage(null, 'idle');
+            else if (event.speaking_message_id)
+                this._drawer?.setSpeakingMessage(event.speaking_message_id, 'playing');
+            break;
+        }
+        case 'tts_playback': {
+            this._drawer?.setSpeakingMessage(
+                event.message_id ?? null,
+                event.status ?? 'idle'
+            );
+            break;
+        }
+        case 'message_deleted': {
+            this._drawer?.removeMessage(event.message_id);
             break;
         }
         case 'audio_level': {
@@ -814,7 +878,6 @@ export default class ByteyExtension extends Extension {
             break;
         }
         case 'tool_call_status': {
-            this._drawer?.updateToolCall(event);
             const status = String(event.status ?? '').toLowerCase();
             if (status === 'running' && event.tool)
                 this._islandWidget?.setState('TOOL_CALLING', undefined, String(event.tool));
@@ -823,6 +886,21 @@ export default class ByteyExtension extends Extension {
                 const monIdx = this._config?.visuals?.monitor_index ?? 0;
                 this._drawer.open(b.x, b.y, b.width, b.height, monIdx);
             }
+            this._drawer?.updateToolCall(event);
+            break;
+        }
+        case 'tool_confirmation_required': {
+            if (!this._drawer?.isOpen && this._islandWidget) {
+                const b = this._islandWidget.getBounds();
+                const monIdx = this._config?.visuals?.monitor_index ?? 0;
+                this._drawer.open(b.x, b.y, b.width, b.height, monIdx);
+            }
+            this._drawer?.showToolConfirmation(event);
+            break;
+        }
+        case 'workspace_updated': {
+            this._drawer?.setWorkspace(event.workspace ?? event);
+            this._refreshSkillsList().catch(() => {});
             break;
         }
         case 'config_updated': {

@@ -11,6 +11,7 @@ import os
 import py_compile
 import re
 import shutil
+import signal
 import socket
 import sqlite3
 import stat
@@ -25,7 +26,7 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import numpy as np
@@ -58,6 +59,7 @@ from bytey_ai_companion.config import (  # noqa: E402
     SecretStore,
     VisualsConfig,
     VoiceOutConfig,
+    WorkspaceConfig,
     resolve_config_dir,
 )
 from bytey_ai_companion.llm.emotions import (  # noqa: E402
@@ -79,6 +81,10 @@ from bytey_ai_companion.skills.loader import (  # noqa: E402
     parse_frontmatter,
 )
 from bytey_ai_companion.skills.runner import SkillScriptRunner  # noqa: E402
+from bytey_ai_companion.workspace.tools import (  # noqa: E402
+    WorkspaceToolchain,
+    load_workspace_rules,
+)
 from bytey_ai_companion.storage import (  # noqa: E402
     DEFAULT_DB_FILENAME,
     LEGACY_DB_FILENAME,
@@ -841,6 +847,39 @@ class TestStorageManager(unittest.IsolatedAsyncioTestCase):
         missing = await self.storage.rename_session("nonexistent-session-id", "Valid Title")
         self.assertIsNone(missing)
 
+    async def test_delete_message_cascades_and_missing(self) -> None:
+        s1 = await self.storage.create_session("Session One")
+        s2 = await self.storage.create_session("Session Two")
+
+        m1 = await self.storage.add_message(s1["id"], role="assistant", content="With tool")
+        m2 = await self.storage.add_message(s1["id"], role="user", content="Keep me")
+        await self.storage.add_tool_call(
+            message_id=m1["id"],
+            server_name="fs",
+            tool_name="read_file",
+            arguments_json={"path": "/tmp/y"},
+            status="ok",
+        )
+
+        # Wrong session or nonexistent message -> False
+        self.assertFalse(await self.storage.delete_message(s2["id"], m1["id"]))
+        self.assertFalse(await self.storage.delete_message(s1["id"], "nonexistent-msg-id"))
+
+        # Valid delete -> True, removes message + cascaded tool_calls
+        self.assertTrue(await self.storage.delete_message(s1["id"], m1["id"]))
+        remaining = await self.storage.list_messages(s1["id"])
+        self.assertEqual([m["id"] for m in remaining], [m2["id"]])
+
+        with contextlib.closing(sqlite3.connect(str(self.db_path))) as conn:
+            msg_count = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE id = ?", (m1["id"],)
+            ).fetchone()[0]
+            tc_count = conn.execute(
+                "SELECT COUNT(*) FROM tool_calls WHERE message_id = ?", (m1["id"],)
+            ).fetchone()[0]
+        self.assertEqual(msg_count, 0)
+        self.assertEqual(tc_count, 0)
+
 
 class TestStoragePathFallback(unittest.TestCase):
     """Test legacy data directory and SQLite path fallback resolution."""
@@ -990,6 +1029,45 @@ class TestChunkerAndEmotions(unittest.TestCase):
                 "Final words",
             ],
         )
+
+    def test_sentence_chunker_ignores_fenced_code_blocks_and_keeps_inline_code(self) -> None:
+        text = (
+            "Here is the snippet:\n"
+            "```python\n"
+            "def greet(name):\n"
+            "    return f'Hello, {name}!'\n"
+            "```\n"
+            "Use 'greet(\"Bytey\")' or `greet('world')` to run it. "
+            "Another example:\n"
+            "'''js\n"
+            "console.log('ignored.');\n"
+            "'''\n"
+            "All done!"
+        )
+        # Test streaming across small 5-char chunks (splits fences across boundaries)
+        chunker = SentenceChunker(min_chars=8)
+        emitted: list[str] = []
+        for i in range(0, len(text), 5):
+            emitted.extend(chunker.feed(text[i : i + 5]))
+        tail = chunker.flush()
+        if tail:
+            emitted.append(tail)
+
+        joined = " ".join(emitted)
+        self.assertIn("Here is the snippet:", joined)
+        self.assertIn("Use 'greet(\"Bytey\")' or `greet('world')` to run it.", joined)
+        self.assertIn("Another example:", joined)
+        self.assertIn("All done!", joined)
+        self.assertNotIn("def greet", joined)
+        self.assertNotIn("console.log", joined)
+
+        # Unclosed trailing code block should also be ignored on flush
+        chunker.reset()
+        out2 = chunker.feed("Intro sentence here.\n```bash\necho hi\n")
+        tail2 = chunker.flush()
+        if tail2:
+            out2.append(tail2)
+        self.assertEqual(out2, ["Intro sentence here."])
 
     def test_emotion_stream_parser_arbitrary_boundaries(self) -> None:
         observed_emotions: list[str] = []
@@ -2156,6 +2234,273 @@ asyncio.run(main())
 
         skills_ws_events = [e for e in events if e.get("type") == "skills_updated"]
         self.assertGreaterEqual(len(skills_ws_events), 5)
+
+    async def test_workspace_rest_slash_commands_and_session_restore(self) -> None:
+        ws1 = (self.root / "ws_one").resolve()
+        ws2 = (self.root / "ws_two").resolve()
+        (ws1 / ".agents" / "skills" / "ws-only-skill").mkdir(parents=True)
+        (ws1 / ".agents" / "skills" / "ws-only-skill" / "SKILL.md").write_text(
+            "---\nname: ws-only-skill\ndescription: Workspace skill\n---\n\nWorkspace body\n",
+            encoding="utf-8",
+        )
+        ws2.mkdir(parents=True)
+
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+            r_init = await client.get("/api/v1/workspace")
+            self.assertEqual(r_init.status_code, 200)
+            self.assertEqual(r_init.json()["active_path"], "")
+
+            r_bad = await client.put(
+                "/api/v1/workspace",
+                json={"path": str(self.root / "does_not_exist")},
+            )
+            self.assertEqual(r_bad.status_code, 400)
+
+            r_sess_a = await client.post("/api/v1/sessions", json={"title": "Session A"})
+            self.assertEqual(r_sess_a.status_code, 200)
+            sess_a_id = r_sess_a.json()["id"]
+            await client.post(f"/api/v1/sessions/{sess_a_id}/activate")
+
+            events: list[dict[str, Any]] = []
+            async with websockets.connect(self.ws_url) as ws:
+                async def _ws_reader() -> None:
+                    try:
+                        async for raw in ws:
+                            events.append(json.loads(raw))
+                    except websockets.ConnectionClosed:
+                        pass
+
+                reader_task = asyncio.create_task(_ws_reader())
+                try:
+                    r_put1 = await client.put("/api/v1/workspace", json={"path": str(ws1)})
+                    self.assertEqual(r_put1.status_code, 200)
+                    p1 = r_put1.json()
+                    self.assertEqual(p1["active_path"], str(ws1))
+                    self.assertIn(str(ws1), p1["recent_paths"])
+                    self.assertEqual(p1["workspace_skills_count"], 1)
+
+                    r_sess_b = await client.post("/api/v1/sessions", json={"title": "Session B"})
+                    self.assertEqual(r_sess_b.status_code, 200)
+                    sess_b_id = r_sess_b.json()["id"]
+                    await client.post(f"/api/v1/sessions/{sess_b_id}/activate")
+
+                    r_cmd_set = await client.post(
+                        "/api/v1/chat",
+                        json={"content": f"/workspace {ws2}", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_cmd_set.status_code, 200)
+                    self.assertEqual(
+                        (await client.get("/api/v1/workspace")).json()["active_path"],
+                        str(ws2),
+                    )
+
+                    r_cmd_clear = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "/workspace clear", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_cmd_clear.status_code, 200)
+                    self.assertEqual(
+                        (await client.get("/api/v1/workspace")).json()["active_path"],
+                        "",
+                    )
+
+                    # Activating Session A restores ws1 as the active workspace
+                    r_act_a = await client.post(f"/api/v1/sessions/{sess_a_id}/activate")
+                    self.assertEqual(r_act_a.status_code, 200)
+                    restored = (await client.get("/api/v1/workspace")).json()
+                    self.assertEqual(restored["active_path"], str(ws1))
+                    self.assertEqual(restored["workspace_skills_count"], 1)
+
+                    await asyncio.sleep(0.05)
+                finally:
+                    reader_task.cancel()
+                    await asyncio.gather(reader_task, return_exceptions=True)
+
+            ws_updated = [e for e in events if e.get("type") == "workspace_updated"]
+            skills_updated = [e for e in events if e.get("type") == "skills_updated"]
+            self.assertGreaterEqual(len(ws_updated), 4)
+            self.assertGreaterEqual(len(skills_updated), 4)
+
+    async def test_workspace_propose_edit_approval_and_rejection(self) -> None:
+        ws = (self.root / "ws_edit").resolve()
+        ws.mkdir(parents=True)
+        target_file = ws / "app.py"
+        target_file.write_text("x = 1\n", encoding="utf-8")
+
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+            r_ws = await client.put("/api/v1/workspace", json={"path": str(ws)})
+            self.assertEqual(r_ws.status_code, 200)
+            r_cfg = await client.patch(
+                "/api/v1/config",
+                json={
+                    "llm": {
+                        "provider": "gemini",
+                        "model": "gemini-2.5-flash",
+                        "force_enable_tools": True,
+                    }
+                },
+            )
+            self.assertEqual(r_cfg.status_code, 200)
+
+            self.mock_llm.tool_trigger_phrase = "trigger_propose_edit"
+            self.mock_llm.tool_name_override = "bytey_workspace__propose_edit"
+            self.mock_llm.tool_arguments = {
+                "rel_path": "app.py",
+                "target": "x = 1",
+                "replacement": "x = 2",
+            }
+            approve_next = {"value": False}
+            awaiting_events: list[dict[str, Any]] = []
+
+            async with websockets.connect(self.ws_url) as ws_conn:
+                async def _ws_reader() -> None:
+                    try:
+                        async for raw in ws_conn:
+                            ev = json.loads(raw)
+                            if (
+                                ev.get("type") == "tool_call_status"
+                                and ev.get("status") == "awaiting_confirm"
+                            ):
+                                awaiting_events.append(ev)
+                                call_id = ev["call_id"]
+                                resp = await client.post(
+                                    f"/api/v1/tools/{call_id}/confirm",
+                                    json={"approved": approve_next["value"]},
+                                )
+                                self.assertEqual(resp.status_code, 200)
+                    except websockets.ConnectionClosed:
+                        pass
+
+                reader_task = asyncio.create_task(_ws_reader())
+                try:
+                    approve_next["value"] = False
+                    r_reject = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Please trigger_propose_edit", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_reject.status_code, 200)
+                    self.assertEqual(target_file.read_text(encoding="utf-8"), "x = 1\n")
+
+                    approve_next["value"] = True
+                    r_approve = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Please trigger_propose_edit", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_approve.status_code, 200)
+                    self.assertEqual(target_file.read_text(encoding="utf-8"), "x = 2\n")
+                finally:
+                    self.mock_llm.tool_trigger_phrase = "use_echo_tool"
+                    self.mock_llm.tool_name_override = None
+                    self.mock_llm.tool_arguments = None
+                    reader_task.cancel()
+                    await asyncio.gather(reader_task, return_exceptions=True)
+
+            self.assertEqual(len(awaiting_events), 2)
+            for ev in awaiting_events:
+                self.assertEqual(ev.get("server"), "bytey_workspace")
+                self.assertEqual(ev.get("tool"), "propose_edit")
+                self.assertIn("-x = 1", ev.get("diff", ""))
+                self.assertIn("+x = 2", ev.get("diff", ""))
+
+    async def test_delete_message_and_tts_pause_resume(self) -> None:
+        """Verify DELETE message endpoint (404/200 + WS) and POST /api/v1/tts/pause."""
+        events: list[dict[str, Any]] = []
+
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+            async with websockets.connect(self.ws_url) as ws:
+                async def _ws_reader() -> None:
+                    try:
+                        async for raw in ws:
+                            events.append(json.loads(raw))
+                    except websockets.ConnectionClosed:
+                        pass
+
+                reader_task = asyncio.create_task(_ws_reader())
+                try:
+                    r_s = await client.post("/api/v1/sessions", json={"title": "Delete & Pause"})
+                    self.assertEqual(r_s.status_code, 200)
+                    sid = r_s.json()["id"]
+
+                    r_post = await client.post(
+                        f"/api/v1/sessions/{sid}/messages",
+                        json={"content": "Message to delete", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_post.status_code, 200)
+
+                    r_msgs = await client.get(f"/api/v1/sessions/{sid}/messages")
+                    self.assertEqual(r_msgs.status_code, 200)
+                    msgs = r_msgs.json()["messages"]
+                    self.assertGreaterEqual(len(msgs), 1)
+                    mid = msgs[0]["id"]
+
+                    # Missing message -> 404
+                    r_404 = await client.delete(
+                        f"/api/v1/sessions/{sid}/messages/nonexistent-msg-id"
+                    )
+                    self.assertEqual(r_404.status_code, 404)
+
+                    # Existing message -> 200 + message_deleted & sessions_updated
+                    events.clear()
+                    r_del = await client.delete(f"/api/v1/sessions/{sid}/messages/{mid}")
+                    self.assertEqual(r_del.status_code, 200)
+                    self.assertEqual(r_del.json(), {"deleted": mid, "session_id": sid})
+
+                    r_after = await client.get(f"/api/v1/sessions/{sid}/messages")
+                    self.assertEqual(r_after.status_code, 200)
+                    self.assertNotIn(mid, [m["id"] for m in r_after.json()["messages"]])
+
+                    # TTS pause/resume toggle + explicit paused flag
+                    self.daemon.tts_player._speaking = True
+                    self.daemon._speaking_message_id = "msg-tts-1"
+                    try:
+                        r_p1 = await client.post("/api/v1/tts/pause", json={})
+                        self.assertEqual(r_p1.status_code, 200)
+                        self.assertEqual(
+                            r_p1.json(),
+                            {"ok": True, "paused": True, "message_id": "msg-tts-1"},
+                        )
+
+                        r_p2 = await client.post("/api/v1/tts/pause", json={})
+                        self.assertEqual(r_p2.status_code, 200)
+                        self.assertEqual(
+                            r_p2.json(),
+                            {"ok": True, "paused": False, "message_id": "msg-tts-1"},
+                        )
+
+                        r_p3 = await client.post("/api/v1/tts/pause", json={"paused": True})
+                        self.assertEqual(r_p3.status_code, 200)
+                        self.assertTrue(r_p3.json()["paused"])
+
+                        r_p4 = await client.post("/api/v1/tts/pause", json={"paused": False})
+                        self.assertEqual(r_p4.status_code, 200)
+                        self.assertFalse(r_p4.json()["paused"])
+                    finally:
+                        await self.daemon.tts_player.barge_in()
+                        self.daemon._speaking_message_id = None
+
+                    await asyncio.sleep(0.05)
+                finally:
+                    reader_task.cancel()
+                    await asyncio.gather(reader_task, return_exceptions=True)
+
+        deleted_evs = [e for e in events if e.get("type") == "message_deleted"]
+        self.assertEqual(len(deleted_evs), 1)
+        self.assertEqual(deleted_evs[0]["session_id"], sid)
+        self.assertEqual(deleted_evs[0]["message_id"], mid)
+
+        updated_evs = [e for e in events if e.get("type") == "sessions_updated"]
+        self.assertGreaterEqual(len(updated_evs), 1)
+
+        tts_evs = [e for e in events if e.get("type") == "tts_playback"]
+        self.assertEqual(
+            [(e.get("status"), e.get("message_id")) for e in tts_evs],
+            [
+                ("paused", "msg-tts-1"),
+                ("playing", "msg-tts-1"),
+                ("paused", "msg-tts-1"),
+                ("playing", "msg-tts-1"),
+            ],
+        )
 
 
 class TestSettingsClientAndSyntax(unittest.TestCase):
@@ -4146,6 +4491,51 @@ class TestPiperTTS(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(synth_calls[1]["text"], "Speak via queue!")
         self.assertEqual(played, [(expected_wav, "wav")])
 
+    async def test_streaming_tts_player_pause_resume_and_barge_in(self) -> None:
+        player = StreamingTTSPlayer(
+            get_config=lambda: {},
+            get_secret=lambda _k: None,
+        )
+        try:
+            self.assertFalse(player.is_paused)
+            # Idle pause returns False and does not flip is_paused
+            self.assertFalse(await player.pause())
+            self.assertFalse(player.is_paused)
+
+            mock_proc = MagicMock()
+            mock_proc.returncode = None
+            mock_proc.send_signal = MagicMock()
+            mock_proc.terminate = MagicMock()
+            mock_proc.kill = MagicMock()
+            mock_proc.wait = AsyncMock(return_value=0)
+
+            player._speaking = True
+            player._active_proc = mock_proc
+
+            self.assertTrue(await player.pause())
+            self.assertTrue(player.is_paused)
+            self.assertFalse(player._pause_event.is_set())
+            mock_proc.send_signal.assert_called_with(signal.SIGSTOP)
+
+            self.assertTrue(await player.resume())
+            self.assertFalse(player.is_paused)
+            self.assertTrue(player._pause_event.is_set())
+            mock_proc.send_signal.assert_called_with(signal.SIGCONT)
+
+            # Resuming when not paused returns False
+            self.assertFalse(await player.resume())
+
+            # barge_in() resets _paused and terminates active proc
+            self.assertTrue(await player.pause())
+            self.assertTrue(player.is_paused)
+            await player.barge_in()
+            self.assertFalse(player.is_paused)
+            self.assertTrue(player._pause_event.is_set())
+            self.assertFalse(player._speaking)
+            self.assertIsNone(player._active_proc)
+        finally:
+            await player.stop()
+
 
 class TestPiperDaemonAPI(unittest.IsolatedAsyncioTestCase):
     """REST integration tests for Piper TTS voices, download, and config patch endpoints."""
@@ -4771,6 +5161,196 @@ class TestSkillScriptRunner(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(c_res.returncode, 0)
             self.assertTrue(c_res.truncated)
             self.assertIn("[Truncated at 32 KiB]", c_res.stdout)
+
+
+class TestWorkspaceToolchain(unittest.IsolatedAsyncioTestCase):
+    """Unit tests for WorkspaceConfig, WorkspaceToolchain, workspace skills, and MCP expansion."""
+
+    def test_workspace_config_validation_and_recent_paths_dedup_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dirs = [root / f"proj_{i}" for i in range(12)]
+            for d in dirs:
+                d.mkdir()
+
+            with self.assertRaises(ValidationError):
+                WorkspaceConfig(active_path=str(root / "missing_dir"))
+
+            cfg = WorkspaceConfig(
+                active_path=str(dirs[0]),
+                recent_paths=[str(dirs[0]), str(dirs[0]), *[str(d) for d in dirs]],
+            )
+            self.assertEqual(cfg.active_path, str(dirs[0].resolve()))
+            self.assertEqual(len(cfg.recent_paths), 10)
+            self.assertEqual(len(set(cfg.recent_paths)), 10)
+            self.assertEqual(cfg.recent_paths[0], str(dirs[0].resolve()))
+
+    def test_list_files_grep_read_and_path_traversal_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            (ws / "src").mkdir()
+            (ws / "src" / "main.py").write_text("alpha = 1\nbeta = 2\ngamma = 3\n", encoding="utf-8")
+            (ws / ".git").mkdir()
+            (ws / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (ws / "node_modules").mkdir()
+            (ws / "node_modules" / "pkg.js").write_text("beta = 99\n", encoding="utf-8")
+
+            outside = root / "secret.txt"
+            outside.write_text("top-secret\n", encoding="utf-8")
+            (ws / "escape_link.txt").symlink_to(outside)
+
+            tc = WorkspaceToolchain(ws)
+            files = tc.list_files()
+            self.assertEqual(files, ["src/main.py"])
+
+            matches = tc.grep_search(r"beta")
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(matches[0]["path"], "src/main.py")
+            self.assertEqual(matches[0]["line"], 2)
+            self.assertIn("beta = 2", matches[0]["text"])
+
+            with self.assertRaises(ValueError):
+                tc.grep_search("")
+
+            snippet = tc.read_file("src/main.py", start_line=2, end_line=3)
+            self.assertEqual(snippet, "2: beta = 2\n3: gamma = 3")
+
+            for bad_path in ("../secret.txt", str(outside), "escape_link.txt"):
+                with self.assertRaises(ValueError):
+                    tc.read_file(bad_path)
+                with self.assertRaises(ValueError):
+                    tc.preview_edit(bad_path, "a", "b")
+                with self.assertRaises(ValueError):
+                    tc.apply_write(bad_path, "x")
+
+    async def test_preview_apply_edit_write_run_command_and_load_workspace_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            ws.mkdir()
+            (ws / "hello.txt").write_text("hello world\n", encoding="utf-8")
+            (ws / "AGENTS.md").write_text("Rule 1: test first.", encoding="utf-8")
+            (ws / ".agents").mkdir()
+            (ws / ".agents" / "GEMINI.md").write_text("Rule 2: be concise.", encoding="utf-8")
+            (ws / ".agents" / "CLAUDE.md").write_text("Rule 3: verify.", encoding="utf-8")
+
+            tc = WorkspaceToolchain(ws)
+
+            miss = tc.preview_edit("hello.txt", "missing", "new")
+            self.assertFalse(miss["ok"])
+            self.assertIn("not found", miss["error"].lower())
+
+            prev = tc.preview_edit("hello.txt", "world", "bytey")
+            self.assertTrue(prev["ok"])
+            self.assertIn("-hello world", prev["diff"])
+            self.assertIn("+hello bytey", prev["diff"])
+            self.assertEqual((ws / "hello.txt").read_text(encoding="utf-8"), "hello world\n")
+
+            applied = tc.apply_edit("hello.txt", "world", "bytey")
+            self.assertTrue(applied["ok"])
+            self.assertEqual((ws / "hello.txt").read_text(encoding="utf-8"), "hello bytey\n")
+
+            w_prev = tc.preview_write("nested/new.txt", "line1\n")
+            self.assertTrue(w_prev["ok"])
+            self.assertTrue(w_prev["is_new"])
+            self.assertFalse((ws / "nested" / "new.txt").exists())
+
+            w_app = tc.apply_write("nested/new.txt", "line1\n")
+            self.assertTrue(w_app["ok"])
+            self.assertTrue(w_app["is_new"])
+            self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "line1\n")
+
+            cmd_ok = await tc.run_command("pwd")
+            self.assertTrue(cmd_ok["ok"])
+            self.assertEqual(cmd_ok["returncode"], 0)
+            self.assertEqual(cmd_ok["stdout"].strip(), str(ws.resolve()))
+
+            cmd_to = await tc.run_command("sleep 1", timeout_s=0.1)
+            self.assertFalse(cmd_to["ok"])
+            self.assertTrue(cmd_to["timed_out"])
+            self.assertEqual(cmd_to["returncode"], -1)
+
+            rules = load_workspace_rules(ws)
+            self.assertEqual(
+                [r[0] for r in rules],
+                ["AGENTS.md", ".agents/GEMINI.md", ".agents/CLAUDE.md"],
+            )
+
+    def test_skill_registry_workspace_precedence_and_eviction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "ws"
+            user_dir = root / "user_skills"
+            extra_dir = root / "extra_skills"
+
+            (ws / ".agents" / "skills" / "shared-skill").mkdir(parents=True)
+            (ws / ".agents" / "skills" / "shared-skill" / "SKILL.md").write_text(
+                "---\nname: shared-skill\ndescription: From workspace\n---\n\nWS body\n",
+                encoding="utf-8",
+            )
+            (ws / ".agents" / "skills" / "ws-only").mkdir(parents=True)
+            (ws / ".agents" / "skills" / "ws-only" / "SKILL.md").write_text(
+                "---\nname: ws-only\ndescription: Only workspace\n---\n\nWS only\n",
+                encoding="utf-8",
+            )
+            (user_dir / "shared-skill").mkdir(parents=True)
+            (user_dir / "shared-skill" / "SKILL.md").write_text(
+                "---\nname: shared-skill\ndescription: From user\n---\n\nUser body\n",
+                encoding="utf-8",
+            )
+            (extra_dir / "shared-skill").mkdir(parents=True)
+            (extra_dir / "shared-skill" / "SKILL.md").write_text(
+                "---\nname: shared-skill\ndescription: From extra\n---\n\nExtra body\n",
+                encoding="utf-8",
+            )
+
+            reg = SkillRegistry(
+                skills_dir=str(user_dir),
+                extra_dirs=[str(extra_dir)],
+                workspace_dir=str(ws),
+            )
+            reg.rescan()
+            shared = reg.get_skill("shared-skill")
+            self.assertIsNotNone(shared)
+            assert shared is not None
+            self.assertEqual(shared.source, "workspace")
+            self.assertEqual(shared.description, "From workspace")
+            self.assertIsNotNone(reg.get_skill("ws-only"))
+
+            reg.rescan(workspace_dir="")
+            self.assertIsNone(reg.get_skill("ws-only"))
+            shared_after = reg.get_skill("shared-skill")
+            self.assertIsNotNone(shared_after)
+            assert shared_after is not None
+            self.assertEqual(shared_after.source, "user")
+
+    async def test_mcp_client_manager_workspace_expansion(self) -> None:
+        async def _noop_connect(_self: Any) -> None:
+            return None
+
+        mgr = MCPClientManager(workspace_path="/tmp/ws_alpha")
+        with patch("bytey_ai_companion.mcp_host.manager._StdioMCPClient.connect", _noop_connect):
+            client1 = await mgr._create_client(
+                {
+                    "command": sys.executable,
+                    "args": ["${BYTEY_WORKSPACE}/server.py"],
+                    "env": {"PROJECT_DIR": "${BYTEY_WORKSPACE}"},
+                }
+            )
+            self.assertEqual(client1._args, ["/tmp/ws_alpha/server.py"])  # type: ignore[attr-defined]
+            self.assertEqual(client1._env["PROJECT_DIR"], "/tmp/ws_alpha")  # type: ignore[attr-defined]
+
+            mgr.set_workspace_path("/tmp/ws_beta")
+            client2 = await mgr._create_client(
+                {
+                    "command": sys.executable,
+                    "args": ["${BYTEY_WORKSPACE}/server.py"],
+                    "env": {"PROJECT_DIR": "${BYTEY_WORKSPACE}"},
+                }
+            )
+            self.assertEqual(client2._args, ["/tmp/ws_beta/server.py"])  # type: ignore[attr-defined]
+            self.assertEqual(client2._env["PROJECT_DIR"], "/tmp/ws_beta")  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

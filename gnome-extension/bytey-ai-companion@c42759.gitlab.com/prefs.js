@@ -1161,11 +1161,130 @@ export default class ByteyPreferences extends ExtensionPreferences {
         skillsListGroup.set_header_suffix(skillsHeaderBox);
         skillsPage.add(skillsListGroup);
 
+        // 6. Workspace / Coding Page
+        const workspacePage = new Adw.PreferencesPage({
+            title: 'Workspace',
+            icon_name: 'folder-symbolic',
+        });
+
+        const workspaceFolderGroup = new Adw.PreferencesGroup({
+            title: 'Work Folder',
+            description: 'Bind a project folder for workspace skills, project rules, and coding tools.',
+        });
+
+        const workspaceActiveRow = new Adw.ActionRow({
+            title: 'Active Work Folder',
+            subtitle: 'None (General Assistant)',
+        });
+        const workspaceBtnBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 6,
+            valign: Gtk.Align.CENTER,
+        });
+        const workspaceChooseBtn = new Gtk.Button({
+            label: 'Choose Folder',
+            css_classes: ['suggested-action'],
+        });
+        const workspaceClearBtn = new Gtk.Button({
+            label: 'Clear',
+            sensitive: false,
+        });
+        workspaceBtnBox.append(workspaceChooseBtn);
+        workspaceBtnBox.append(workspaceClearBtn);
+        workspaceActiveRow.add_suffix(workspaceBtnBox);
+        workspaceFolderGroup.add(workspaceActiveRow);
+
+        const workspaceRecentRow = new Adw.ComboRow({
+            title: 'Recent Work Folders',
+            subtitle: 'Quickly switch to a previously used folder',
+            model: Gtk.StringList.new(['None (General Assistant)']),
+        });
+        workspaceFolderGroup.add(workspaceRecentRow);
+        workspacePage.add(workspaceFolderGroup);
+
+        const workspacePolicyGroup = new Adw.PreferencesGroup({
+            title: 'Coding & Agent Policy',
+        });
+
+        const workspaceAutoSkillsRow = new Adw.SwitchRow({
+            title: 'Auto-Load Workspace Skills',
+            subtitle: 'Discover skills in .agents/skills and .bytey/skills inside the active folder',
+        });
+        workspacePolicyGroup.add(workspaceAutoSkillsRow);
+
+        const workspaceAutoRulesRow = new Adw.SwitchRow({
+            title: 'Auto-Load Project Rules',
+            subtitle: 'Inject AGENTS.md or .agents/GEMINI.md conventions into context',
+        });
+        workspacePolicyGroup.add(workspaceAutoRulesRow);
+
+        const workspaceWriteApprovalRow = new Adw.SwitchRow({
+            title: 'Require Approval for File Edits',
+            subtitle: 'Show diff preview and require confirmation before modifying files',
+        });
+        workspacePolicyGroup.add(workspaceWriteApprovalRow);
+
+        const workspaceCmdApprovalRow = new Adw.SwitchRow({
+            title: 'Require Approval for Commands',
+            subtitle: 'Require confirmation before running shell commands in the workspace',
+        });
+        workspacePolicyGroup.add(workspaceCmdApprovalRow);
+        workspacePage.add(workspacePolicyGroup);
+
         window.add(generalPage);
         window.add(visualsPage);
         window.add(voicePage);
         window.add(skillsPage);
+        window.add(workspacePage);
         window.add(importExportPage);
+
+        let workspaceRecentPaths = [];
+        let workspaceUpdating = false;
+
+        const syncWorkspaceControls = (activePath, recentPaths) => {
+            const active = String(activePath ?? '').trim();
+            const recent = Array.isArray(recentPaths)
+                ? recentPaths.map(p => String(p).trim()).filter(Boolean)
+                : [];
+            workspaceActiveRow.set_subtitle(active || 'None (General Assistant)');
+            workspaceClearBtn.set_sensitive(Boolean(active));
+            workspaceUpdating = true;
+            try {
+                workspaceRecentPaths = recent;
+                workspaceRecentRow.set_model(
+                    Gtk.StringList.new(['None (General Assistant)', ...recent])
+                );
+                if (active && recent.includes(active))
+                    workspaceRecentRow.set_selected(recent.indexOf(active) + 1);
+                else
+                    workspaceRecentRow.set_selected(0);
+            } finally {
+                workspaceUpdating = false;
+            }
+        };
+
+        const setWorkspacePath = async path => {
+            const cleaned = String(path ?? '').trim();
+            const resp = await httpJson('PUT', '/api/v1/workspace', {path: cleaned});
+            if (destroyed)
+                return;
+            if (!resp.ok) {
+                if (resp.status === 0)
+                    setOfflineState(true);
+                showToast(`Workspace update failed: ${resp.error || 'Daemon unreachable'}`);
+                return;
+            }
+            setOfflineState(false);
+            const data = resp.data && typeof resp.data === 'object' ? resp.data : {};
+            const nextActive = String(data.active_path ?? cleaned).trim();
+            const nextRecent = Array.isArray(data.recent_paths)
+                ? data.recent_paths
+                : (nextActive
+                    ? [nextActive, ...workspaceRecentPaths.filter(p => p !== nextActive)].slice(0, 10)
+                    : workspaceRecentPaths);
+            syncWorkspaceControls(nextActive, nextRecent);
+            showToast(nextActive ? `Workspace set to ${nextActive}` : 'Workspace cleared');
+        };
 
         const syncPlacementSensitivity = () => {
             const mode = positionModeValueForIndex(posModeRow.get_selected());
@@ -2165,6 +2284,16 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 const extraDirs = Array.isArray(skillsCfg.extra_dirs) ? skillsCfg.extra_dirs : [];
                 skillsExtraDirsRow.set_text(
                     extraDirs.map(d => String(d).trim()).filter(Boolean).join(', ')
+                );
+
+                const wsCfg = cfg.workspace && typeof cfg.workspace === 'object' ? cfg.workspace : {};
+                workspaceAutoSkillsRow.set_active(Boolean(wsCfg.auto_load_skills ?? true));
+                workspaceAutoRulesRow.set_active(Boolean(wsCfg.auto_load_rules ?? true));
+                workspaceWriteApprovalRow.set_active(Boolean(wsCfg.require_write_approval ?? true));
+                workspaceCmdApprovalRow.set_active(Boolean(wsCfg.require_command_approval ?? true));
+                syncWorkspaceControls(
+                    String(wsCfg.active_path ?? '').trim(),
+                    Array.isArray(wsCfg.recent_paths) ? wsCfg.recent_paths : []
                 );
             } finally {
                 loading = false;
@@ -3336,6 +3465,67 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 .then(() => rescanSkills(false))
                 .catch(() => {});
         });
+
+        workspaceChooseBtn.connect('clicked', () => {
+            if (destroyed)
+                return;
+            const fileDialog = new Gtk.FileDialog({title: 'Select Work Folder'});
+            fileDialog.select_folder(window, null, (_dlg, result) => {
+                try {
+                    const folder = fileDialog.select_folder_finish(result);
+                    const path = folder?.get_path();
+                    if (path)
+                        setWorkspacePath(path).catch(() => {});
+                } catch (e) {
+                    if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                        showToast(`Folder selection failed: ${e.message}`);
+                }
+            });
+        });
+
+        workspaceClearBtn.connect('clicked', () => {
+            setWorkspacePath('').catch(() => {});
+        });
+
+        workspaceRecentRow.connect('notify::selected', () => {
+            if (loading || workspaceUpdating)
+                return;
+            const idx = workspaceRecentRow.get_selected();
+            if (idx === Gtk.INVALID_LIST_POSITION)
+                return;
+            if (idx === 0)
+                setWorkspacePath('').catch(() => {});
+            else if (idx >= 1 && idx <= workspaceRecentPaths.length)
+                setWorkspacePath(workspaceRecentPaths[idx - 1]).catch(() => {});
+        });
+
+        workspaceAutoSkillsRow.connect('notify::active', () => onUserChange(() => {
+            patchConfig(
+                {workspace: {auto_load_skills: workspaceAutoSkillsRow.get_active()}},
+                'Saved'
+            );
+        }));
+
+        workspaceAutoRulesRow.connect('notify::active', () => onUserChange(() => {
+            patchConfig(
+                {workspace: {auto_load_rules: workspaceAutoRulesRow.get_active()}},
+                'Saved'
+            );
+        }));
+
+        workspaceWriteApprovalRow.connect('notify::active', () => onUserChange(() => {
+            patchConfig(
+                {workspace: {require_write_approval: workspaceWriteApprovalRow.get_active()}},
+                'Saved'
+            );
+        }));
+
+        workspaceCmdApprovalRow.connect('notify::active', () => onUserChange(() => {
+            patchConfig(
+                {workspace: {require_command_approval: workspaceCmdApprovalRow.get_active()}},
+                'Saved'
+            );
+        }));
 
         skillsOpenBtn.connect('clicked', () => {
             const targetDir = resolveEffectiveSkillsDir();

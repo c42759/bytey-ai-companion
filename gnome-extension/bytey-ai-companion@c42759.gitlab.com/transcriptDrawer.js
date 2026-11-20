@@ -51,6 +51,8 @@ export class TranscriptDrawer {
      * @param {(text: string) => void} [callbacks.onSendText]
      * @param {() => void} [callbacks.onClearChat]
      * @param {(messageId: string, text: string) => void} [callbacks.onReplayTts]
+     * @param {(messageId: string) => void} [callbacks.onDeleteMessage]
+     * @param {() => void} [callbacks.onTogglePauseTts]
      * @param {() => void} [callbacks.onManualMic]
      * @param {(callId: string, approved: boolean) => void} [callbacks.onConfirmTool]
      * @param {(width: number, height: number) => void} [callbacks.onResizeCommit]
@@ -93,9 +95,13 @@ export class TranscriptDrawer {
         this._skillSuggestIdx = 0;
         this._activeSessionId = null;
         this._pendingDeleteSessionId = null;
+        this._pendingDeleteMessageId = null;
+        this._speakingMessageId = null;
+        this._speakingStatus = 'idle';
         this._editingSessionId = null;
         this._messageWidgets = new Map();
         this._toolWidgets = new Map();
+        this._copyResetTimers = new Set();
         this._emptyStateActor = null;
         this._scrollIdleId = 0;
         this._focusIdleId = 0;
@@ -193,6 +199,26 @@ export class TranscriptDrawer {
         });
         header.add_child(this._providerPill);
 
+        this._workspaceLabel = new St.Label({
+            style_class: 'bytey-workspace-pill-label',
+            text: 'No Workspace',
+            x_align: Clutter.ActorAlign.START,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._workspaceLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+
+        this._workspacePill = new St.Button({
+            style_class: 'bytey-workspace-pill',
+            can_focus: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            accessible_name: 'Select workspace',
+            child: this._workspaceLabel,
+        });
+        this._connect(this._workspacePill, 'clicked', () => {
+            this._toggleWorkspaceMenu();
+        });
+        header.add_child(this._workspacePill);
+
         this._statusDot = new St.Widget({
             style_class: 'bytey-status-dot bytey-status-disconnected',
             x_align: Clutter.ActorAlign.CENTER,
@@ -254,6 +280,14 @@ export class TranscriptDrawer {
         header.add_child(closeBtn);
 
         this._container.add_child(header);
+
+        this._workspaceMenuBox = new St.BoxLayout({
+            style_class: 'bytey-workspace-menu',
+            orientation: Clutter.Orientation.VERTICAL,
+            visible: false,
+            x_expand: true,
+        });
+        this._container.add_child(this._workspaceMenuBox);
     }
 
     _buildBody() {
@@ -845,6 +879,14 @@ export class TranscriptDrawer {
         for (const rec of this._messageWidgets.values()) {
             if (rec.replayIcon)
                 rec.replayIcon.icon_size = sizes.replay;
+            if (rec.copyIcon)
+                rec.copyIcon.icon_size = sizes.replay;
+            if (rec.deleteIcon)
+                rec.deleteIcon.icon_size = sizes.replay;
+            if (rec.confirmDeleteIcon)
+                rec.confirmDeleteIcon.icon_size = sizes.replay;
+            if (rec.cancelDeleteIcon)
+                rec.cancelDeleteIcon.icon_size = sizes.replay;
         }
         this._renderSessions();
 
@@ -1122,6 +1164,11 @@ export class TranscriptDrawer {
         if (this._renameFocusIdleId) {
             GLib.Source.remove(this._renameFocusIdleId);
             this._renameFocusIdleId = 0;
+        }
+        if (this._copyTimers) {
+            for (const tid of this._copyTimers)
+                GLib.Source.remove(tid);
+            this._copyTimers.clear();
         }
 
         this._sessionsList.destroy_all_children();
@@ -1416,15 +1463,137 @@ export class TranscriptDrawer {
             }
 
             record.msg.content = nextContent;
-            record.bodyLabel.text = nextContent;
-            record.bodyLabel.visible = nextContent.length > 0;
+            this._renderMessageBody(record.bodyBox, nextContent);
             if (emotion)
                 this._updateEmotionBadge(record, emotion);
             if (record.replayBtn)
                 record.replayBtn.visible = nextContent.trim().length > 0;
+            if (record.copyBtn)
+                record.copyBtn.visible = nextContent.trim().length > 0;
         }
 
         this._scheduleScrollToBottom();
+    }
+
+    /**
+     * Update workspace pill and recent folders popover from `/api/v1/workspace` or `workspace_updated`.
+     *
+     * @param {object} ws
+     */
+    setWorkspace(ws) {
+        if (this._destroyed)
+            return;
+        const data = ws && typeof ws === 'object' ? ws : {};
+        const activePath = String(data.active_path ?? '').trim();
+        const recentPaths = Array.isArray(data.recent_paths)
+            ? data.recent_paths.map(p => String(p).trim()).filter(Boolean)
+            : [];
+        this._workspace = {active_path: activePath, recent_paths: recentPaths};
+
+        if (this._workspaceLabel) {
+            if (activePath) {
+                const parts = activePath.replace(/\/+$/, '').split('/');
+                const base = parts[parts.length - 1] || activePath;
+                this._workspaceLabel.text = `📁 ${base}`;
+                if (this._workspacePill)
+                    this._workspacePill.accessible_name = `Workspace: ${activePath}`;
+            } else {
+                this._workspaceLabel.text = 'No Workspace';
+                if (this._workspacePill)
+                    this._workspacePill.accessible_name = 'No Workspace';
+            }
+        }
+        this._rebuildWorkspaceMenu();
+    }
+
+    _toggleWorkspaceMenu() {
+        if (!this._workspaceMenuBox)
+            return;
+        const nextVisible = !this._workspaceMenuBox.visible;
+        if (nextVisible)
+            this._rebuildWorkspaceMenu();
+        this._workspaceMenuBox.visible = nextVisible;
+    }
+
+    _hideWorkspaceMenu() {
+        if (this._workspaceMenuBox)
+            this._workspaceMenuBox.visible = false;
+    }
+
+    _rebuildWorkspaceMenu() {
+        if (!this._workspaceMenuBox || this._destroyed)
+            return;
+        this._workspaceMenuBox.destroy_all_children();
+
+        const ws = this._workspace ?? {active_path: '', recent_paths: []};
+        const recent = ws.recent_paths ?? [];
+
+        if (recent.length > 0) {
+            for (const path of recent) {
+                const isActive = path === ws.active_path;
+                const parts = path.replace(/\/+$/, '').split('/');
+                const base = parts[parts.length - 1] || path;
+                const btn = new St.Button({
+                    style_class: isActive
+                        ? 'bytey-workspace-menu-item bytey-workspace-menu-item-active'
+                        : 'bytey-workspace-menu-item',
+                    label: isActive ? `✓ ${base}  (${path})` : `📁 ${base}  (${path})`,
+                    x_expand: true,
+                    x_align: Clutter.ActorAlign.START,
+                    can_focus: true,
+                });
+                btn.connect('clicked', () => {
+                    this._hideWorkspaceMenu();
+                    this._callbacks.onSelectWorkspace?.(path);
+                });
+                this._workspaceMenuBox.add_child(btn);
+            }
+            this._workspaceMenuBox.add_child(new St.Widget({
+                style_class: 'bytey-workspace-menu-sep',
+                x_expand: true,
+            }));
+        }
+
+        const settingsBtn = new St.Button({
+            style_class: 'bytey-workspace-menu-item',
+            label: 'Open Workspace Settings…',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+            can_focus: true,
+        });
+        settingsBtn.connect('clicked', () => {
+            this._hideWorkspaceMenu();
+            this._callbacks.onOpenWorkspaceSettings?.();
+        });
+        this._workspaceMenuBox.add_child(settingsBtn);
+
+        if (ws.active_path) {
+            const clearBtn = new St.Button({
+                style_class: 'bytey-workspace-menu-item bytey-workspace-menu-clear',
+                label: 'Clear Workspace',
+                x_expand: true,
+                x_align: Clutter.ActorAlign.START,
+                can_focus: true,
+            });
+            clearBtn.connect('clicked', () => {
+                this._hideWorkspaceMenu();
+                this._callbacks.onSelectWorkspace?.('');
+            });
+            this._workspaceMenuBox.add_child(clearBtn);
+        }
+    }
+
+    /**
+     * Return true if any tool card is currently awaiting user confirmation.
+     *
+     * @returns {boolean}
+     */
+    hasPendingConfirmation() {
+        for (const record of this._toolWidgets.values()) {
+            if (record?.tool?.status === 'awaiting_confirm')
+                return true;
+        }
+        return false;
     }
 
     /**
@@ -1472,6 +1641,20 @@ export class TranscriptDrawer {
             this._appendToolWidget(msgRecord.toolBox, tool);
             this._scheduleScrollToBottom();
         }
+    }
+
+    /**
+     * Show or update an inline diff / command confirmation card from `tool_confirmation_required`.
+     *
+     * @param {object} event
+     */
+    showToolConfirmation(event) {
+        if (this._destroyed || !event)
+            return;
+        this.updateToolCall({
+            ...event,
+            status: 'awaiting_confirm',
+        });
     }
 
     /**
@@ -1569,6 +1752,11 @@ export class TranscriptDrawer {
             GLib.Source.remove(this._renameFocusIdleId);
             this._renameFocusIdleId = 0;
         }
+        if (this._copyTimers) {
+            for (const tid of this._copyTimers)
+                GLib.Source.remove(tid);
+            this._copyTimers.clear();
+        }
         if (this._container)
             this._container.visible = false;
         this._callbacks.onOpenChanged?.(false);
@@ -1613,7 +1801,20 @@ export class TranscriptDrawer {
             GLib.Source.remove(this._renameFocusIdleId);
             this._renameFocusIdleId = 0;
         }
+        if (this._copyTimers) {
+            for (const tid of this._copyTimers)
+                GLib.Source.remove(tid);
+            this._copyTimers.clear();
+        }
+        if (this._copyResetTimers) {
+            for (const tid of this._copyResetTimers)
+                GLib.Source.remove(tid);
+            this._copyResetTimers.clear();
+        }
         this._pendingDeleteSessionId = null;
+        this._pendingDeleteMessageId = null;
+        this._speakingMessageId = null;
+        this._speakingStatus = 'idle';
         this._editingSessionId = null;
         this._sidebarBox?.remove_all_transitions();
         this._container?.remove_all_transitions();
@@ -1675,6 +1876,10 @@ export class TranscriptDrawer {
         this._statusIndicator = null;
         this._statusDot = null;
         this._providerPill = null;
+        this._workspacePill = null;
+        this._workspaceLabel = null;
+        this._workspaceMenuBox = null;
+        this._workspace = null;
     }
 
     _clearEmptyState() {
@@ -1727,15 +1932,32 @@ export class TranscriptDrawer {
             } catch (_e) {
                 argsText = '';
             }
+        } else if (raw.args && typeof raw.args === 'object') {
+            try {
+                argsText = JSON.stringify(raw.args, null, 2);
+            } catch (_e) {
+                argsText = '';
+            }
         }
+        const id = raw.call_id ?? raw.id ?? raw.request_id;
+        const requestId = raw.request_id ? String(raw.request_id) : (id ? String(id) : '');
+        const diff = typeof raw.diff === 'string' ? raw.diff : '';
+        const command = typeof raw.command === 'string'
+            ? raw.command
+            : (typeof raw.args?.command === 'string'
+                ? raw.args.command
+                : (typeof raw.arguments?.command === 'string' ? raw.arguments.command : ''));
         return {
-            id: raw.call_id ?? raw.id ? String(raw.call_id ?? raw.id) : '',
+            id: id ? String(id) : '',
+            requestId,
             messageId: raw.message_id ? String(raw.message_id) : null,
-            server: String(raw.server ?? raw.server_name ?? 'mcp'),
+            server: String(raw.server ?? raw.server_name ?? 'workspace'),
             tool: String(raw.tool ?? raw.tool_name ?? 'tool'),
             status: String(raw.status ?? 'running').toLowerCase(),
             argumentsText: argsText === '{}' ? '' : argsText,
             summary: String(raw.summary ?? raw.result_summary ?? ''),
+            diff,
+            command,
         };
     }
 
@@ -1782,12 +2004,19 @@ export class TranscriptDrawer {
         const spacer = new St.Widget({x_expand: true});
         metaRow.add_child(spacer);
 
+        const iconSizes = DENSITY_ICON_SIZES[this._density] ?? DENSITY_ICON_SIZES.comfortable;
+
         let replayBtn = null;
         let replayIcon = null;
         if (!isUser) {
-            const iconSizes = DENSITY_ICON_SIZES[this._density] ?? DENSITY_ICON_SIZES.comfortable;
+            let replayIconName = 'audio-volume-high-symbolic';
+            if (this._speakingMessageId === msg.id && this._speakingStatus === 'playing')
+                replayIconName = 'media-playback-pause-symbolic';
+            else if (this._speakingMessageId === msg.id && this._speakingStatus === 'paused')
+                replayIconName = 'media-playback-start-symbolic';
+
             replayIcon = new St.Icon({
-                icon_name: 'audio-volume-high-symbolic',
+                icon_name: replayIconName,
                 icon_size: iconSizes.replay,
             });
             replayBtn = new St.Button({
@@ -1798,25 +2027,110 @@ export class TranscriptDrawer {
                 child: replayIcon,
             });
             replayBtn.connect('clicked', () => {
-                const text = (msg.content ?? '').trim();
-                if (text)
-                    this._callbacks.onReplayTts?.(msg.id, text);
+                if (this._speakingMessageId === msg.id &&
+                    (this._speakingStatus === 'playing' || this._speakingStatus === 'paused')) {
+                    this._callbacks.onTogglePauseTts?.();
+                } else {
+                    const text = (msg.content ?? '').trim();
+                    if (text)
+                        this._callbacks.onReplayTts?.(msg.id, text);
+                }
             });
             metaRow.add_child(replayBtn);
         }
 
+        const copyIcon = new St.Icon({
+            icon_name: 'edit-copy-symbolic',
+            icon_size: iconSizes.replay,
+        });
+        const copyBtn = new St.Button({
+            style_class: 'bytey-copy-btn',
+            can_focus: true,
+            accessible_name: 'Copy markdown',
+            visible: (msg.content ?? '').trim().length > 0,
+            y_align: Clutter.ActorAlign.CENTER,
+            child: copyIcon,
+        });
+        copyBtn.connect('clicked', () => {
+            St.Clipboard.get_default().set_text(
+                St.ClipboardType.CLIPBOARD,
+                String(msg.content ?? '')
+            );
+            copyIcon.icon_name = 'emblem-ok-symbolic';
+            this._copyResetTimers ??= new Set();
+            const tid = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1200, () => {
+                this._copyResetTimers?.delete(tid);
+                if (!this._destroyed && copyIcon)
+                    copyIcon.icon_name = 'edit-copy-symbolic';
+                return GLib.SOURCE_REMOVE;
+            });
+            this._copyResetTimers.add(tid);
+        });
+        metaRow.add_child(copyBtn);
+
+        const deleteIcon = new St.Icon({
+            icon_name: 'user-trash-symbolic',
+            icon_size: iconSizes.replay,
+        });
+        const deleteBtn = new St.Button({
+            style_class: 'bytey-msg-delete-btn',
+            can_focus: true,
+            accessible_name: 'Delete message',
+            y_align: Clutter.ActorAlign.CENTER,
+            child: deleteIcon,
+        });
+        const confirmDeleteIcon = new St.Icon({
+            icon_name: 'object-select-symbolic',
+            icon_size: iconSizes.replay,
+        });
+        const confirmDeleteBtn = new St.Button({
+            style_class: 'bytey-msg-confirm-delete-btn',
+            can_focus: true,
+            accessible_name: 'Confirm delete message',
+            visible: false,
+            y_align: Clutter.ActorAlign.CENTER,
+            child: confirmDeleteIcon,
+        });
+        const cancelDeleteIcon = new St.Icon({
+            icon_name: 'window-close-symbolic',
+            icon_size: iconSizes.replay,
+        });
+        const cancelDeleteBtn = new St.Button({
+            style_class: 'bytey-msg-cancel-delete-btn',
+            can_focus: true,
+            accessible_name: 'Cancel delete message',
+            visible: false,
+            y_align: Clutter.ActorAlign.CENTER,
+            child: cancelDeleteIcon,
+        });
+
+        deleteBtn.connect('clicked', () => {
+            this._pendingDeleteMessageId = msg.id;
+            this._syncDeleteMessageConfirm();
+        });
+        cancelDeleteBtn.connect('clicked', () => {
+            this._pendingDeleteMessageId = null;
+            this._syncDeleteMessageConfirm();
+        });
+        confirmDeleteBtn.connect('clicked', () => {
+            this._pendingDeleteMessageId = null;
+            this._syncDeleteMessageConfirm();
+            this._callbacks.onDeleteMessage?.(msg.id);
+        });
+
+        metaRow.add_child(deleteBtn);
+        metaRow.add_child(confirmDeleteBtn);
+        metaRow.add_child(cancelDeleteBtn);
+
         bubble.add_child(metaRow);
 
-        const bodyLabel = new St.Label({
-            style_class: 'bytey-msg-text',
-            text: msg.content,
-            visible: msg.content.length > 0,
+        const bodyBox = new St.BoxLayout({
+            style_class: 'bytey-msg-body',
+            orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
-        bodyLabel.clutter_text.line_wrap = true;
-        bodyLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-        bodyLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-        bubble.add_child(bodyLabel);
+        this._renderMessageBody(bodyBox, msg.content);
+        bubble.add_child(bodyBox);
 
         const toolBox = new St.BoxLayout({
             style_class: 'bytey-tool-list',
@@ -1831,9 +2145,237 @@ export class TranscriptDrawer {
 
         this._messagesBox.add_child(bubble);
 
-        const record = {msg, box: bubble, bodyLabel, emotionLabel, toolBox, replayBtn, replayIcon};
+        const record = {
+            msg,
+            box: bubble,
+            bodyBox,
+            emotionLabel,
+            toolBox,
+            replayBtn,
+            replayIcon,
+            copyBtn,
+            copyIcon,
+            deleteBtn,
+            deleteIcon,
+            confirmDeleteBtn,
+            confirmDeleteIcon,
+            cancelDeleteBtn,
+            cancelDeleteIcon,
+        };
         this._messageWidgets.set(msg.id, record);
         return record;
+    }
+
+    _syncDeleteMessageConfirm() {
+        for (const rec of this._messageWidgets.values()) {
+            const isPending = this._pendingDeleteMessageId !== null &&
+                rec.msg.id === this._pendingDeleteMessageId;
+            if (rec.deleteBtn)
+                rec.deleteBtn.visible = !isPending;
+            if (rec.confirmDeleteBtn)
+                rec.confirmDeleteBtn.visible = isPending;
+            if (rec.cancelDeleteBtn)
+                rec.cancelDeleteBtn.visible = isPending;
+        }
+    }
+
+    /**
+     * Update TTS playback indicator on assistant message widgets.
+     *
+     * @param {string|null} messageId
+     * @param {'playing'|'paused'|'idle'} [status]
+     */
+    setSpeakingMessage(messageId, status = 'idle') {
+        if (this._destroyed)
+            return;
+        this._speakingMessageId = messageId ?? null;
+        this._speakingStatus = status ?? 'idle';
+
+        for (const rec of this._messageWidgets.values()) {
+            if (!rec.replayIcon)
+                continue;
+            if (rec.msg.id === this._speakingMessageId && this._speakingStatus === 'playing')
+                rec.replayIcon.icon_name = 'media-playback-pause-symbolic';
+            else if (rec.msg.id === this._speakingMessageId && this._speakingStatus === 'paused')
+                rec.replayIcon.icon_name = 'media-playback-start-symbolic';
+            else
+                rec.replayIcon.icon_name = 'audio-volume-high-symbolic';
+        }
+    }
+
+    /**
+     * Remove a single message widget and record from the transcript.
+     *
+     * @param {string} messageId
+     */
+    removeMessage(messageId) {
+        if (this._destroyed || !messageId)
+            return;
+        const record = this._messageWidgets.get(messageId);
+        if (record) {
+            try {
+                if (record.box && record.box.get_parent() === this._messagesBox)
+                    this._messagesBox.remove_child(record.box);
+                record.box?.destroy();
+            } catch (_e) {
+                // Ignore if already disposed.
+            }
+            this._messageWidgets.delete(messageId);
+        }
+        this._messages = this._messages.filter(m => m.id !== messageId);
+        if (this._pendingDeleteMessageId === messageId)
+            this._pendingDeleteMessageId = null;
+        if (this._speakingMessageId === messageId) {
+            this._speakingMessageId = null;
+            this._speakingStatus = 'idle';
+        }
+        if (this._messages.length === 0)
+            this._renderEmptyState();
+    }
+
+    _parseMessageSegments(text) {
+        const src = String(text ?? '');
+        const segments = [];
+        let pos = 0;
+
+        while (pos < src.length) {
+            const tickIdx = src.indexOf('```', pos);
+            const quoteIdx = src.indexOf("'''", pos);
+            let fenceIdx = -1;
+            let marker = '';
+            if (tickIdx !== -1 && (quoteIdx === -1 || tickIdx <= quoteIdx)) {
+                fenceIdx = tickIdx;
+                marker = '```';
+            } else if (quoteIdx !== -1) {
+                fenceIdx = quoteIdx;
+                marker = "'''";
+            }
+
+            if (fenceIdx === -1) {
+                const tail = src.slice(pos);
+                if (tail)
+                    segments.push({type: 'text', text: tail});
+                break;
+            }
+
+            if (fenceIdx > pos)
+                segments.push({type: 'text', text: src.slice(pos, fenceIdx)});
+
+            const afterFence = fenceIdx + 3;
+            const nlIdx = src.indexOf('\n', afterFence);
+            let lang = '';
+            let codeStart = afterFence;
+            if (nlIdx !== -1) {
+                const header = src.slice(afterFence, nlIdx).trim();
+                if (/^[a-zA-Z0-9_+#.-]{0,32}$/.test(header)) {
+                    lang = header;
+                    codeStart = nlIdx + 1;
+                }
+            }
+
+            const closeIdx = src.indexOf(marker, codeStart);
+            if (closeIdx === -1) {
+                segments.push({type: 'code', lang, code: src.slice(codeStart).replace(/\n$/, '')});
+                break;
+            }
+
+            segments.push({type: 'code', lang, code: src.slice(codeStart, closeIdx).replace(/\n$/, '')});
+            pos = closeIdx + 3;
+        }
+
+        return segments;
+    }
+
+    _formatInlineMarkup(text) {
+        const parts = String(text ?? '').split(/(`[^`\n]+`)/g);
+        return parts.map(part => {
+            if (part.length >= 2 && part.startsWith('`') && part.endsWith('`')) {
+                const inner = GLib.markup_escape_text(part.slice(1, -1), -1);
+                return `<tt>${inner}</tt>`;
+            }
+            return GLib.markup_escape_text(part, -1);
+        }).join('');
+    }
+
+    _renderMessageBody(bodyBox, content) {
+        if (!bodyBox)
+            return;
+        bodyBox.destroy_all_children();
+        const segments = this._parseMessageSegments(content);
+
+        for (const seg of segments) {
+            if (seg.type === 'code') {
+                const codeCard = new St.BoxLayout({
+                    style_class: 'bytey-code-block',
+                    orientation: Clutter.Orientation.VERTICAL,
+                    x_expand: true,
+                });
+
+                const header = new St.BoxLayout({
+                    style_class: 'bytey-code-header',
+                    x_expand: true,
+                });
+                const langLabel = new St.Label({
+                    style_class: 'bytey-code-lang',
+                    text: seg.lang || 'code',
+                    x_expand: true,
+                    y_align: Clutter.ActorAlign.CENTER,
+                });
+                const copyIcon = new St.Icon({
+                    icon_name: 'edit-copy-symbolic',
+                    icon_size: 12,
+                });
+                const copyBtn = new St.Button({
+                    style_class: 'bytey-code-copy-btn',
+                    can_focus: true,
+                    accessible_name: 'Copy code',
+                    y_align: Clutter.ActorAlign.CENTER,
+                    child: copyIcon,
+                });
+                copyBtn.connect('clicked', () => {
+                    St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, seg.code);
+                    copyIcon.icon_name = 'object-select-symbolic';
+                    this._copyTimers ??= new Set();
+                    const tid = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1200, () => {
+                        this._copyTimers?.delete(tid);
+                        if (!this._destroyed && copyIcon)
+                            copyIcon.icon_name = 'edit-copy-symbolic';
+                        return GLib.SOURCE_REMOVE;
+                    });
+                    this._copyTimers.add(tid);
+                });
+                header.add_child(langLabel);
+                header.add_child(copyBtn);
+                codeCard.add_child(header);
+
+                const codeLabel = new St.Label({
+                    style_class: 'bytey-code-text',
+                    text: seg.code,
+                    x_expand: true,
+                });
+                codeLabel.clutter_text.line_wrap = true;
+                codeLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+                codeLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+                codeCard.add_child(codeLabel);
+
+                bodyBox.add_child(codeCard);
+            } else {
+                const trimmed = seg.text.replace(/^\n+|\n+$/g, '');
+                if (!trimmed)
+                    continue;
+                const textLabel = new St.Label({
+                    style_class: 'bytey-msg-text',
+                    x_expand: true,
+                });
+                textLabel.clutter_text.line_wrap = true;
+                textLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+                textLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+                textLabel.clutter_text.set_markup(this._formatInlineMarkup(trimmed));
+                bodyBox.add_child(textLabel);
+            }
+        }
+
+        bodyBox.visible = bodyBox.get_n_children() > 0;
     }
 
     _updateEmotionBadge(record, emotion) {
@@ -1890,19 +2432,48 @@ export class TranscriptDrawer {
         detailsLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
         badge.add_child(detailsLabel);
 
+        const confirmCard = new St.BoxLayout({
+            style_class: 'bytey-confirm-card',
+            orientation: Clutter.Orientation.VERTICAL,
+            visible: false,
+            x_expand: true,
+        });
+        const confirmScroll = new St.ScrollView({
+            style_class: 'bytey-confirm-scroll',
+            hscrollbar_policy: St.PolicyType.AUTOMATIC,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+            overlay_scrollbars: true,
+            x_expand: true,
+        });
+        const confirmPreviewBox = new St.BoxLayout({
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+        });
+        const confirmPreviewLabel = new St.Label({
+            style_class: 'bytey-confirm-diff',
+            text: '',
+            x_expand: true,
+        });
+        confirmPreviewLabel.clutter_text.line_wrap = false;
+        confirmPreviewLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+        confirmPreviewBox.add_child(confirmPreviewLabel);
+        confirmScroll.set_child(confirmPreviewBox);
+        confirmCard.add_child(confirmScroll);
+        badge.add_child(confirmCard);
+
         const confirmRow = new St.BoxLayout({
             style_class: 'bytey-confirm-row',
             visible: tool.status === 'awaiting_confirm',
             x_expand: true,
         });
         const allowBtn = new St.Button({
-            style_class: 'bytey-btn-allow',
-            label: 'Allow',
+            style_class: 'bytey-btn-allow bytey-confirm-approve-btn',
+            label: 'Approve',
             can_focus: true,
         });
         const denyBtn = new St.Button({
-            style_class: 'bytey-btn-deny',
-            label: 'Deny',
+            style_class: 'bytey-btn-deny bytey-confirm-reject-btn',
+            label: 'Reject',
             can_focus: true,
         });
         confirmRow.add_child(allowBtn);
@@ -1915,6 +2486,8 @@ export class TranscriptDrawer {
             titleLabel,
             statusLabel,
             detailsLabel,
+            confirmCard,
+            confirmPreviewLabel,
             confirmRow,
             allowBtn,
             denyBtn,
@@ -1931,16 +2504,16 @@ export class TranscriptDrawer {
             denyBtn.reactive = false;
             record.tool.status = 'running';
             this._refreshToolWidget(record);
-            this._callbacks.onConfirmTool?.(record.tool.id, true);
+            this._callbacks.onConfirmTool?.(record.tool.requestId || record.tool.id, true);
         });
 
         denyBtn.connect('clicked', () => {
             allowBtn.reactive = false;
             denyBtn.reactive = false;
             record.tool.status = 'error';
-            record.tool.summary = 'Denied by user';
+            record.tool.summary = 'Rejected by user';
             this._refreshToolWidget(record);
-            this._callbacks.onConfirmTool?.(record.tool.id, false);
+            this._callbacks.onConfirmTool?.(record.tool.requestId || record.tool.id, false);
         });
 
         this._toolWidgets.set(tool.id, record);
@@ -1949,7 +2522,17 @@ export class TranscriptDrawer {
     }
 
     _refreshToolWidget(record) {
-        const {tool, badge, statusLabel, detailsLabel, confirmRow, allowBtn, denyBtn} = record;
+        const {
+            tool,
+            badge,
+            statusLabel,
+            detailsLabel,
+            confirmCard,
+            confirmPreviewLabel,
+            confirmRow,
+            allowBtn,
+            denyBtn,
+        } = record;
         for (const cls of ['running', 'ok', 'error', 'awaiting_confirm'])
             badge.remove_style_class_name(`bytey-tool-${cls}`);
         badge.add_style_class_name(`bytey-tool-${tool.status}`);
@@ -1959,6 +2542,15 @@ export class TranscriptDrawer {
         detailsLabel.text = detailText;
 
         const awaiting = tool.status === 'awaiting_confirm';
+        const previewText = tool.diff || tool.command || '';
+        if (previewText && awaiting) {
+            confirmPreviewLabel.style_class = tool.diff ? 'bytey-confirm-diff' : 'bytey-confirm-cmd';
+            confirmPreviewLabel.text = tool.command && !tool.diff ? `$ ${tool.command}` : previewText;
+            confirmCard.visible = true;
+        } else {
+            confirmCard.visible = false;
+        }
+
         if (awaiting) {
             record.expanded = true;
             allowBtn.reactive = true;

@@ -39,7 +39,13 @@ class MCPProtocolError(RuntimeError):
         self.error_obj = error_obj
 
 
-async def _resolve_var(var_name: str, secret_resolver: Any) -> str | None:
+async def _resolve_var(
+    var_name: str,
+    secret_resolver: Any,
+    workspace_path: str = "",
+) -> str | None:
+    if var_name == "BYTEY_WORKSPACE" and workspace_path:
+        return workspace_path
     if secret_resolver is not None:
         if isinstance(secret_resolver, Mapping):
             val = secret_resolver.get(var_name)
@@ -60,7 +66,11 @@ async def _resolve_var(var_name: str, secret_resolver: Any) -> str | None:
     return os.environ.get(var_name)
 
 
-async def _expand_string(value: str, secret_resolver: Any) -> str:
+async def _expand_string(
+    value: str,
+    secret_resolver: Any,
+    workspace_path: str = "",
+) -> str:
     matches = list(_ENV_VAR_RE.finditer(value))
     if not matches:
         return value
@@ -68,7 +78,9 @@ async def _expand_string(value: str, secret_resolver: Any) -> str:
     for match in matches:
         var_name = match.group(1)
         if var_name not in cache:
-            cache[var_name] = await _resolve_var(var_name, secret_resolver)
+            cache[var_name] = await _resolve_var(
+                var_name, secret_resolver, workspace_path=workspace_path
+            )
 
     def replace(match: re.Match[str]) -> str:
         resolved = cache.get(match.group(1))
@@ -77,12 +89,18 @@ async def _expand_string(value: str, secret_resolver: Any) -> str:
     return _ENV_VAR_RE.sub(replace, value)
 
 
-async def _expand_mapping(mapping: Mapping[str, Any] | None, secret_resolver: Any) -> dict[str, str]:
+async def _expand_mapping(
+    mapping: Mapping[str, Any] | None,
+    secret_resolver: Any,
+    workspace_path: str = "",
+) -> dict[str, str]:
     if not mapping:
         return {}
     expanded: dict[str, str] = {}
     for k, v in mapping.items():
-        expanded[str(k)] = await _expand_string(str(v), secret_resolver)
+        expanded[str(k)] = await _expand_string(
+            str(v), secret_resolver, workspace_path=workspace_path
+        )
     return expanded
 
 
@@ -101,7 +119,7 @@ def _infer_transport(cfg: dict[str, Any]) -> str:
     raise ValueError("MCP server configuration must specify either 'command' or 'url'")
 
 
-def _config_fingerprint(cfg: dict[str, Any]) -> str:
+def _config_fingerprint(cfg: dict[str, Any], workspace_path: str = "") -> str:
     transport = _infer_transport(cfg)
     key_obj = {
         "transport": transport,
@@ -111,6 +129,7 @@ def _config_fingerprint(cfg: dict[str, Any]) -> str:
         "cwd": cfg.get("cwd"),
         "url": cfg.get("url"),
         "headers": dict(cfg.get("headers") or {}),
+        "workspace_path": workspace_path,
     }
     return json.dumps(key_obj, sort_keys=True)
 
@@ -644,13 +663,19 @@ class MCPClientManager:
         secret_resolver: Any = None,
         http_client: httpx.AsyncClient | None = None,
         request_timeout: float = 30.0,
+        workspace_path: str = "",
     ) -> None:
         self._secret_resolver = secret_resolver
         self._http_client = http_client
         self._owns_http_client = http_client is None
         self._timeout = request_timeout
+        self._workspace_path = (workspace_path or "").strip()
         self._sessions: dict[str, tuple[str, _BaseMCPClient]] = {}
         self._tool_alias_map: dict[str, tuple[str, str]] = {}
+
+    def set_workspace_path(self, path: str) -> None:
+        """Update the active workspace path used for ${BYTEY_WORKSPACE} expansion."""
+        self._workspace_path = (path or "").strip()
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
@@ -662,25 +687,38 @@ class MCPClientManager:
 
     async def _create_client(self, cfg: dict[str, Any]) -> _BaseMCPClient:
         transport = _infer_transport(cfg)
+        ws_path = self._workspace_path
         if transport == "stdio":
             command = str(cfg.get("command") or "").strip()
             if not command:
                 raise ValueError("stdio MCP server requires a non-empty 'command'")
-            args = [str(a) for a in (cfg.get("args") or [])]
-            env = await _expand_mapping(cfg.get("env"), self._secret_resolver)
-            cwd = cfg.get("cwd")
+            args = [
+                await _expand_string(str(a), self._secret_resolver, workspace_path=ws_path)
+                for a in (cfg.get("args") or [])
+            ]
+            env = await _expand_mapping(
+                cfg.get("env"), self._secret_resolver, workspace_path=ws_path
+            )
+            raw_cwd = cfg.get("cwd")
+            cwd = (
+                await _expand_string(str(raw_cwd), self._secret_resolver, workspace_path=ws_path)
+                if raw_cwd
+                else None
+            )
             client: _BaseMCPClient = _StdioMCPClient(
                 command=command,
                 args=args,
                 env=env,
-                cwd=str(cwd) if cwd else None,
+                cwd=cwd or None,
                 timeout=self._timeout,
             )
         else:
             url = str(cfg.get("url") or "").strip()
             if not url:
                 raise ValueError(f"{transport} MCP server requires a non-empty 'url'")
-            headers = await _expand_mapping(cfg.get("headers"), self._secret_resolver)
+            headers = await _expand_mapping(
+                cfg.get("headers"), self._secret_resolver, workspace_path=ws_path
+            )
             client = _HttpMCPClient(
                 url=url,
                 headers=headers,
@@ -693,7 +731,7 @@ class MCPClientManager:
         return client
 
     async def _get_or_connect(self, name: str, cfg: dict[str, Any]) -> _BaseMCPClient:
-        fingerprint = _config_fingerprint(cfg)
+        fingerprint = _config_fingerprint(cfg, workspace_path=self._workspace_path)
         cached = self._sessions.get(name)
         if cached is not None:
             prev_fp, client = cached

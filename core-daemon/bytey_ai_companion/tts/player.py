@@ -8,6 +8,7 @@ import inspect
 import io
 import logging
 import os
+import signal
 from typing import Any
 import wave
 
@@ -157,6 +158,19 @@ class StreamingTTSPlayer:
         self._generation = 0
         self._speaking = False
         self._stopped = False
+        self._paused = False
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()
+
+    @property
+    def is_paused(self) -> bool:
+        """Whether TTS playback is currently paused."""
+        return self._paused
+
+    @property
+    def is_playing(self) -> bool:
+        """Whether TTS playback is currently active."""
+        return self._speaking
 
     def _ensure_worker(self) -> None:
         if self._worker_task is None or self._worker_task.done():
@@ -386,12 +400,44 @@ class StreamingTTSPlayer:
         """Wait until all queued TTS sentences finish playing (or are interrupted)."""
         await self._idle_event.wait()
 
+    async def pause(self) -> bool:
+        """Pause active TTS playback and queued sentences."""
+        if not (self._speaking or self._active_proc is not None or not self._queue.empty()):
+            return False
+        self._paused = True
+        self._pause_event.clear()
+        proc = self._active_proc
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.send_signal(signal.SIGSTOP)
+            except (ProcessLookupError, OSError):
+                pass
+        return True
+
+    async def resume(self) -> bool:
+        """Resume paused TTS playback."""
+        if not self._paused:
+            return False
+        proc = self._active_proc
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.send_signal(signal.SIGCONT)
+            except (ProcessLookupError, OSError):
+                pass
+        self._paused = False
+        self._pause_event.set()
+        return True
+
     async def _terminate_active_proc(self) -> None:
         proc = self._active_proc
         self._active_proc = None
         if proc is None:
             return
         if proc.returncode is None:
+            try:
+                proc.send_signal(signal.SIGCONT)
+            except (ProcessLookupError, OSError):
+                pass
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=0.5)
@@ -405,6 +451,8 @@ class StreamingTTSPlayer:
     async def barge_in(self) -> None:
         """Immediately cancel queued sentences, kill active playback, and emit 0.0 level."""
         self._generation += 1
+        self._paused = False
+        self._pause_event.set()
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -495,6 +543,11 @@ class StreamingTTSPlayer:
         total = len(pcm_frames)
 
         while offset < total and gen == self._generation and not self._stopped:
+            if self._paused:
+                await _invoke(self._on_audio_level, "tts", 0.0)
+                await self._pause_event.wait()
+                if gen != self._generation or self._stopped:
+                    break
             end = min(total, offset + chunk_bytes)
             slice_bytes = pcm_frames[offset:end]
             rms = _compute_pcm_rms(slice_bytes, sampwidth=sampwidth)
@@ -557,7 +610,9 @@ class StreamingTTSPlayer:
                 break
 
             try:
-                if gen != self._generation:
+                if self._paused:
+                    await self._pause_event.wait()
+                if gen != self._generation or self._stopped:
                     continue
 
                 settings = self._read_settings()
@@ -582,6 +637,10 @@ class StreamingTTSPlayer:
                     continue
 
                 audio_bytes, fmt = synth_result
+                if self._paused:
+                    await self._pause_event.wait()
+                if gen != self._generation or self._stopped:
+                    continue
                 await self._play_audio(audio_bytes, fmt, gen)
             except asyncio.CancelledError:
                 break

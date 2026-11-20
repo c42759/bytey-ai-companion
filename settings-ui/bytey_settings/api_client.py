@@ -144,6 +144,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "extra_dirs": [],
         "overrides": {},
     },
+    "workspace": {
+        "active_path": "",
+        "recent_paths": [],
+        "auto_load_skills": True,
+        "auto_load_rules": True,
+        "require_write_approval": True,
+        "require_command_approval": True,
+    },
 }
 
 
@@ -854,6 +862,98 @@ class DaemonClient:
             except ValueError:
                 data = {"ok": True, "deleted": name}
             return ApiResult(ok=True, offline=False, data=data, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    # ------------------------------------------------------------------
+    # Workspace API
+    # ------------------------------------------------------------------
+
+    def get_workspace(self) -> ApiResult:
+        """Fetch active workspace state from daemon or local config.json fallback."""
+        resp, err, offline = self._request("GET", "/api/v1/workspace", timeout=5.0)
+        if resp is None:
+            if offline:
+                cfg = self._read_local_config()
+                ws = cfg.get("workspace")
+                if not isinstance(ws, dict):
+                    ws = copy.deepcopy(DEFAULT_CONFIG["workspace"])
+                return ApiResult(
+                    ok=True,
+                    offline=True,
+                    data=ws,
+                    error=err or "Daemon offline",
+                )
+            return ApiResult(ok=False, offline=False, error=err)
+        if resp.is_success:
+            try:
+                payload = resp.json()
+            except ValueError as exc:
+                return ApiResult(ok=False, error=f"Invalid workspace payload: {exc}")
+            return ApiResult(ok=True, offline=False, data=payload, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    def set_workspace(self, path: str) -> ApiResult:
+        """Set or clear active workspace path via daemon or local config.json fallback."""
+        cleaned = (path or "").strip()
+        resp, err, offline = self._request(
+            "PUT",
+            "/api/v1/workspace",
+            json={"path": cleaned},
+            timeout=10.0,
+        )
+        if resp is None:
+            if offline:
+                resolved = ""
+                if cleaned:
+                    try:
+                        candidate = Path(cleaned).expanduser().resolve()
+                    except OSError as exc:
+                        return ApiResult(ok=False, offline=True, error=str(exc))
+                    if not candidate.is_dir():
+                        return ApiResult(
+                            ok=False,
+                            offline=True,
+                            error=f"Workspace path is not an existing directory: {cleaned!r}",
+                        )
+                    resolved = str(candidate)
+
+                current = self._read_local_config()
+                ws_cfg = current.setdefault("workspace", copy.deepcopy(DEFAULT_CONFIG["workspace"]))
+                if not isinstance(ws_cfg, dict):
+                    ws_cfg = copy.deepcopy(DEFAULT_CONFIG["workspace"])
+                    current["workspace"] = ws_cfg
+
+                ws_cfg["active_path"] = resolved
+                recent = ws_cfg.get("recent_paths")
+                if not isinstance(recent, list):
+                    recent = []
+                if resolved:
+                    recent = [resolved] + [str(p) for p in recent if str(p) and str(p) != resolved]
+                ws_cfg["recent_paths"] = recent[:10]
+
+                try:
+                    self._write_local_config(current)
+                except OSError as write_exc:
+                    return ApiResult(ok=False, offline=True, error=str(write_exc))
+                return ApiResult(ok=True, offline=True, data=copy.deepcopy(ws_cfg))
+            return ApiResult(ok=False, offline=False, error=err)
+
+        if resp.is_success:
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {"active_path": cleaned}
+            return ApiResult(ok=True, offline=False, data=payload, status_code=resp.status_code)
         return ApiResult(
             ok=False,
             offline=False,

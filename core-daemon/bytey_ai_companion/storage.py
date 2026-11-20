@@ -87,6 +87,7 @@ class StorageManager:
                 CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
+                    workspace_path TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -121,6 +122,12 @@ class StorageManager:
                     ON tool_calls(message_id, created_at);
                 """
             )
+            cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "workspace_path" not in cols:
+                conn.execute("ALTER TABLE sessions ADD COLUMN workspace_path TEXT")
             conn.commit()
 
     async def init_db(self) -> None:
@@ -143,6 +150,7 @@ class StorageManager:
         return {
             "id": session_id,
             "title": title,
+            "workspace_path": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -152,7 +160,7 @@ class StorageManager:
             conn = self._get_conn()
             row = conn.execute(
                 """
-                SELECT id, title, created_at, updated_at
+                SELECT id, title, workspace_path, created_at, updated_at
                 FROM sessions
                 ORDER BY updated_at DESC, rowid DESC
                 LIMIT 1
@@ -180,7 +188,7 @@ class StorageManager:
             conn = self._get_conn()
             row = conn.execute(
                 """
-                SELECT id, title, created_at, updated_at
+                SELECT id, title, workspace_path, created_at, updated_at
                 FROM sessions
                 WHERE id = ?
                 """,
@@ -207,7 +215,7 @@ class StorageManager:
             conn.commit()
             row = conn.execute(
                 """
-                SELECT id, title, created_at, updated_at
+                SELECT id, title, workspace_path, created_at, updated_at
                 FROM sessions
                 WHERE id = ?
                 """,
@@ -219,6 +227,41 @@ class StorageManager:
         """Rename a session (capped to 80 chars, defaulting to 'New Chat' if empty)."""
         return await asyncio.to_thread(self._rename_session_sync, session_id, title)
 
+    def _set_session_workspace_sync(
+        self, session_id: str, workspace_path: str | None
+    ) -> dict[str, Any] | None:
+        cleaned = str(workspace_path).strip() if workspace_path is not None else None
+        if cleaned == "":
+            cleaned = None
+        now = _utc_now_iso()
+        with self._lock:
+            conn = self._get_conn()
+            cur = conn.execute(
+                "UPDATE sessions SET workspace_path = ?, updated_at = ? WHERE id = ?",
+                (cleaned, now, session_id),
+            )
+            if cur.rowcount == 0:
+                conn.commit()
+                return None
+            conn.commit()
+            row = conn.execute(
+                """
+                SELECT id, title, workspace_path, created_at, updated_at
+                FROM sessions
+                WHERE id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    async def set_session_workspace(
+        self, session_id: str, workspace_path: str | None
+    ) -> dict[str, Any] | None:
+        """Bind or clear the workspace_path associated with a session."""
+        return await asyncio.to_thread(
+            self._set_session_workspace_sync, session_id, workspace_path
+        )
+
     def _list_sessions_sync(self) -> list[dict[str, Any]]:
         with self._lock:
             conn = self._get_conn()
@@ -227,6 +270,7 @@ class StorageManager:
                 SELECT
                     s.id,
                     s.title,
+                    s.workspace_path,
                     s.created_at,
                     COALESCE(MAX(m.created_at), s.created_at) AS updated_at,
                     COUNT(m.id) AS message_count,
@@ -255,6 +299,7 @@ class StorageManager:
                     {
                         "id": row["id"],
                         "title": row["title"],
+                        "workspace_path": row["workspace_path"],
                         "created_at": row["created_at"],
                         "updated_at": row["updated_at"],
                         "message_count": int(row["message_count"] or 0),
@@ -277,6 +322,21 @@ class StorageManager:
     async def delete_session(self, session_id: str) -> bool:
         """Delete a session and cascade-delete its messages and tool calls."""
         return await asyncio.to_thread(self._delete_session_sync, session_id)
+
+    def _delete_message_sync(self, session_id: str, message_id: str) -> bool:
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute("DELETE FROM tool_calls WHERE message_id = ?", (message_id,))
+            cur = conn.execute(
+                "DELETE FROM messages WHERE id = ? AND session_id = ?",
+                (message_id, session_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    async def delete_message(self, session_id: str, message_id: str) -> bool:
+        """Delete a single message and its associated tool calls from a session."""
+        return await asyncio.to_thread(self._delete_message_sync, session_id, message_id)
 
     def _clear_session_messages_sync(self, session_id: str) -> int:
         with self._lock:
