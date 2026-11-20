@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _KEY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MERGE_SECTIONS = ("general", "provider", "voice_in", "voice_out", "visuals")
+_MERGE_SECTIONS = ("general", "provider", "voice_in", "voice_out", "visuals", "skills")
 
 DEFAULT_EYE_COLOR = "#F7FAFF"
 DEFAULT_BG_COLOR = "#0A0A0C"
@@ -123,6 +123,24 @@ def resolve_config_dir(config_dir: Path | None = None) -> Path:
     if (legacy / "config.json").exists() or (legacy / ".env").exists():
         return legacy
     return primary
+
+
+def resolve_default_skills_dir() -> Path:
+    """Resolve default user skills directory, honoring BYTEY_SKILLS_DIR / AI_PET_SKILLS_DIR."""
+    env_dir = (
+        os.environ.get("BYTEY_SKILLS_DIR") or os.environ.get("AI_PET_SKILLS_DIR") or ""
+    ).strip()
+    if env_dir:
+        return Path(env_dir).expanduser()
+    return resolve_config_dir() / "skills"
+
+
+def resolve_skills_dir(configured_dir: str = "") -> Path:
+    """Resolve active user skills directory from explicit config or default resolution."""
+    cleaned = (configured_dir or "").strip()
+    if cleaned:
+        return Path(cleaned).expanduser()
+    return resolve_default_skills_dir()
 
 
 class GeneralConfig(BaseModel):
@@ -301,6 +319,28 @@ class MCPServerConfig(BaseModel):
     disabled_tools: list[str] = Field(default_factory=list)
 
 
+class SkillOverrideConfig(BaseModel):
+    """Per-skill override settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    require_confirmation: bool | None = None
+
+
+class SkillsConfig(BaseModel):
+    """Skills discovery, execution, and per-skill override settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    auto_discover: bool = True
+    allow_script_execution: bool = False
+    skills_dir: str = ""
+    extra_dirs: list[str] = Field(default_factory=list)
+    overrides: dict[str, SkillOverrideConfig] = Field(default_factory=dict)
+
+
 class ByteyConfig(BaseModel):
     """Root non-secret configuration schema persisted to config.json."""
 
@@ -312,6 +352,7 @@ class ByteyConfig(BaseModel):
     voice_out: VoiceOutConfig = Field(default_factory=VoiceOutConfig)
     visuals: VisualsConfig = Field(default_factory=VisualsConfig)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
 
 
 class SecretStore:

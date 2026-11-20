@@ -338,6 +338,22 @@ export default class ByteyExtension extends Extension {
             this._drawer?.setMessages(messages);
 
         await this._refreshSessionsList();
+        await this._refreshSkillsList();
+    }
+
+    async _refreshSkillsList() {
+        const resp = await this._httpJson('GET', '/api/v1/skills');
+        if (this._disabled || !resp.ok || !resp.data)
+            return;
+
+        const payload = resp.data;
+        const skills = Array.isArray(payload)
+            ? payload
+            : (Array.isArray(payload.skills) ? payload.skills : []);
+        const enabled = typeof payload.enabled === 'boolean'
+            ? payload.enabled
+            : true;
+        this._drawer?.setSkills(skills, enabled);
     }
 
     async _refreshSessionsList() {
@@ -787,8 +803,18 @@ export default class ByteyExtension extends Extension {
             break;
         }
         case 'config_updated': {
-            if (event.config && typeof event.config === 'object')
+            if (event.config && typeof event.config === 'object') {
                 this._applyConfig(event.config);
+                if (event.config.skills !== undefined)
+                    this._refreshSkillsList().catch(() => {});
+            }
+            break;
+        }
+        case 'skills_updated': {
+            if (Array.isArray(event.skills))
+                this._drawer?.setSkills(event.skills, event.enabled ?? true);
+            else
+                this._refreshSkillsList().catch(() => {});
             break;
         }
         case 'position_updated': {

@@ -73,6 +73,12 @@ from bytey_ai_companion.mcp_host import (  # noqa: E402
     from_mcp_servers_json,
     to_mcp_servers_json,
 )
+from bytey_ai_companion.skills.loader import (  # noqa: E402
+    SkillRegistry,
+    is_valid_skill_slug,
+    parse_frontmatter,
+)
+from bytey_ai_companion.skills.runner import SkillScriptRunner  # noqa: E402
 from bytey_ai_companion.storage import (  # noqa: E402
     DEFAULT_DB_FILENAME,
     LEGACY_DB_FILENAME,
@@ -212,6 +218,7 @@ class _MockLLMRouter:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.tool_trigger_phrase = "use_echo_tool"
+        self.tool_name_override: str | None = None
         self.tool_arguments: dict[str, Any] | None = None
         self.next_raw_reply: str | None = None
 
@@ -255,6 +262,7 @@ class _MockLLMRouter:
         self.calls.append(
             {
                 "messages": messages,
+                "system_prompt": system_prompt,
                 "provider": provider,
                 "model": model,
                 "tools": tools,
@@ -283,7 +291,7 @@ class _MockLLMRouter:
         if self.tool_trigger_phrase in user_text and tools:
             if on_emotion is not None:
                 await on_emotion("curious")
-            tool_name = tools[0]["function"]["name"]
+            tool_name = self.tool_name_override or tools[0]["function"]["name"]
             tc = {
                 "id": "call_mock_1",
                 "name": tool_name,
@@ -2016,6 +2024,138 @@ asyncio.run(main())
                     reader_task.cancel()
                     await asyncio.gather(reader_task, return_exceptions=True)
 
+    async def test_skills_crud_ws_event_slash_command_and_load_tool(self) -> None:
+        """Verify /api/v1/skills CRUD, skills_updated WS events, /<skill> fast path, and bytey_skill__load."""
+        user_skills_dir = self.root / "user_skills"
+        events: list[dict[str, Any]] = []
+
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+            r_cfg = await client.patch(
+                "/api/v1/config",
+                json={
+                    "llm": {
+                        "provider": "gemini",
+                        "model": "gemini-2.5-flash",
+                        "force_enable_tools": True,
+                    },
+                    "skills": {
+                        "enabled": True,
+                        "skills_dir": str(user_skills_dir),
+                    },
+                },
+            )
+            self.assertEqual(r_cfg.status_code, 200)
+
+            async with websockets.connect(self.ws_url) as ws:
+                async def _ws_reader() -> None:
+                    try:
+                        async for raw in ws:
+                            events.append(json.loads(raw))
+                    except websockets.ConnectionClosed:
+                        pass
+
+                reader_task = asyncio.create_task(_ws_reader())
+                try:
+                    # 1. GET /api/v1/skills
+                    r_list = await client.get("/api/v1/skills")
+                    self.assertEqual(r_list.status_code, 200)
+                    self.assertIn("skills", r_list.json())
+
+                    # 2. POST /api/v1/skills
+                    r_create = await client.post(
+                        "/api/v1/skills",
+                        json={
+                            "name": "live-skill",
+                            "description": "Live test skill",
+                            "body": "Follow live instructions.",
+                            "slash_command": "live",
+                        },
+                    )
+                    self.assertEqual(r_create.status_code, 201)
+                    self.assertEqual(r_create.json()["skill"]["name"], "live-skill")
+                    self.assertEqual(r_create.json()["skill"]["source"], "user")
+
+                    # 3. PUT /api/v1/skills/{name}
+                    r_put = await client.put(
+                        "/api/v1/skills/live-skill",
+                        json={
+                            "description": "Updated live skill",
+                            "body": "Updated live instructions.",
+                        },
+                    )
+                    self.assertEqual(r_put.status_code, 200)
+                    self.assertEqual(r_put.json()["skill"]["body"], "Updated live instructions.")
+
+                    # 4. PATCH /api/v1/skills/{name} (disable then re-enable)
+                    r_patch_off = await client.patch(
+                        "/api/v1/skills/live-skill",
+                        json={"enabled": False},
+                    )
+                    self.assertEqual(r_patch_off.status_code, 200)
+                    self.assertFalse(r_patch_off.json()["skill"]["enabled"])
+
+                    r_patch_on = await client.patch(
+                        "/api/v1/skills/live-skill",
+                        json={"enabled": True},
+                    )
+                    self.assertEqual(r_patch_on.status_code, 200)
+                    self.assertTrue(r_patch_on.json()["skill"]["enabled"])
+
+                    # 5. POST /api/v1/skills/rescan
+                    r_rescan = await client.post("/api/v1/skills/rescan")
+                    self.assertEqual(r_rescan.status_code, 200)
+                    self.assertTrue(
+                        any(s["name"] == "live-skill" for s in r_rescan.json()["skills"])
+                    )
+
+                    # 6. Slash-command fast path injects <active_skill> into system prompt
+                    self.mock_llm.calls.clear()
+                    r_slash = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "/live check status", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_slash.status_code, 200)
+                    self.assertGreaterEqual(len(self.mock_llm.calls), 1)
+                    sys_prompt = self.mock_llm.calls[-1]["system_prompt"]
+                    self.assertIn('<active_skill name="live-skill">', sys_prompt)
+                    self.assertIn("Updated live instructions.", sys_prompt)
+                    self.assertIn("</active_skill>", sys_prompt)
+
+                    # 7. bytey_skill__load tool call execution
+                    self.mock_llm.calls.clear()
+                    self.mock_llm.tool_trigger_phrase = "trigger_skill_load"
+                    self.mock_llm.tool_name_override = "bytey_skill__load"
+                    self.mock_llm.tool_arguments = {"name": "live-skill"}
+                    try:
+                        r_tool = await client.post(
+                            "/api/v1/chat",
+                            json={"content": "Please trigger_skill_load now", "input_mode": "text"},
+                        )
+                        self.assertEqual(r_tool.status_code, 200)
+                        self.assertGreaterEqual(len(self.mock_llm.calls), 2)
+                        round2_msgs = self.mock_llm.calls[1]["messages"]
+                        tool_msgs = [m for m in round2_msgs if m.get("role") == "tool"]
+                        self.assertEqual(len(tool_msgs), 1)
+                        self.assertIn("Updated live instructions.", tool_msgs[0]["content"])
+                    finally:
+                        self.mock_llm.tool_trigger_phrase = "use_echo_tool"
+                        self.mock_llm.tool_name_override = None
+                        self.mock_llm.tool_arguments = None
+
+                    # 8. DELETE /api/v1/skills/{name}
+                    r_del = await client.delete("/api/v1/skills/live-skill")
+                    self.assertEqual(r_del.status_code, 200)
+                    self.assertEqual(r_del.json()["deleted"], "live-skill")
+                    r_get_gone = await client.get("/api/v1/skills/live-skill")
+                    self.assertEqual(r_get_gone.status_code, 404)
+
+                    await asyncio.sleep(0.05)
+                finally:
+                    reader_task.cancel()
+                    await asyncio.gather(reader_task, return_exceptions=True)
+
+        skills_ws_events = [e for e in events if e.get("type") == "skills_updated"]
+        self.assertGreaterEqual(len(skills_ws_events), 5)
 
 
 class TestSettingsClientAndSyntax(unittest.TestCase):
@@ -4346,6 +4486,291 @@ class TestExpandedEmotionsAndPreview(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(r_reset.json()["emotion"], "neutral")
             finally:
                 await daemon.stop()
+
+
+class TestSkillRegistry(unittest.TestCase):
+    """Unit tests for SkillRegistry discovery, parsing, security, and CRUD."""
+
+    def test_frontmatter_parsing_and_invalid_slug(self) -> None:
+        raw = (
+            "---\n"
+            "name: test-skill\n"
+            'description: "Parse # safely" # comment\n'
+            "requires_confirmation: true\n"
+            'allowed_tools: [read, "write"]\n'
+            "---\n\n"
+            "Body line 1.\n"
+        )
+        meta, body = parse_frontmatter(raw)
+        self.assertEqual(meta["name"], "test-skill")
+        self.assertEqual(meta["description"], "Parse # safely")
+        self.assertTrue(meta["requires_confirmation"])
+        self.assertEqual(meta["allowed_tools"], ["read", "write"])
+        self.assertEqual(body.strip(), "Body line 1.")
+
+        with self.assertRaises(ValueError):
+            parse_frontmatter("no frontmatter here")
+        with self.assertRaises(ValueError):
+            parse_frontmatter("---\nname: broken\n")
+
+        self.assertTrue(is_valid_skill_slug("valid_skill-1"))
+        self.assertFalse(is_valid_skill_slug("InvalidSlug"))
+        self.assertFalse(is_valid_skill_slug("-leading-dash"))
+        self.assertFalse(is_valid_skill_slug("bad/slug"))
+        self.assertFalse(is_valid_skill_slug(""))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            user_dir = Path(tmp) / "skills"
+            bad_dir = user_dir / "BadSlug"
+            bad_dir.mkdir(parents=True)
+            (bad_dir / "SKILL.md").write_text(
+                "---\nname: BadSlug\ndescription: Invalid\n---\n\nHello\n",
+                encoding="utf-8",
+            )
+            reg = SkillRegistry(skills_dir=str(user_dir))
+            reg.rescan()
+            bad_skill = reg.get_skill("BadSlug")
+            self.assertIsNotNone(bad_skill)
+            assert bad_skill is not None
+            self.assertFalse(bad_skill.valid)
+            self.assertIn("Invalid skill slug", bad_skill.error or "")
+
+    def test_precedence_user_over_extra_over_builtin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            user_dir = root / "user_skills"
+            extra_dir = root / "extra_skills"
+
+            (user_dir / "shared-skill").mkdir(parents=True)
+            (user_dir / "shared-skill" / "SKILL.md").write_text(
+                "---\nname: shared-skill\ndescription: From user\n---\n\nUser body\n",
+                encoding="utf-8",
+            )
+            (extra_dir / "shared-skill").mkdir(parents=True)
+            (extra_dir / "shared-skill" / "SKILL.md").write_text(
+                "---\nname: shared-skill\ndescription: From extra\n---\n\nExtra body\n",
+                encoding="utf-8",
+            )
+            (extra_dir / "extra-only").mkdir(parents=True)
+            (extra_dir / "extra-only" / "SKILL.md").write_text(
+                "---\nname: extra-only\ndescription: Extra only\n---\n\nExtra only body\n",
+                encoding="utf-8",
+            )
+
+            reg = SkillRegistry(skills_dir=str(user_dir), extra_dirs=[str(extra_dir)])
+            reg.rescan()
+
+            shared = reg.get_skill("shared-skill")
+            self.assertIsNotNone(shared)
+            assert shared is not None
+            self.assertEqual(shared.source, "user")
+            self.assertEqual(shared.description, "From user")
+
+            extra_only = reg.get_skill("extra-only")
+            self.assertIsNotNone(extra_only)
+            assert extra_only is not None
+            self.assertEqual(extra_only.source, "extra")
+
+            builtins = [s for s in reg.list_skills(include_disabled=True) if s.source == "builtin"]
+            if builtins:
+                b_name = builtins[0].name
+                (extra_dir / b_name).mkdir(parents=True)
+                (extra_dir / b_name / "SKILL.md").write_text(
+                    f"---\nname: {b_name}\ndescription: Extra override\n---\n\nExtra\n",
+                    encoding="utf-8",
+                )
+                reg.rescan()
+                overridden = reg.get_skill(b_name)
+                self.assertIsNotNone(overridden)
+                assert overridden is not None
+                self.assertEqual(overridden.source, "extra")
+
+    def test_read_skill_resource_and_path_traversal_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            user_dir = root / "user_skills"
+            skill_dir = user_dir / "res-skill"
+            (skill_dir / "references").mkdir(parents=True)
+            (skill_dir / "resources").mkdir(parents=True)
+            (skill_dir / "scripts").mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: res-skill\ndescription: Resource test\n---\n\nBody\n",
+                encoding="utf-8",
+            )
+            (skill_dir / "references" / "guide.md").write_text("Guide text", encoding="utf-8")
+            (skill_dir / "scripts" / "helper.py").write_text("print(1)", encoding="utf-8")
+
+            outside = root / "secret.txt"
+            outside.write_text("top-secret", encoding="utf-8")
+            (skill_dir / "resources" / "escape.txt").symlink_to(outside)
+
+            reg = SkillRegistry(skills_dir=str(user_dir))
+            reg.rescan()
+
+            self.assertEqual(reg.read_skill_resource("res-skill", "references/guide.md"), "Guide text")
+            with self.assertRaises(ValueError):
+                reg.read_skill_resource("res-skill", "../secret.txt")
+            with self.assertRaises(ValueError):
+                reg.read_skill_resource("res-skill", "/etc/passwd")
+            with self.assertRaises(ValueError):
+                reg.read_skill_resource("res-skill", "scripts/helper.py")
+            with self.assertRaises(ValueError):
+                reg.read_skill_resource("res-skill", "resources/escape.txt")
+
+    def test_format_prompt_catalog_create_import_and_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            user_dir = root / "user_skills"
+            reg = SkillRegistry(
+                skills_dir=str(user_dir),
+                overrides={"disabled-skill": {"enabled": False}},
+            )
+            reg.create_or_update_skill(
+                "custom-helper",
+                description="Helps with tasks",
+                body="Step 1",
+                slash_command="helper",
+            )
+            reg.create_or_update_skill(
+                "disabled-skill",
+                description="Should be hidden",
+                body="Hidden",
+            )
+
+            catalog = reg.format_prompt_catalog()
+            self.assertIn("<available_skills>", catalog)
+            self.assertIn("- custom-helper: Helps with tasks", catalog)
+            self.assertNotIn("disabled-skill", catalog)
+
+            # Import from folder
+            src_folder = root / "folder_src"
+            (src_folder / "references").mkdir(parents=True)
+            (src_folder / "SKILL.md").write_text(
+                "---\nname: folder-skill\ndescription: Imported folder\n---\n\nFolder body\n",
+                encoding="utf-8",
+            )
+            (src_folder / "references" / "doc.md").write_text("Doc", encoding="utf-8")
+            imported_folder = reg.import_skill(src_folder)
+            self.assertEqual(imported_folder.name, "folder-skill")
+            self.assertEqual(imported_folder.source, "user")
+            self.assertIn("references/doc.md", imported_folder.references)
+
+            # Import from .zip
+            good_zip = root / "zip_skill.zip"
+            with zipfile.ZipFile(good_zip, "w") as zf:
+                zf.writestr(
+                    "zip-skill/SKILL.md",
+                    "---\nname: zip-skill\ndescription: Imported zip\n---\n\nZip body\n",
+                )
+            imported_zip = reg.import_skill(good_zip)
+            self.assertEqual(imported_zip.name, "zip-skill")
+
+            # Reject zip-slip
+            bad_zip = root / "slip.zip"
+            with zipfile.ZipFile(bad_zip, "w") as zf:
+                zf.writestr("../evil.txt", "pwned")
+                zf.writestr(
+                    "SKILL.md",
+                    "---\nname: evil-skill\ndescription: Bad\n---\n\nBad\n",
+                )
+            with self.assertRaises(ValueError):
+                reg.import_skill(bad_zip)
+
+            # Delete user skill succeeds; deleting builtin rejects
+            self.assertTrue(reg.delete_user_skill("custom-helper"))
+            self.assertIsNone(reg.get_skill("custom-helper"))
+
+            builtins = [s for s in reg.list_skills(include_disabled=True) if s.source == "builtin"]
+            if builtins:
+                with self.assertRaises(ValueError):
+                    reg.delete_user_skill(builtins[0].name)
+
+
+class TestSkillScriptRunner(unittest.IsolatedAsyncioTestCase):
+    """Unit tests for SkillScriptRunner sandboxing, env sanitization, timeout, and output cap."""
+
+    async def test_run_script_sanitized_env_and_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            user_dir = root / "user_skills"
+            skill_dir = user_dir / "script-skill"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: script-skill\ndescription: Script test\n---\n\nBody\n",
+                encoding="utf-8",
+            )
+            (scripts_dir / "env_echo.py").write_text(
+                "import os, sys\n"
+                "print('GEMINI=' + os.environ.get('GEMINI_API_KEY', 'MISSING'))\n"
+                "print('OPENAI=' + os.environ.get('OPENAI_API_KEY', 'MISSING'))\n"
+                "print('ARGS=' + ','.join(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            outside_script = root / "outside.py"
+            outside_script.write_text("print('escaped')\n", encoding="utf-8")
+            (scripts_dir / "escape.py").symlink_to(outside_script)
+
+            reg = SkillRegistry(skills_dir=str(user_dir))
+            reg.rescan()
+            skill = reg.get_skill("script-skill")
+            assert skill is not None
+
+            runner = SkillScriptRunner()
+            with patch.dict(
+                os.environ,
+                {"GEMINI_API_KEY": "secret-gemini", "OPENAI_API_KEY": "secret-openai"},
+            ):
+                res = await runner.run(skill, "env_echo.py", args=["alpha", "beta"])
+
+            self.assertEqual(res.returncode, 0)
+            self.assertFalse(res.timed_out)
+            self.assertIn("GEMINI=MISSING", res.stdout)
+            self.assertIn("OPENAI=MISSING", res.stdout)
+            self.assertNotIn("secret-gemini", res.stdout)
+            self.assertNotIn("secret-openai", res.stdout)
+            self.assertIn("ARGS=alpha,beta", res.stdout)
+
+            with self.assertRaises(ValueError):
+                runner.resolve_script_path(skill, "../outside.py")
+            with self.assertRaises(ValueError):
+                runner.resolve_script_path(skill, "/bin/sh")
+            with self.assertRaises(ValueError):
+                runner.resolve_script_path(skill, "escape.py")
+
+    async def test_run_script_timeout_and_output_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            user_dir = Path(tmp) / "user_skills"
+            skill_dir = user_dir / "cap-skill"
+            scripts_dir = skill_dir / "scripts"
+            scripts_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: cap-skill\ndescription: Cap test\n---\n\nBody\n",
+                encoding="utf-8",
+            )
+            (scripts_dir / "slow.py").write_text(
+                "import time\ntime.sleep(2.0)\n",
+                encoding="utf-8",
+            )
+            (scripts_dir / "noisy.py").write_text(
+                "print('X' * 5000)\n",
+                encoding="utf-8",
+            )
+
+            reg = SkillRegistry(skills_dir=str(user_dir))
+            reg.rescan()
+            skill = reg.get_skill("cap-skill")
+            assert skill is not None
+
+            runner = SkillScriptRunner(max_output_bytes=256)
+            t_res = await runner.run(skill, "slow.py", timeout_s=0.1)
+            self.assertTrue(t_res.timed_out)
+            self.assertEqual(t_res.returncode, -1)
+
+            c_res = await runner.run(skill, "noisy.py")
+            self.assertEqual(c_res.returncode, 0)
+            self.assertTrue(c_res.truncated)
+            self.assertIn("[Truncated at 32 KiB]", c_res.stdout)
 
 
 if __name__ == "__main__":

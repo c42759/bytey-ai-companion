@@ -31,6 +31,14 @@ def resolve_local_config_path() -> Path:
         return legacy
     return primary
 
+def resolve_default_skills_dir() -> Path:
+    """Resolve default user skills directory, honoring env overrides."""
+    env_skills = os.environ.get("BYTEY_SKILLS_DIR") or os.environ.get("AI_PET_SKILLS_DIR")
+    if env_skills:
+        return Path(env_skills).expanduser()
+    return resolve_local_config_path().parent / "skills"
+
+
 def _load_default_system_prompt() -> str:
     """Load the default system prompt from the core-daemon Markdown file."""
     repo_md = (
@@ -128,6 +136,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "border_color": "#2A2C34",
     },
     "mcpServers": {},
+    "skills": {
+        "enabled": True,
+        "auto_discover": True,
+        "allow_script_execution": False,
+        "skills_dir": "",
+        "extra_dirs": [],
+        "overrides": {},
+    },
 }
 
 
@@ -660,6 +676,189 @@ class DaemonClient:
             timeout=5.0,
             offline_error="Daemon offline: cannot preview animation",
             default_data={"ok": True},
+        )
+
+    # ------------------------------------------------------------------
+    # Skills API
+    # ------------------------------------------------------------------
+
+    def list_skills(self) -> ApiResult:
+        """Fetch discovered skills from daemon, falling back gracefully if offline."""
+        resp, err, offline = self._request("GET", "/api/v1/skills", timeout=10.0)
+        if resp is None:
+            if offline:
+                return ApiResult(
+                    ok=True,
+                    offline=True,
+                    data={
+                        "skills": [],
+                        "offline": True,
+                        "skills_dir": str(resolve_default_skills_dir()),
+                    },
+                    error=err or "Daemon offline",
+                )
+            return ApiResult(ok=False, offline=False, error=err)
+        if resp.is_success:
+            try:
+                payload = resp.json()
+            except ValueError as exc:
+                return ApiResult(ok=False, error=f"Invalid skills payload: {exc}")
+            return ApiResult(ok=True, offline=False, data=payload, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    def rescan_skills(self) -> ApiResult:
+        """Trigger a daemon skill rescan, falling back gracefully if offline."""
+        resp, err, offline = self._request("POST", "/api/v1/skills/rescan", timeout=15.0)
+        if resp is None:
+            if offline:
+                return ApiResult(
+                    ok=True,
+                    offline=True,
+                    data={"skills": [], "offline": True},
+                    error=err or "Daemon offline",
+                )
+            return ApiResult(ok=False, offline=False, error=err)
+        if resp.is_success:
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {"skills": []}
+            return ApiResult(ok=True, offline=False, data=payload, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    def get_skill(self, name: str) -> ApiResult:
+        """Fetch full details and raw SKILL.md content for *name*."""
+        resp, err, offline = self._request("GET", f"/api/v1/skills/{name}")
+        if resp is None:
+            return ApiResult(
+                ok=False,
+                offline=offline,
+                error="Daemon offline: cannot load skill details" if offline else err,
+            )
+        if resp.is_success:
+            try:
+                payload = resp.json()
+            except ValueError as exc:
+                return ApiResult(ok=False, error=f"Invalid skill payload: {exc}")
+            return ApiResult(ok=True, offline=False, data=payload, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    def create_skill(self, payload: dict[str, Any]) -> ApiResult:
+        """Create a new user skill via daemon."""
+        return self._post_json_action(
+            "/api/v1/skills",
+            payload,
+            timeout=10.0,
+            offline_error="Daemon offline: cannot create skill",
+            default_data={"ok": True},
+        )
+
+    def update_skill(self, name: str, payload: dict[str, Any]) -> ApiResult:
+        """Update an existing user skill's SKILL.md or metadata via daemon."""
+        resp, err, offline = self._request("PUT", f"/api/v1/skills/{name}", json=payload, timeout=10.0)
+        if resp is None:
+            return ApiResult(
+                ok=False,
+                offline=offline,
+                error="Daemon offline: cannot update skill" if offline else err,
+            )
+        if resp.is_success:
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {"ok": True}
+            return ApiResult(ok=True, offline=False, data=data, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    def update_skill_override(self, name: str, patch: dict[str, Any]) -> ApiResult:
+        """Update per-skill override (e.g. enabled) via daemon or local config.json fallback."""
+        resp, err, offline = self._request("PATCH", f"/api/v1/skills/{name}", json=patch, timeout=10.0)
+        if resp is None:
+            if offline:
+                current = self._read_local_config()
+                skills_cfg = current.setdefault("skills", {})
+                if not isinstance(skills_cfg, dict):
+                    skills_cfg = {}
+                    current["skills"] = skills_cfg
+                overrides = skills_cfg.setdefault("overrides", {})
+                if not isinstance(overrides, dict):
+                    overrides = {}
+                    skills_cfg["overrides"] = overrides
+                existing = overrides.get(name) if isinstance(overrides.get(name), dict) else {}
+                overrides[name] = deep_merge(existing, patch)
+                try:
+                    self._write_local_config(current)
+                except OSError as write_exc:
+                    return ApiResult(ok=False, offline=True, error=str(write_exc))
+                return ApiResult(
+                    ok=True,
+                    offline=True,
+                    data={"name": name, "override": overrides[name]},
+                )
+            return ApiResult(ok=False, offline=False, error=err)
+        if resp.is_success:
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {"name": name, **patch}
+            return ApiResult(ok=True, offline=False, data=data, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    def import_skill(self, path: str) -> ApiResult:
+        """Import a skill from a local folder or .zip archive via daemon."""
+        return self._post_json_action(
+            "/api/v1/skills/import",
+            {"path": path},
+            timeout=15.0,
+            offline_error="Daemon offline: cannot import skill",
+            default_data={"ok": True},
+        )
+
+    def delete_skill(self, name: str) -> ApiResult:
+        """Delete a user-installed skill via daemon."""
+        resp, err, offline = self._request("DELETE", f"/api/v1/skills/{name}", timeout=10.0)
+        if resp is None:
+            return ApiResult(
+                ok=False,
+                offline=offline,
+                error="Daemon offline: cannot delete skill" if offline else err,
+            )
+        if resp.is_success:
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {"ok": True, "deleted": name}
+            return ApiResult(ok=True, offline=False, data=data, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
         )
 
 

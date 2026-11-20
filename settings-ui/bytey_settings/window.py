@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +24,7 @@ from .api_client import (  # noqa: E402
     ApiResult,
     DaemonClient,
     deep_merge,
+    resolve_default_skills_dir,
 )
 
 PROVIDERS = ("ollama", "gemini", "openai", "anthropic", "custom")
@@ -170,6 +172,13 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "chat_width": (("visuals", "chat_width"), ("chat_width",)),
     "chat_height": (("visuals", "chat_height"), ("chat_height",)),
     "chat_density": (("visuals", "chat_density"), ("chat_density",)),
+    "skills_enabled": (("skills", "enabled"), ("skills_enabled",)),
+    "skills_allow_script_execution": (
+        ("skills", "allow_script_execution"),
+        ("skills_allow_script_execution",),
+    ),
+    "skills_dir": (("skills", "skills_dir"), ("skills_dir",)),
+    "skills_extra_dirs": (("skills", "extra_dirs"), ("skills_extra_dirs",)),
 }
 
 
@@ -753,10 +762,13 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._offline_banners: list[Adw.Banner] = []
         self._mcp_servers: dict[str, dict[str, Any]] = {}
         self._mcp_rows: list[Gtk.Widget] = []
+        self._skills: list[dict[str, Any]] = []
+        self._skill_rows: list[Gtk.Widget] = []
         self._color_controls: dict[str, tuple[Adw.ActionRow, Gtk.ColorDialogButton, str]] = {}
 
         self._build_general_page()
         self._build_ai_mcp_page()
+        self._build_skills_page()
         self._build_voice_input_page()
         self._build_voice_output_page()
         self._build_visuals_page()
@@ -1499,6 +1511,492 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self._toast(f"Applied mcpServers JSON ({len(servers)} server(s)){suffix}")
 
         self._run_async(lambda: self.client.put_mcp_json(raw), on_done)
+
+    # ------------------------------------------------------------------
+    # Page: Skills
+    # ------------------------------------------------------------------
+
+    def _build_skills_page(self) -> None:
+        page = Adw.PreferencesPage(title="Skills", icon_name="applications-science-symbolic")
+        page.set_name("skills")
+
+        banner_group = Adw.PreferencesGroup()
+        banner_group.add(self._create_offline_banner())
+        page.add(banner_group)
+
+        general_group = Adw.PreferencesGroup(title="General & Storage")
+
+        self.skills_enabled_row = Adw.SwitchRow(
+            title="Enable Skills",
+            subtitle="Expose discovered skills and slash commands to the AI assistant",
+        )
+        self.skills_enabled_row.connect(
+            "notify::active",
+            lambda *_: self._patch_fields(
+                {"skills_enabled": self.skills_enabled_row.get_active()}, "Saved"
+            ),
+        )
+        general_group.add(self.skills_enabled_row)
+
+        self.skills_allow_scripts_row = Adw.SwitchRow(
+            title="Allow Skill Scripts",
+            subtitle="Warning: allows skills to execute bundled local scripts on your system",
+        )
+        self.skills_allow_scripts_row.connect(
+            "notify::active",
+            lambda *_: self._patch_fields(
+                {"skills_allow_script_execution": self.skills_allow_scripts_row.get_active()},
+                "Saved",
+            ),
+        )
+        general_group.add(self.skills_allow_scripts_row)
+
+        self.skills_dir_row = Adw.ActionRow(
+            title="Skills Storage Folder",
+            subtitle="Default (~/.config/bytey-ai-companion/skills)",
+        )
+        dir_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, valign=Gtk.Align.CENTER)
+        browse_btn = Gtk.Button(label="Browse")
+        browse_btn.connect("clicked", self._on_skills_browse_clicked)
+        reset_btn = Gtk.Button(label="Reset")
+        reset_btn.connect("clicked", self._on_skills_reset_clicked)
+        open_btn = Gtk.Button(label="Open Folder")
+        open_btn.connect("clicked", self._on_skills_open_folder_clicked)
+        dir_btn_box.append(browse_btn)
+        dir_btn_box.append(reset_btn)
+        dir_btn_box.append(open_btn)
+        self.skills_dir_row.add_suffix(dir_btn_box)
+        general_group.add(self.skills_dir_row)
+
+        self.skills_extra_dirs_row = Adw.EntryRow(
+            title="Extra Skill Directories (comma-separated)",
+            show_apply_button=True,
+        )
+        self.skills_extra_dirs_row.connect(
+            "apply", lambda *_: self._on_skills_extra_dirs_applied()
+        )
+        general_group.add(self.skills_extra_dirs_row)
+
+        rescan_row = Adw.ActionRow(
+            title="Rescan Skills",
+            subtitle="Reload skills from storage and extra directories",
+        )
+        rescan_btn = Gtk.Button(label="Rescan Skills", valign=Gtk.Align.CENTER)
+        rescan_btn.connect("clicked", lambda *_: self._rescan_skills(show_toast=True))
+        rescan_row.add_suffix(rescan_btn)
+        general_group.add(rescan_row)
+        page.add(general_group)
+
+        self.skills_list_group = Adw.PreferencesGroup(
+            title="Detected Skills",
+            description="Manage user, extra, and built-in skills.",
+        )
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, valign=Gtk.Align.CENTER)
+        add_skill_btn = Gtk.Button(label="+ Add Skill")
+        add_skill_btn.add_css_class("suggested-action")
+        add_skill_btn.connect("clicked", self._on_add_skill_clicked)
+        import_skill_btn = Gtk.Button(label="Import")
+        import_skill_btn.connect("clicked", self._on_import_skill_clicked)
+        header_box.append(add_skill_btn)
+        header_box.append(import_skill_btn)
+        self.skills_list_group.set_header_suffix(header_box)
+        page.add(self.skills_list_group)
+
+        self.add(page)
+
+    def _effective_skills_dir(self) -> Path:
+        configured = str(self._read_field("skills_dir", "") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return resolve_default_skills_dir()
+
+    def _sync_skills_dir_subtitle(self) -> None:
+        configured = str(self._read_field("skills_dir", "") or "").strip()
+        if configured:
+            self.skills_dir_row.set_subtitle(configured)
+        else:
+            self.skills_dir_row.set_subtitle("Default (~/.config/bytey-ai-companion/skills)")
+
+    def _on_skills_browse_clicked(self, *_: object) -> None:
+        dlg = Gtk.FileDialog(title="Select Skills Storage Folder")
+
+        def _on_done(dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+            try:
+                gfile = dialog.select_folder_finish(result)
+            except GLib.Error:
+                return
+            if gfile is None or not gfile.get_path():
+                return
+            folder = gfile.get_path()
+            self._patch_fields({"skills_dir": folder}, "Skills folder updated")
+            self._sync_skills_dir_subtitle()
+            self._rescan_skills(show_toast=False)
+
+        dlg.select_folder(self, None, _on_done)
+
+    def _on_skills_reset_clicked(self, *_: object) -> None:
+        self._patch_fields({"skills_dir": ""}, "Skills folder reset to default")
+        self._sync_skills_dir_subtitle()
+        self._rescan_skills(show_toast=False)
+
+    def _on_skills_open_folder_clicked(self, *_: object) -> None:
+        target = self._effective_skills_dir()
+        try:
+            os.makedirs(target, exist_ok=True)
+            Gio.AppInfo.launch_default_for_uri(target.resolve().as_uri(), None)
+        except Exception as exc:
+            self._toast(f"Could not open folder: {exc}")
+
+    def _on_skills_extra_dirs_applied(self) -> None:
+        if self._loading:
+            return
+        raw = self.skills_extra_dirs_row.get_text()
+        dirs = [part.strip() for part in raw.split(",") if part.strip()]
+        self._patch_fields({"skills_extra_dirs": dirs}, "Saved extra skill directories")
+        self._rescan_skills(show_toast=False)
+
+    def _rescan_skills(self, *, show_toast: bool = False) -> None:
+        def on_done(res: ApiResult) -> None:
+            self._set_offline(res.offline)
+            if not res.ok:
+                self._toast(f"Rescan failed: {res.error}")
+                return
+            if isinstance(res.data, dict) and isinstance(res.data.get("skills"), list):
+                self._skills = list(res.data["skills"])
+                self._rebuild_skills_list()
+            if show_toast:
+                suffix = " (offline)" if res.offline else ""
+                self._toast(f"Rescanned skills ({len(self._skills)} found){suffix}")
+
+        self._run_async(self.client.rescan_skills, on_done)
+
+    def _on_skills_loaded(self, res: ApiResult) -> None:
+        self._set_offline(res.offline)
+        if not res.ok or not isinstance(res.data, dict):
+            return
+        skills = res.data.get("skills")
+        self._skills = list(skills) if isinstance(skills, list) else []
+        self._rebuild_skills_list()
+
+    def _rebuild_skills_list(self) -> None:
+        for widget in self._skill_rows:
+            self.skills_list_group.remove(widget)
+        self._skill_rows.clear()
+
+        if not self._skills:
+            empty_row = Adw.ActionRow(
+                title="No skills detected",
+                subtitle="Click '+ Add Skill' or 'Import' to add a skill.",
+            )
+            self.skills_list_group.add(empty_row)
+            self._skill_rows.append(empty_row)
+            return
+
+        source_tags = {"user": "[User]", "extra": "[Extra]", "builtin": "[Built-in]"}
+        for skill in sorted(self._skills, key=lambda s: str(s.get("name", ""))):
+            name = str(skill.get("name", ""))
+            source = str(skill.get("source", "user"))
+            source_tag = source_tags.get(source, f"[{source}]")
+            valid = bool(skill.get("valid", True))
+            invalid_tag = " ⚠ Invalid" if not valid else ""
+            title = f"{name} {source_tag}{invalid_tag}"
+            subtitle = str(skill.get("error") or skill.get("description") or "")
+            editable = bool(skill.get("editable", source == "user"))
+
+            row = Adw.ActionRow(title=title, subtitle=subtitle)
+
+            enabled_switch = Gtk.Switch(
+                active=bool(skill.get("enabled", True)),
+                valign=Gtk.Align.CENTER,
+                tooltip_text="Enable or disable skill",
+            )
+
+            def _on_toggle(sw: Gtk.Switch, _pspec: object, sname: str = name) -> None:
+                if self._loading:
+                    return
+                active = sw.get_active()
+                self._run_async(
+                    lambda: self.client.update_skill_override(sname, {"enabled": active}),
+                    lambda r: self._on_skill_override_done(r, sname, active),
+                )
+
+            enabled_switch.connect("notify::active", _on_toggle)
+            row.add_suffix(enabled_switch)
+
+            edit_btn = Gtk.Button(
+                icon_name="document-edit-symbolic" if editable else "dialog-information-symbolic",
+                valign=Gtk.Align.CENTER,
+                tooltip_text="Edit SKILL.md" if editable else "Inspect SKILL.md (read-only)",
+            )
+            edit_btn.add_css_class("flat")
+            edit_btn.connect("clicked", lambda _b, s=skill: self._open_skill_editor(s))
+            row.add_suffix(edit_btn)
+
+            if editable:
+                del_btn = Gtk.Button(
+                    icon_name="user-trash-symbolic",
+                    valign=Gtk.Align.CENTER,
+                    tooltip_text="Delete skill",
+                )
+                del_btn.add_css_class("flat")
+                del_btn.add_css_class("destructive-action")
+                del_btn.connect("clicked", lambda _b, sname=name: self._confirm_delete_skill(sname))
+                row.add_suffix(del_btn)
+
+            self.skills_list_group.add(row)
+            self._skill_rows.append(row)
+
+    def _on_skill_override_done(self, res: ApiResult, name: str, active: bool) -> None:
+        self._set_offline(res.offline)
+        if not res.ok:
+            self._toast(f"Failed to update {name}: {res.error}")
+            return
+        for s in self._skills:
+            if s.get("name") == name:
+                s["enabled"] = active
+                break
+        suffix = " (offline)" if res.offline else ""
+        self._toast(f"{'Enabled' if active else 'Disabled'} skill '{name}'{suffix}")
+
+    def _on_add_skill_clicked(self, *_: object) -> None:
+        dialog = Adw.Dialog(title="Add Skill", content_width=520, content_height=540)
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_end_title_buttons=False, show_start_title_buttons=False)
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda *_: dialog.close())
+        create_btn = Gtk.Button(label="Create")
+        create_btn.add_css_class("suggested-action")
+        header.pack_start(cancel_btn)
+        header.pack_end(create_btn)
+        toolbar.add_top_bar(header)
+
+        page = Adw.PreferencesPage()
+        meta_group = Adw.PreferencesGroup(title="Skill Metadata")
+        name_row = Adw.EntryRow(title="Name (slug, e.g. my-skill)")
+        desc_row = Adw.EntryRow(title="Description")
+        slash_row = Adw.EntryRow(title="Slash Command (optional, e.g. /myskill)")
+        meta_group.add(name_row)
+        meta_group.add(desc_row)
+        meta_group.add(slash_row)
+        page.add(meta_group)
+
+        body_group = Adw.PreferencesGroup(title="Instructions (Markdown)")
+        body_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        body_view.set_top_margin(8)
+        body_view.set_bottom_margin(8)
+        body_view.set_left_margin(10)
+        body_view.set_right_margin(10)
+        scrolled = Gtk.ScrolledWindow(min_content_height=180, hexpand=True, vexpand=True)
+        scrolled.set_child(body_view)
+        body_row = Adw.PreferencesRow()
+        body_row.set_child(scrolled)
+        body_group.add(body_row)
+        page.add(body_group)
+
+        def _on_create(*_: object) -> None:
+            name = name_row.get_text().strip()
+            desc = desc_row.get_text().strip()
+            slash = slash_row.get_text().strip()
+            buf = body_view.get_buffer()
+            instructions = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+            if not name or not desc:
+                self._toast("Name and description are required")
+                return
+            payload: dict[str, Any] = {
+                "name": name,
+                "description": desc,
+                "body": instructions,
+            }
+            if slash:
+                payload["slash_command"] = slash
+            create_btn.set_sensitive(False)
+
+            def _on_done(res: ApiResult) -> None:
+                create_btn.set_sensitive(True)
+                self._set_offline(res.offline)
+                if not res.ok:
+                    self._toast(f"Create failed: {res.error}")
+                    return
+                dialog.close()
+                self._toast(f"Created skill '{name}'")
+                self._run_async(self.client.list_skills, self._on_skills_loaded)
+
+            self._run_async(lambda: self.client.create_skill(payload), _on_done)
+
+        create_btn.connect("clicked", _on_create)
+        toolbar.set_content(page)
+        dialog.set_child(toolbar)
+        dialog.present(self)
+
+    def _on_import_skill_clicked(self, *_: object) -> None:
+        def _import_path(path: str) -> None:
+            def _on_done(res: ApiResult) -> None:
+                self._set_offline(res.offline)
+                if not res.ok:
+                    self._toast(f"Import failed: {res.error}")
+                    return
+                self._toast("Skill imported")
+                self._run_async(self.client.list_skills, self._on_skills_loaded)
+
+            self._run_async(lambda: self.client.import_skill(path), _on_done)
+
+        def _pick_folder() -> None:
+            dlg = Gtk.FileDialog(title="Select Skill Folder")
+
+            def _on_folder_done(dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+                try:
+                    gfile = dialog.select_folder_finish(result)
+                except GLib.Error:
+                    return
+                if gfile and gfile.get_path():
+                    _import_path(gfile.get_path())
+
+            dlg.select_folder(self, None, _on_folder_done)
+
+        def _pick_zip() -> None:
+            dlg = Gtk.FileDialog(title="Select Skill .zip Archive")
+            zip_filter = Gtk.FileFilter()
+            zip_filter.set_name("ZIP archives")
+            zip_filter.add_mime_type("application/zip")
+            zip_filter.add_pattern("*.zip")
+            filters = Gio.ListStore.new(Gtk.FileFilter)
+            filters.append(zip_filter)
+            dlg.set_filters(filters)
+
+            def _on_open_done(dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+                try:
+                    gfile = dialog.open_finish(result)
+                except GLib.Error:
+                    return
+                if gfile and gfile.get_path():
+                    _import_path(gfile.get_path())
+
+            dlg.open(self, None, _on_open_done)
+
+        if hasattr(Adw, "AlertDialog"):
+            dlg = Adw.AlertDialog(
+                heading="Import Skill",
+                body="Choose whether to import a skill folder or a .zip archive.",
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("folder", "Folder")
+            dlg.add_response("zip", ".zip Archive")
+            dlg.set_default_response("folder")
+            dlg.set_close_response("cancel")
+            dlg.connect(
+                "response",
+                lambda _d, resp: _pick_folder()
+                if resp == "folder"
+                else (_pick_zip() if resp == "zip" else None),
+            )
+            dlg.present(self)
+        else:
+            _pick_folder()
+
+    def _open_skill_editor(self, skill: dict[str, Any]) -> None:
+        name = str(skill.get("name", ""))
+        source = str(skill.get("source", "user"))
+        editable = bool(skill.get("editable", source == "user"))
+        title = f"Edit Skill: {name}" if editable else f"Inspect Skill: {name} (Read-only)"
+
+        dialog = Adw.Dialog(title=title, content_width=600, content_height=560)
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_end_title_buttons=False, show_start_title_buttons=False)
+        close_btn = Gtk.Button(label="Cancel" if editable else "Close")
+        close_btn.connect("clicked", lambda *_: dialog.close())
+        header.pack_start(close_btn)
+
+        save_btn: Gtk.Button | None = None
+        if editable:
+            save_btn = Gtk.Button(label="Save")
+            save_btn.add_css_class("suggested-action")
+            header.pack_end(save_btn)
+        toolbar.add_top_bar(header)
+
+        text_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, editable=editable)
+        text_view.add_css_class("monospace")
+        text_view.set_top_margin(10)
+        text_view.set_bottom_margin(10)
+        text_view.set_left_margin(12)
+        text_view.set_right_margin(12)
+        raw_content = str(skill.get("raw_content", ""))
+        text_view.get_buffer().set_text(raw_content)
+
+        scrolled = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        scrolled.set_child(text_view)
+        toolbar.set_content(scrolled)
+        dialog.set_child(toolbar)
+        dialog.present(self)
+
+        if not raw_content:
+            def _on_fetched(res: ApiResult) -> None:
+                if res.ok and isinstance(res.data, dict):
+                    content = str(res.data.get("raw_content", ""))
+                    if content:
+                        text_view.get_buffer().set_text(content)
+
+            self._run_async(lambda: self.client.get_skill(name), _on_fetched)
+
+        if editable and save_btn is not None:
+            def _on_save(*_: object) -> None:
+                buf = text_view.get_buffer()
+                content = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+                save_btn.set_sensitive(False)
+
+                def _on_done(res: ApiResult) -> None:
+                    save_btn.set_sensitive(True)
+                    self._set_offline(res.offline)
+                    if not res.ok:
+                        self._toast(f"Save failed: {res.error}")
+                        return
+                    dialog.close()
+                    self._toast(f"Saved skill '{name}'")
+                    self._run_async(self.client.list_skills, self._on_skills_loaded)
+
+                self._run_async(
+                    lambda: self.client.update_skill(name, {"content": content}),
+                    _on_done,
+                )
+
+            save_btn.connect("clicked", _on_save)
+
+    def _confirm_delete_skill(self, name: str) -> None:
+        def _do_delete() -> None:
+            def _on_done(res: ApiResult) -> None:
+                self._set_offline(res.offline)
+                if not res.ok:
+                    self._toast(f"Delete failed: {res.error}")
+                    return
+                self._toast(f"Deleted skill '{name}'")
+                self._run_async(self.client.list_skills, self._on_skills_loaded)
+
+            self._run_async(lambda: self.client.delete_skill(name), _on_done)
+
+        if hasattr(Adw, "AlertDialog"):
+            dlg = Adw.AlertDialog(
+                heading=f"Delete Skill '{name}'?",
+                body="This permanently removes the user skill directory and its files.",
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("delete", "Delete")
+            dlg.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+            dlg.set_default_response("cancel")
+            dlg.set_close_response("cancel")
+            dlg.connect("response", lambda _d, resp: _do_delete() if resp == "delete" else None)
+            dlg.present(self)
+        else:
+            dlg = Adw.MessageDialog(
+                transient_for=self,
+                modal=True,
+                heading=f"Delete Skill '{name}'?",
+                body="This permanently removes the user skill directory and its files.",
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("delete", "Delete")
+            dlg.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+            dlg.set_default_response("cancel")
+            dlg.connect("response", lambda _d, resp: _do_delete() if resp == "delete" else None)
+            dlg.present()
 
     # ------------------------------------------------------------------
     # Page 3: Voice Input
@@ -2717,6 +3215,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
     def reload_all(self) -> None:
         self._run_async(self.client.get_config, self._on_config_loaded)
         self._run_async(self.client.get_mcp_json, self._on_mcp_loaded)
+        self._run_async(self.client.list_skills, self._on_skills_loaded)
 
     def _on_config_loaded(self, res: ApiResult) -> None:
         self._set_offline(res.offline)
@@ -2877,6 +3376,18 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self.offset_y_row.set_value(float(self._read_field("offset_y", 12)))
             self.float_x_row.set_value(float(self._read_field("float_x", 100)))
             self.float_y_row.set_value(float(self._read_field("float_y", 80)))
+
+            # Skills
+            self.skills_enabled_row.set_active(bool(self._read_field("skills_enabled", True)))
+            self.skills_allow_scripts_row.set_active(
+                bool(self._read_field("skills_allow_script_execution", False))
+            )
+            self._sync_skills_dir_subtitle()
+            extra_dirs = self._read_field("skills_extra_dirs", [])
+            if isinstance(extra_dirs, list):
+                self.skills_extra_dirs_row.set_text(", ".join(str(d) for d in extra_dirs if str(d).strip()))
+            else:
+                self.skills_extra_dirs_row.set_text(str(extra_dirs or ""))
         finally:
             self._loading = False
 

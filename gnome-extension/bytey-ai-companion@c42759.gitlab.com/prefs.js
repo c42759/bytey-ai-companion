@@ -501,6 +501,9 @@ export default class ByteyPreferences extends ExtensionPreferences {
         const modelContextMap = new Map();
         let mcpServers = {};
         let mcpRows = [];
+        let skillsList = [];
+        let skillRows = [];
+        let configuredSkillsDir = '';
 
         const getDaemonUrl = () => normalizeUrl(settings.get_string('daemon-url')) ?? DEFAULT_DAEMON_URL;
 
@@ -1081,9 +1084,87 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         importExportPage.add(backupGroup);
 
+        // 5. Skills Page
+        const skillsPage = new Adw.PreferencesPage({
+            title: 'Skills',
+            icon_name: 'applications-science-symbolic',
+        });
+
+        const skillsGeneralGroup = new Adw.PreferencesGroup({
+            title: 'General & Storage',
+        });
+
+        const skillsEnabledRow = new Adw.SwitchRow({
+            title: 'Enable Skills',
+            subtitle: 'Expose discovered skills and slash commands to the AI assistant',
+        });
+        skillsGeneralGroup.add(skillsEnabledRow);
+
+        const skillsAllowScriptsRow = new Adw.SwitchRow({
+            title: 'Allow Skill Scripts',
+            subtitle: 'Warning: allows skills to execute bundled local scripts on your system',
+        });
+        skillsGeneralGroup.add(skillsAllowScriptsRow);
+
+        const skillsDirRow = new Adw.ActionRow({
+            title: 'Skills Storage Folder',
+            subtitle: 'Default (~/.config/bytey-ai-companion/skills)',
+        });
+        const skillsDirBtnBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 6,
+            valign: Gtk.Align.CENTER,
+        });
+        const skillsBrowseBtn = new Gtk.Button({label: 'Browse'});
+        const skillsResetBtn = new Gtk.Button({label: 'Reset'});
+        const skillsOpenBtn = new Gtk.Button({label: 'Open Folder'});
+        skillsDirBtnBox.append(skillsBrowseBtn);
+        skillsDirBtnBox.append(skillsResetBtn);
+        skillsDirBtnBox.append(skillsOpenBtn);
+        skillsDirRow.add_suffix(skillsDirBtnBox);
+        skillsGeneralGroup.add(skillsDirRow);
+
+        const skillsExtraDirsRow = new Adw.EntryRow({
+            title: 'Extra Skill Directories (comma-separated)',
+            show_apply_button: true,
+        });
+        skillsGeneralGroup.add(skillsExtraDirsRow);
+
+        const skillsRescanRow = new Adw.ActionRow({
+            title: 'Rescan Skills',
+            subtitle: 'Reload skills from storage and extra directories',
+        });
+        const skillsRescanBtn = new Gtk.Button({
+            label: 'Rescan Skills',
+            valign: Gtk.Align.CENTER,
+        });
+        skillsRescanRow.add_suffix(skillsRescanBtn);
+        skillsGeneralGroup.add(skillsRescanRow);
+        skillsPage.add(skillsGeneralGroup);
+
+        const skillsListGroup = new Adw.PreferencesGroup({
+            title: 'Detected Skills',
+            description: 'Manage user, extra, and built-in skills.',
+        });
+        const skillsHeaderBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 6,
+            valign: Gtk.Align.CENTER,
+        });
+        const addSkillBtn = new Gtk.Button({
+            label: '+ Add Skill',
+            css_classes: ['suggested-action'],
+        });
+        const importSkillBtn = new Gtk.Button({label: 'Import'});
+        skillsHeaderBox.append(addSkillBtn);
+        skillsHeaderBox.append(importSkillBtn);
+        skillsListGroup.set_header_suffix(skillsHeaderBox);
+        skillsPage.add(skillsListGroup);
+
         window.add(generalPage);
         window.add(visualsPage);
         window.add(voicePage);
+        window.add(skillsPage);
         window.add(importExportPage);
 
         const syncPlacementSensitivity = () => {
@@ -2073,6 +2154,18 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 currentContextSize = normalizePositiveInt(provider.context_size ?? llm.context_size);
                 detectedMaxContext = normalizePositiveInt(llm.max_context_size);
                 mcpServers = normalizeMcpMap(cfg.mcpServers ?? cfg.mcp_servers ?? {});
+
+                const skillsCfg = cfg.skills && typeof cfg.skills === 'object' ? cfg.skills : {};
+                skillsEnabledRow.set_active(Boolean(skillsCfg.enabled ?? true));
+                skillsAllowScriptsRow.set_active(Boolean(skillsCfg.allow_script_execution ?? false));
+                configuredSkillsDir = String(skillsCfg.skills_dir ?? '').trim();
+                skillsDirRow.set_subtitle(
+                    configuredSkillsDir || 'Default (~/.config/bytey-ai-companion/skills)'
+                );
+                const extraDirs = Array.isArray(skillsCfg.extra_dirs) ? skillsCfg.extra_dirs : [];
+                skillsExtraDirsRow.set_text(
+                    extraDirs.map(d => String(d).trim()).filter(Boolean).join(', ')
+                );
             } finally {
                 loading = false;
             }
@@ -2103,6 +2196,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             if (resp.ok && resp.data && typeof resp.data === 'object') {
                 setOfflineState(false);
                 applyConfig(resp.data);
+                loadSkills().catch(() => {});
             } else {
                 setOfflineState(true);
             }
@@ -2955,6 +3049,485 @@ export default class ByteyPreferences extends ExtensionPreferences {
         applyMcpJsonBtn.connect('clicked', () => onUserChange(() => {
             applyRawMcpJson().catch(() => {});
         }));
+
+        // Skills helpers & signal handlers
+        const resolveEffectiveSkillsDir = () => {
+            if (configuredSkillsDir) {
+                if (configuredSkillsDir.startsWith('~/'))
+                    return GLib.build_filenamev([GLib.get_home_dir(), configuredSkillsDir.slice(2)]);
+                return configuredSkillsDir;
+            }
+            return GLib.build_filenamev([GLib.get_user_config_dir(), 'bytey-ai-companion', 'skills']);
+        };
+
+        const rebuildSkillsList = () => {
+            for (const widget of skillRows)
+                skillsListGroup.remove(widget);
+            skillRows = [];
+
+            if (!Array.isArray(skillsList) || skillsList.length === 0) {
+                const emptyRow = new Adw.ActionRow({
+                    title: 'No skills detected',
+                    subtitle: "Click '+ Add Skill' or 'Import' to add a skill.",
+                });
+                skillsListGroup.add(emptyRow);
+                skillRows.push(emptyRow);
+                return;
+            }
+
+            const sourceTags = {user: '[User]', extra: '[Extra]', builtin: '[Built-in]'};
+            const sorted = [...skillsList].sort((a, b) =>
+                String(a?.name ?? '').localeCompare(String(b?.name ?? ''))
+            );
+
+            for (const skill of sorted) {
+                const name = String(skill?.name ?? '');
+                const source = String(skill?.source ?? 'user');
+                const sourceTag = sourceTags[source] ?? `[${source}]`;
+                const valid = Boolean(skill?.valid ?? true);
+                const invalidTag = valid ? '' : ' ⚠ Invalid';
+                const editable = Boolean(skill?.editable ?? source === 'user');
+                const row = new Adw.ActionRow({
+                    title: `${name} ${sourceTag}${invalidTag}`,
+                    subtitle: String(skill?.error || skill?.description || ''),
+                });
+
+                const enabledSwitch = new Gtk.Switch({
+                    active: Boolean(skill?.enabled ?? true),
+                    valign: Gtk.Align.CENTER,
+                    tooltip_text: 'Enable or disable skill',
+                });
+                enabledSwitch.connect('notify::active', () => onUserChange(() => {
+                    const active = enabledSwitch.get_active();
+                    httpJson('PATCH', `/api/v1/skills/${encodeURIComponent(name)}`, {enabled: active})
+                        .then(resp => {
+                            if (destroyed)
+                                return;
+                            if (!resp.ok) {
+                                showToast(`Failed to update ${name}`);
+                                return;
+                            }
+                            skill.enabled = active;
+                            showToast(`${active ? 'Enabled' : 'Disabled'} skill '${name}'`);
+                        })
+                        .catch(() => {});
+                }));
+                row.add_suffix(enabledSwitch);
+
+                const editBtn = new Gtk.Button({
+                    icon_name: editable ? 'document-edit-symbolic' : 'dialog-information-symbolic',
+                    valign: Gtk.Align.CENTER,
+                    tooltip_text: editable ? 'Edit SKILL.md' : 'Inspect SKILL.md (read-only)',
+                    css_classes: ['flat'],
+                });
+                editBtn.connect('clicked', () => openSkillEditor(skill));
+                row.add_suffix(editBtn);
+
+                if (editable) {
+                    const delBtn = new Gtk.Button({
+                        icon_name: 'user-trash-symbolic',
+                        valign: Gtk.Align.CENTER,
+                        tooltip_text: 'Delete skill',
+                        css_classes: ['flat', 'destructive-action'],
+                    });
+                    delBtn.connect('clicked', () => confirmDeleteSkill(name));
+                    row.add_suffix(delBtn);
+                }
+
+                skillsListGroup.add(row);
+                skillRows.push(row);
+            }
+        };
+
+        const loadSkills = async () => {
+            if (destroyed)
+                return;
+            const resp = await httpJson('GET', '/api/v1/skills');
+            if (destroyed || !resp.ok || !resp.data || typeof resp.data !== 'object')
+                return;
+            skillsList = Array.isArray(resp.data.skills) ? resp.data.skills : [];
+            rebuildSkillsList();
+        };
+
+        const rescanSkills = async (showResultToast = false) => {
+            if (destroyed)
+                return;
+            const resp = await httpJson('POST', '/api/v1/skills/rescan', {});
+            if (destroyed)
+                return;
+            if (!resp.ok) {
+                showToast('Failed to rescan skills');
+                return;
+            }
+            if (resp.data && Array.isArray(resp.data.skills))
+                skillsList = resp.data.skills;
+            rebuildSkillsList();
+            if (showResultToast)
+                showToast(`Rescanned skills (${skillsList.length} found)`);
+        };
+
+        const openSkillEditor = skill => {
+            if (destroyed)
+                return;
+            const name = String(skill?.name ?? '');
+            const source = String(skill?.source ?? 'user');
+            const editable = Boolean(skill?.editable ?? source === 'user');
+            const dialog = new Adw.Dialog({
+                title: editable ? `Edit Skill: ${name}` : `Inspect Skill: ${name} (Read-only)`,
+                content_width: 600,
+                content_height: 560,
+            });
+            const toolbar = new Adw.ToolbarView();
+            const header = new Adw.HeaderBar({
+                show_start_title_buttons: false,
+                show_end_title_buttons: false,
+            });
+            const closeBtn = new Gtk.Button({label: editable ? 'Cancel' : 'Close'});
+            closeBtn.connect('clicked', () => dialog.close());
+            header.pack_start(closeBtn);
+
+            let saveBtn = null;
+            if (editable) {
+                saveBtn = new Gtk.Button({
+                    label: 'Save',
+                    css_classes: ['suggested-action'],
+                });
+                header.pack_end(saveBtn);
+            }
+            toolbar.add_top_bar(header);
+
+            const textView = new Gtk.TextView({
+                wrap_mode: Gtk.WrapMode.WORD_CHAR,
+                editable,
+                top_margin: 10,
+                bottom_margin: 10,
+                left_margin: 12,
+                right_margin: 12,
+                css_classes: ['monospace'],
+            });
+            const rawContent = String(skill?.raw_content ?? '');
+            textView.get_buffer().set_text(rawContent, -1);
+
+            const scrolled = new Gtk.ScrolledWindow({hexpand: true, vexpand: true});
+            scrolled.set_child(textView);
+            toolbar.set_content(scrolled);
+            dialog.set_child(toolbar);
+            dialog.present(window);
+
+            if (!rawContent) {
+                httpJson('GET', `/api/v1/skills/${encodeURIComponent(name)}`)
+                    .then(resp => {
+                        if (!destroyed && resp.ok && resp.data?.raw_content)
+                            textView.get_buffer().set_text(String(resp.data.raw_content), -1);
+                    })
+                    .catch(() => {});
+            }
+
+            if (editable && saveBtn) {
+                saveBtn.connect('clicked', async () => {
+                    const buf = textView.get_buffer();
+                    const content = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), true);
+                    saveBtn.set_sensitive(false);
+                    const resp = await httpJson(
+                        'PUT',
+                        `/api/v1/skills/${encodeURIComponent(name)}`,
+                        {content}
+                    );
+                    if (destroyed)
+                        return;
+                    saveBtn.set_sensitive(true);
+                    if (!resp.ok) {
+                        const err = resp.data?.detail || resp.data?.error || 'Save failed';
+                        showToast(String(err));
+                        return;
+                    }
+                    dialog.close();
+                    showToast(`Saved skill '${name}'`);
+                    loadSkills().catch(() => {});
+                });
+            }
+        };
+
+        const confirmDeleteSkill = name => {
+            const doDelete = async () => {
+                const resp = await httpJson('DELETE', `/api/v1/skills/${encodeURIComponent(name)}`);
+                if (destroyed)
+                    return;
+                if (!resp.ok) {
+                    const err = resp.data?.detail || resp.data?.error || 'Delete failed';
+                    showToast(String(err));
+                    return;
+                }
+                showToast(`Deleted skill '${name}'`);
+                loadSkills().catch(() => {});
+            };
+
+            if (typeof Adw.AlertDialog === 'function') {
+                const dlg = new Adw.AlertDialog({
+                    heading: `Delete Skill '${name}'?`,
+                    body: 'This permanently removes the user skill directory and its files.',
+                });
+                dlg.add_response('cancel', 'Cancel');
+                dlg.add_response('delete', 'Delete');
+                dlg.set_response_appearance('delete', Adw.ResponseAppearance.DESTRUCTIVE);
+                dlg.set_default_response('cancel');
+                dlg.set_close_response('cancel');
+                dlg.connect('response', (_d, response) => {
+                    if (response === 'delete')
+                        doDelete().catch(() => {});
+                });
+                dlg.present(window);
+            } else {
+                const dlg = new Adw.MessageDialog({
+                    transient_for: window,
+                    modal: true,
+                    heading: `Delete Skill '${name}'?`,
+                    body: 'This permanently removes the user skill directory and its files.',
+                });
+                dlg.add_response('cancel', 'Cancel');
+                dlg.add_response('delete', 'Delete');
+                dlg.set_response_appearance('delete', Adw.ResponseAppearance.DESTRUCTIVE);
+                dlg.set_default_response('cancel');
+                dlg.connect('response', (_d, response) => {
+                    if (response === 'delete')
+                        doDelete().catch(() => {});
+                });
+                dlg.present();
+            }
+        };
+
+        skillsEnabledRow.connect('notify::active', () => onUserChange(() => {
+            patchConfig({skills: {enabled: skillsEnabledRow.get_active()}}, 'Saved');
+        }));
+
+        skillsAllowScriptsRow.connect('notify::active', () => onUserChange(() => {
+            patchConfig(
+                {skills: {allow_script_execution: skillsAllowScriptsRow.get_active()}},
+                'Saved'
+            );
+        }));
+
+        skillsBrowseBtn.connect('clicked', () => {
+            if (destroyed)
+                return;
+            const fileDialog = new Gtk.FileDialog({title: 'Select Skills Storage Folder'});
+            fileDialog.select_folder(window, null, (_dlg, result) => {
+                try {
+                    const folder = fileDialog.select_folder_finish(result);
+                    const path = folder?.get_path();
+                    if (!path)
+                        return;
+                    configuredSkillsDir = path;
+                    skillsDirRow.set_subtitle(path);
+                    patchConfig({skills: {skills_dir: path}}, 'Skills folder updated')
+                        .then(() => rescanSkills(false))
+                        .catch(() => {});
+                } catch (e) {
+                    if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                        showToast(`Folder selection failed: ${e.message}`);
+                }
+            });
+        });
+
+        skillsResetBtn.connect('clicked', () => {
+            configuredSkillsDir = '';
+            skillsDirRow.set_subtitle('Default (~/.config/bytey-ai-companion/skills)');
+            patchConfig({skills: {skills_dir: ''}}, 'Skills folder reset to default')
+                .then(() => rescanSkills(false))
+                .catch(() => {});
+        });
+
+        skillsOpenBtn.connect('clicked', () => {
+            const targetDir = resolveEffectiveSkillsDir();
+            try {
+                const dirFile = Gio.File.new_for_path(targetDir);
+                try {
+                    dirFile.make_directory_with_parents(null);
+                } catch (mkErr) {
+                    if (!mkErr.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS))
+                        throw mkErr;
+                }
+                Gio.AppInfo.launch_default_for_uri(dirFile.get_uri(), null);
+            } catch (e) {
+                showToast(`Could not open folder: ${e.message}`);
+            }
+        });
+
+        skillsExtraDirsRow.connect('apply', () => onUserChange(() => {
+            const dirs = skillsExtraDirsRow.get_text()
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean);
+            patchConfig({skills: {extra_dirs: dirs}}, 'Saved extra skill directories')
+                .then(() => rescanSkills(false))
+                .catch(() => {});
+        }));
+
+        skillsRescanBtn.connect('clicked', () => {
+            rescanSkills(true).catch(() => {});
+        });
+
+        addSkillBtn.connect('clicked', () => {
+            if (destroyed)
+                return;
+            const dialog = new Adw.Dialog({
+                title: 'Add Skill',
+                content_width: 520,
+                content_height: 540,
+            });
+            const toolbar = new Adw.ToolbarView();
+            const header = new Adw.HeaderBar({
+                show_start_title_buttons: false,
+                show_end_title_buttons: false,
+            });
+            const cancelBtn = new Gtk.Button({label: 'Cancel'});
+            cancelBtn.connect('clicked', () => dialog.close());
+            const createBtn = new Gtk.Button({
+                label: 'Create',
+                css_classes: ['suggested-action'],
+            });
+            header.pack_start(cancelBtn);
+            header.pack_end(createBtn);
+            toolbar.add_top_bar(header);
+
+            const page = new Adw.PreferencesPage();
+            const metaGroup = new Adw.PreferencesGroup({title: 'Skill Metadata'});
+            const nameRow = new Adw.EntryRow({title: 'Name (slug, e.g. my-skill)'});
+            const descRow = new Adw.EntryRow({title: 'Description'});
+            const slashRow = new Adw.EntryRow({title: 'Slash Command (optional, e.g. /myskill)'});
+            metaGroup.add(nameRow);
+            metaGroup.add(descRow);
+            metaGroup.add(slashRow);
+            page.add(metaGroup);
+
+            const bodyGroup = new Adw.PreferencesGroup({title: 'Instructions (Markdown)'});
+            const bodyView = new Gtk.TextView({
+                wrap_mode: Gtk.WrapMode.WORD_CHAR,
+                top_margin: 8,
+                bottom_margin: 8,
+                left_margin: 10,
+                right_margin: 10,
+            });
+            const scrolled = new Gtk.ScrolledWindow({
+                min_content_height: 180,
+                hexpand: true,
+                vexpand: true,
+            });
+            scrolled.set_child(bodyView);
+            const bodyRow = new Adw.PreferencesRow();
+            bodyRow.set_child(scrolled);
+            bodyGroup.add(bodyRow);
+            page.add(bodyGroup);
+
+            createBtn.connect('clicked', async () => {
+                const name = nameRow.get_text().trim();
+                const description = descRow.get_text().trim();
+                const slashCommand = slashRow.get_text().trim();
+                const buf = bodyView.get_buffer();
+                const body = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), true);
+                if (!name || !description) {
+                    showToast('Name and description are required');
+                    return;
+                }
+                const payload = {name, description, body};
+                if (slashCommand)
+                    payload.slash_command = slashCommand;
+                createBtn.set_sensitive(false);
+                const resp = await httpJson('POST', '/api/v1/skills', payload);
+                if (destroyed)
+                    return;
+                createBtn.set_sensitive(true);
+                if (!resp.ok) {
+                    const err = resp.data?.detail || resp.data?.error || 'Create failed';
+                    showToast(String(err));
+                    return;
+                }
+                dialog.close();
+                showToast(`Created skill '${name}'`);
+                loadSkills().catch(() => {});
+            });
+
+            toolbar.set_content(page);
+            dialog.set_child(toolbar);
+            dialog.present(window);
+        });
+
+        importSkillBtn.connect('clicked', () => {
+            if (destroyed)
+                return;
+            const doImportPath = async path => {
+                const resp = await httpJson('POST', '/api/v1/skills/import', {path});
+                if (destroyed)
+                    return;
+                if (!resp.ok) {
+                    const err = resp.data?.detail || resp.data?.error || 'Import failed';
+                    showToast(String(err));
+                    return;
+                }
+                showToast('Skill imported');
+                loadSkills().catch(() => {});
+            };
+
+            const pickFolder = () => {
+                const fileDialog = new Gtk.FileDialog({title: 'Select Skill Folder'});
+                fileDialog.select_folder(window, null, (_dlg, result) => {
+                    try {
+                        const folder = fileDialog.select_folder_finish(result);
+                        const path = folder?.get_path();
+                        if (path)
+                            doImportPath(path).catch(() => {});
+                    } catch (e) {
+                        if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                            showToast(`Import failed: ${e.message}`);
+                    }
+                });
+            };
+
+            const pickZip = () => {
+                const fileDialog = new Gtk.FileDialog({title: 'Select Skill .zip Archive'});
+                const filter = new Gtk.FileFilter();
+                filter.set_name('ZIP archives');
+                filter.add_mime_type('application/zip');
+                filter.add_pattern('*.zip');
+                const filters = new Gio.ListStore({item_type: Gtk.FileFilter});
+                filters.append(filter);
+                fileDialog.set_filters(filters);
+                fileDialog.open(window, null, (_dlg, result) => {
+                    try {
+                        const file = fileDialog.open_finish(result);
+                        const path = file?.get_path();
+                        if (path)
+                            doImportPath(path).catch(() => {});
+                    } catch (e) {
+                        if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                            showToast(`Import failed: ${e.message}`);
+                    }
+                });
+            };
+
+            if (typeof Adw.AlertDialog === 'function') {
+                const dlg = new Adw.AlertDialog({
+                    heading: 'Import Skill',
+                    body: 'Choose whether to import a skill folder or a .zip archive.',
+                });
+                dlg.add_response('cancel', 'Cancel');
+                dlg.add_response('folder', 'Folder');
+                dlg.add_response('zip', '.zip Archive');
+                dlg.set_default_response('folder');
+                dlg.set_close_response('cancel');
+                dlg.connect('response', (_d, response) => {
+                    if (response === 'folder')
+                        pickFolder();
+                    else if (response === 'zip')
+                        pickZip();
+                });
+                dlg.present(window);
+            } else {
+                pickFolder();
+            }
+        });
+
+        rebuildSkillsList();
 
         syncPlacementSensitivity();
         syncSttVisibility();

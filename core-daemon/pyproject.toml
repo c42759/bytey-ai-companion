@@ -39,4 +39,4 @@ where = ["."]
 include = ["bytey_ai_companion*"]
 
 [tool.setuptools.package-data]
-bytey_ai_companion = ["llm/*.md"]
+bytey_ai_companion = ["llm/*.md", "skills/builtin/**/*"]

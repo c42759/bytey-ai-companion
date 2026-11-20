@@ -87,6 +87,10 @@ export class TranscriptDrawer {
 
         this._messages = [];
         this._sessions = [];
+        this._skills = [];
+        this._skillsEnabled = true;
+        this._skillMatches = [];
+        this._skillSuggestIdx = 0;
         this._activeSessionId = null;
         this._pendingDeleteSessionId = null;
         this._editingSessionId = null;
@@ -325,6 +329,7 @@ export class TranscriptDrawer {
         });
 
         this._buildMessageArea(this._chatColumn);
+        this._buildSkillSuggest(this._chatColumn);
         this._buildFooter(this._chatColumn);
 
         this._bodyRow.add_child(this._sidebarBox);
@@ -398,10 +403,36 @@ export class TranscriptDrawer {
 
         this._connect(this._entry.clutter_text, 'text-changed', () => {
             this._syncEntryHeight();
+            this._updateSkillSuggestions();
         });
 
         this._connect(this._entry.clutter_text, 'key-press-event', (_actor, event) => {
             const sym = event.get_key_symbol();
+            const suggestOpen = Boolean(this._skillSuggestBox?.visible && this._skillMatches.length > 0);
+            if (suggestOpen) {
+                if (sym === Clutter.KEY_Down) {
+                    this._skillSuggestIdx = (this._skillSuggestIdx + 1) % this._skillMatches.length;
+                    this._updateSkillSuggestHighlight();
+                    return Clutter.EVENT_STOP;
+                }
+                if (sym === Clutter.KEY_Up) {
+                    this._skillSuggestIdx = (this._skillSuggestIdx - 1 + this._skillMatches.length) % this._skillMatches.length;
+                    this._updateSkillSuggestHighlight();
+                    return Clutter.EVENT_STOP;
+                }
+                const isEnter = sym === Clutter.KEY_Return || sym === Clutter.KEY_KP_Enter;
+                const hasShift = Boolean(event.get_state() & Clutter.ModifierType.SHIFT_MASK);
+                if (sym === Clutter.KEY_Tab || (isEnter && !hasShift)) {
+                    const selected = this._skillMatches[this._skillSuggestIdx];
+                    if (selected)
+                        this._applySkillSuggestion(String(selected.slash_command || selected.name || ''));
+                    return Clutter.EVENT_STOP;
+                }
+                if (sym === Clutter.KEY_Escape) {
+                    this._hideSkillSuggestions();
+                    return Clutter.EVENT_STOP;
+                }
+            }
             if (sym === Clutter.KEY_Escape) {
                 this.close();
                 return Clutter.EVENT_STOP;
@@ -490,10 +521,158 @@ export class TranscriptDrawer {
             : St.PolicyType.NEVER;
     }
 
+    _buildSkillSuggest(parent) {
+        this._skillSuggestBox = new St.BoxLayout({
+            style_class: 'bytey-skill-suggest',
+            vertical: true,
+            visible: false,
+            x_expand: true,
+        });
+        this._skillSuggestList = new St.BoxLayout({
+            style_class: 'bytey-skill-suggest-list',
+            vertical: true,
+            x_expand: true,
+        });
+        this._skillSuggestScroll = new St.ScrollView({
+            style_class: 'bytey-skill-suggest-scroll',
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+            enable_mouse_scrolling: true,
+            overlay_scrollbars: false,
+            x_expand: true,
+        });
+        this._skillSuggestScroll.set_child(this._skillSuggestList);
+        this._skillSuggestBox.add_child(this._skillSuggestScroll);
+        parent.add_child(this._skillSuggestBox);
+    }
+
+    /**
+     * Update available slash-command skills for autocomplete.
+     *
+     * @param {Array<object>} skills
+     * @param {boolean} [enabled=true]
+     */
+    setSkills(skills, enabled = true) {
+        if (this._destroyed)
+            return;
+        this._skillsEnabled = enabled !== false;
+        this._skills = Array.isArray(skills)
+            ? skills.filter(s => s && s.enabled !== false && s.valid !== false)
+            : [];
+        if (this._skillSuggestBox?.visible)
+            this._updateSkillSuggestions();
+    }
+
+    _updateSkillSuggestions() {
+        if (this._destroyed || !this._entry || !this._skillSuggestBox)
+            return;
+        if (!this._skillsEnabled || this._skills.length === 0) {
+            this._hideSkillSuggestions();
+            return;
+        }
+        const text = this._entry.text ?? '';
+        const match = text.match(/^\/([a-zA-Z0-9_-]*)$/);
+        if (!match) {
+            this._hideSkillSuggestions();
+            return;
+        }
+        const query = match[1].toLowerCase();
+        const matches = this._skills.filter(s => {
+            const cmd = String(s.slash_command || s.name || '').toLowerCase();
+            const name = String(s.name || '').toLowerCase();
+            return cmd.startsWith(query) || name.includes(query);
+        });
+        if (matches.length === 0) {
+            this._hideSkillSuggestions();
+            return;
+        }
+        const wasVisible = this._skillSuggestBox.visible;
+        this._skillMatches = matches;
+        this._skillSuggestIdx = wasVisible
+            ? Math.max(0, Math.min(this._skillSuggestIdx, matches.length - 1))
+            : 0;
+        this._renderSkillSuggestions();
+        this._skillSuggestBox.show();
+    }
+
+    _renderSkillSuggestions() {
+        if (this._destroyed || !this._skillSuggestList)
+            return;
+        this._skillSuggestList.destroy_all_children();
+        this._skillMatches.forEach((skill, idx) => {
+            const cmd = String(skill.slash_command || skill.name || '');
+            const rawDesc = String(skill.description || '').trim();
+            const desc = rawDesc.length > 64 ? `${rawDesc.slice(0, 61)}...` : rawDesc;
+
+            const rowContent = new St.BoxLayout({
+                vertical: false,
+                x_expand: true,
+                y_align: Clutter.ActorAlign.CENTER,
+            });
+            rowContent.add_child(new St.Label({
+                style_class: 'bytey-skill-suggest-cmd',
+                text: `/${cmd}`,
+                y_align: Clutter.ActorAlign.CENTER,
+            }));
+            if (desc) {
+                rowContent.add_child(new St.Label({
+                    style_class: 'bytey-skill-suggest-desc',
+                    text: desc,
+                    x_expand: true,
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
+            }
+
+            const rowBtn = new St.Button({
+                style_class: idx === this._skillSuggestIdx
+                    ? 'bytey-skill-suggest-row bytey-skill-suggest-row-active'
+                    : 'bytey-skill-suggest-row',
+                can_focus: false,
+                x_expand: true,
+                child: rowContent,
+            });
+            rowBtn.connect('clicked', () => {
+                this._applySkillSuggestion(cmd);
+            });
+            this._skillSuggestList.add_child(rowBtn);
+        });
+    }
+
+    _updateSkillSuggestHighlight() {
+        if (this._destroyed || !this._skillSuggestList)
+            return;
+        const children = this._skillSuggestList.get_children();
+        for (let i = 0; i < children.length; i++) {
+            children[i].style_class = i === this._skillSuggestIdx
+                ? 'bytey-skill-suggest-row bytey-skill-suggest-row-active'
+                : 'bytey-skill-suggest-row';
+        }
+    }
+
+    _applySkillSuggestion(cmd) {
+        if (this._destroyed || !this._entry)
+            return;
+        const nextText = `/${cmd} `;
+        this._entry.text = nextText;
+        this._entry.clutter_text.set_cursor_position(nextText.length);
+        this._entry.clutter_text.set_selection(nextText.length, nextText.length);
+        this._hideSkillSuggestions();
+        this._entry.clutter_text.grab_key_focus();
+        this._syncEntryHeight();
+    }
+
+    _hideSkillSuggestions() {
+        this._skillMatches = [];
+        this._skillSuggestIdx = 0;
+        this._skillSuggestList?.destroy_all_children();
+        this._skillSuggestBox?.hide();
+    }
+
     _submitEntry() {
         const text = (this._entry.text ?? '').trim();
         if (!text)
             return;
+        this._hideSkillSuggestions();
         this._entry.text = '';
         this._syncEntryHeight();
         this._callbacks.onSendText?.(text);
@@ -1477,6 +1656,12 @@ export class TranscriptDrawer {
         this._activeSessionId = null;
         this._entry = null;
         this._entryScroll = null;
+        this._skillSuggestBox = null;
+        this._skillSuggestScroll = null;
+        this._skillSuggestList = null;
+        this._skills = [];
+        this._skillMatches = [];
+        this._skillSuggestIdx = 0;
         this._sendIcon = null;
         this._providerLabel = null;
         this._densityBtn = null;

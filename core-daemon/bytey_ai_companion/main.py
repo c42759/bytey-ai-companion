@@ -18,7 +18,15 @@ from pathlib import Path
 from typing import Any
 
 from .audio import VoiceInputService
-from .config import PIPER_VOICE_PRESETS, ConfigManager, MCPServerConfig, SecretStore
+from .config import (
+    PIPER_VOICE_PRESETS,
+    ConfigManager,
+    MCPServerConfig,
+    SecretStore,
+    SkillOverrideConfig,
+    resolve_default_skills_dir,
+    resolve_skills_dir,
+)
 from .ipc import IPCRequest, IPCResponse, IPCServer
 from .llm import LLMRouter
 from .llm.emotions import (
@@ -28,6 +36,7 @@ from .llm.emotions import (
     parse_reply_tags,
 )
 from .mcp_host import MCPClientManager, from_mcp_servers_json, to_mcp_servers_json
+from .skills import SkillDefinition, SkillRegistry, SkillScriptRunner
 from .tts import (
     ElevenLabsTTSClient,
     KokoroTTSClient,
@@ -181,6 +190,14 @@ class ByteyDaemon:
         self._owns_llm_router = llm_router is None
         self.mcp_manager = mcp_manager or MCPClientManager(secret_resolver=self.secret_store)
         self._owns_mcp_manager = mcp_manager is None
+        cfg_init = self.config_manager.config
+        self.skill_registry = SkillRegistry(
+            skills_dir=cfg_init.skills.skills_dir,
+            extra_dirs=cfg_init.skills.extra_dirs,
+            overrides=cfg_init.skills.overrides,
+        )
+        self.skill_runner = SkillScriptRunner()
+        self._rescan_skills()
         self.kokoro_client = kokoro_client or KokoroTTSClient()
         self._owns_kokoro = kokoro_client is None
         self.elevenlabs_client = elevenlabs_client or ElevenLabsTTSClient()
@@ -233,6 +250,244 @@ class ByteyDaemon:
         self._started = False
 
         self._register_routes()
+
+    def _rescan_skills(self) -> list[SkillDefinition]:
+        """Re-scan user, extra, and built-in skills using current config."""
+        cfg = self.config_manager.config
+        return self.skill_registry.rescan(
+            skills_dir=cfg.skills.skills_dir,
+            extra_dirs=cfg.skills.extra_dirs,
+            overrides=cfg.skills.overrides,
+        )
+
+    @staticmethod
+    def _serialize_skill(
+        skill: SkillDefinition, *, include_content: bool = False
+    ) -> dict[str, Any]:
+        """Serialize a SkillDefinition for REST API and WebSocket payloads."""
+        data: dict[str, Any] = {
+            "name": skill.name,
+            "description": skill.description,
+            "version": skill.version,
+            "slash_command": skill.slash_command,
+            "requires_confirmation": skill.requires_confirmation,
+            "allowed_tools": list(skill.allowed_tools),
+            "source": skill.source,
+            "path": str(skill.path),
+            "enabled": skill.enabled,
+            "valid": skill.valid,
+            "error": skill.error,
+            "editable": skill.editable,
+            "has_scripts": skill.has_scripts,
+            "scripts": list(skill.scripts),
+            "references": list(skill.references),
+            "resources": list(skill.resources),
+        }
+        if include_content:
+            data["body"] = skill.body
+            data["raw_content"] = skill.raw_content
+        return data
+
+    async def _broadcast_skills_updated(self) -> list[dict[str, Any]]:
+        skills = [
+            self._serialize_skill(s)
+            for s in self.skill_registry.list_skills(include_disabled=True)
+        ]
+        await self.ipc.connection_manager.broadcast(
+            {"type": "skills_updated", "skills": skills}
+        )
+        return skills
+
+    def _match_skill_slash_command(
+        self, text: str
+    ) -> tuple[SkillDefinition | None, str]:
+        """Match `/skill <name> [rest]` or `/<slug> [rest]` against enabled skills."""
+        stripped = (text or "").strip()
+        if not stripped.startswith("/"):
+            return None, stripped
+
+        parts = stripped.split(None, 1)
+        head = parts[0]
+        tail = parts[1].strip() if len(parts) > 1 else ""
+        if head.lower() == "/skill":
+            if not tail:
+                return None, stripped
+            sub_parts = tail.split(None, 1)
+            cmd = sub_parts[0]
+            rest = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+        else:
+            cmd = head
+            rest = tail
+
+        skill = self.skill_registry.find_by_slash_command(cmd)
+        if skill is None:
+            return None, stripped
+        return skill, (rest if rest else stripped)
+
+    @staticmethod
+    def _build_skill_tools(cfg: Any) -> list[dict[str, Any]]:
+        """Build OpenAI-style built-in pseudo-tool schemas for skills."""
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_skill__load",
+                    "description": (
+                        "Load the full instructions for an enabled skill by name, "
+                        "or read a file under its references/ or resources/ directory."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Skill slug name from <available_skills>.",
+                            },
+                            "resource_path": {
+                                "type": "string",
+                                "description": "Optional relative path under references/ or resources/.",
+                            },
+                        },
+                        "required": ["name"],
+                    },
+                },
+                "server": "bytey_skill",
+                "tool": "load",
+            }
+        ]
+        if cfg.skills.allow_script_execution:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "bytey_skill__run_script",
+                        "description": (
+                            "Execute a helper script bundled in an enabled skill's scripts/ directory."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Skill slug name.",
+                                },
+                                "script": {
+                                    "type": "string",
+                                    "description": "Script filename or relative path inside scripts/.",
+                                },
+                                "args": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Optional command-line arguments for the script.",
+                                },
+                            },
+                            "required": ["name", "script"],
+                        },
+                    },
+                    "server": "bytey_skill",
+                    "tool": "run_script",
+                }
+            )
+        return tools
+
+    async def _execute_skill_tool(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        cfg: Any,
+        confirm_cb: Any,
+    ) -> dict[str, Any]:
+        """Execute bytey_skill__load or bytey_skill__run_script."""
+        if not cfg.skills.enabled:
+            return {"ok": False, "error": "Skills are disabled in configuration."}
+
+        skill_name = str(args.get("name") or "").strip()
+        skill = self.skill_registry.get_skill(skill_name)
+        if skill is None:
+            return {"ok": False, "error": f"Unknown skill: {skill_name!r}"}
+        if not skill.enabled:
+            return {"ok": False, "error": f"Skill {skill_name!r} is disabled."}
+        if not skill.valid:
+            return {
+                "ok": False,
+                "error": f"Skill {skill_name!r} is invalid: {skill.error or 'unknown error'}",
+            }
+
+        if tool_name == "load":
+            resource_path = str(args.get("resource_path") or "").strip()
+            if resource_path:
+                try:
+                    content = self.skill_registry.read_skill_resource(
+                        skill.name, resource_path
+                    )
+                except (ValueError, FileNotFoundError, OSError) as exc:
+                    return {"ok": False, "error": str(exc)}
+                return {"ok": True, "content": content}
+
+            max_bytes = 64 * 1024
+            body_bytes = skill.body.encode("utf-8")
+            if len(body_bytes) > max_bytes:
+                body_text = (
+                    body_bytes[:max_bytes].decode("utf-8", errors="replace")
+                    + "\n\n[Truncated at 64 KiB]"
+                )
+            else:
+                body_text = skill.body
+            sections = [f"# Skill: {skill.name}\n{skill.description}\n\n{body_text}"]
+            if skill.scripts:
+                sections.append(f"Available scripts: {', '.join(skill.scripts)}")
+            if skill.references:
+                sections.append(f"Available references: {', '.join(skill.references)}")
+            if skill.resources:
+                sections.append(f"Available resources: {', '.join(skill.resources)}")
+            return {"ok": True, "content": "\n\n".join(sections)}
+
+        if tool_name == "run_script":
+            if not cfg.skills.allow_script_execution:
+                return {
+                    "ok": False,
+                    "error": "Skill script execution is disabled in configuration.",
+                }
+            script = str(args.get("script") or "").strip()
+            raw_args = args.get("args")
+            script_args = (
+                [str(a) for a in raw_args] if isinstance(raw_args, list) else []
+            )
+
+            override = cfg.skills.overrides.get(skill.name)
+            if override is not None and override.require_confirmation is False:
+                needs_confirm = False
+            else:
+                needs_confirm = True
+
+            if needs_confirm:
+                approved = await confirm_cb("bytey_skill", "run_script", args)
+                if not approved:
+                    return {
+                        "ok": False,
+                        "denied": True,
+                        "error": "User denied script execution.",
+                    }
+
+            try:
+                res = await self.skill_runner.run(skill, script, script_args)
+            except (ValueError, FileNotFoundError, PermissionError, OSError) as exc:
+                return {"ok": False, "error": str(exc)}
+
+            output_parts = [f"exit_code={res.returncode}"]
+            if res.timed_out:
+                output_parts.append("timed_out=true")
+            if res.stdout:
+                output_parts.append(f"stdout:\n{res.stdout}")
+            if res.stderr:
+                output_parts.append(f"stderr:\n{res.stderr}")
+            return {
+                "ok": res.returncode == 0 and not res.timed_out,
+                "content": "\n".join(output_parts),
+                "error": res.stderr if (res.returncode != 0 or res.timed_out) else "",
+            }
+
+        return {"ok": False, "error": f"Unknown skill tool: {tool_name!r}"}
 
     def _track_task(self, coro: Any) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
@@ -414,6 +669,8 @@ class ByteyDaemon:
             merge_section("voice_out", raw_patch["voice_out"])
         if isinstance(raw_patch.get("visuals"), dict):
             merge_section("visuals", raw_patch["visuals"])
+        if isinstance(raw_patch.get("skills"), dict):
+            merge_section("skills", raw_patch["skills"])
 
         # settings-ui `llm` mirror
         if isinstance(raw_patch.get("llm"), dict):
@@ -798,6 +1055,8 @@ class ByteyDaemon:
                 except Exception as exc:
                     logger.warning("Failed listing active MCP tools: %s", exc)
                     tools = []
+            if supports_tools and cfg.skills.enabled:
+                tools.extend(self._build_skill_tools(cfg))
 
             chunker = SentenceChunker()
             idle_before_s, recent_count = self._record_interaction()
@@ -834,6 +1093,27 @@ class ByteyDaemon:
                     "[title: <2-5 word topic>] alongside your [emotion:<tag>] tag.]"
                 )
             effective_system_prompt = (cfg.general.system_prompt or "") + runtime_context_note
+            if cfg.skills.enabled:
+                skill_catalog = self.skill_registry.format_prompt_catalog()
+                if skill_catalog:
+                    effective_system_prompt += f"\n\n{skill_catalog}"
+                matched_skill, effective_user_text = self._match_skill_slash_command(text)
+                if matched_skill is not None:
+                    if llm_messages and llm_messages[-1].get("role") == "user":
+                        llm_messages[-1]["content"] = effective_user_text
+                    assets_lines: list[str] = []
+                    if matched_skill.scripts:
+                        assets_lines.append(f"Scripts: {', '.join(matched_skill.scripts)}")
+                    if matched_skill.references:
+                        assets_lines.append(f"References: {', '.join(matched_skill.references)}")
+                    if matched_skill.resources:
+                        assets_lines.append(f"Resources: {', '.join(matched_skill.resources)}")
+                    assets_note = ("\n" + "\n".join(assets_lines)) if assets_lines else ""
+                    effective_system_prompt += (
+                        f'\n\n<active_skill name="{matched_skill.name}">\n'
+                        f"{matched_skill.body}{assets_note}\n"
+                        f"</active_skill>"
+                    )
 
             final_emotion = "neutral"
             accumulated_parts: list[str] = []
@@ -897,8 +1177,13 @@ class ByteyDaemon:
                         ns_name = str(tc.get("name") or "")
                         args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
                         call_id = str(uuid.uuid4())
-                        split = self.mcp_manager._split_namespaced_tool(ns_name, cfg.mcp_servers)
-                        srv_name, tool_name = split if split else ("mcp", ns_name)
+                        is_skill_tool = ns_name.startswith("bytey_skill__")
+                        if is_skill_tool:
+                            srv_name = "bytey_skill"
+                            tool_name = ns_name[len("bytey_skill__") :]
+                        else:
+                            split = self.mcp_manager._split_namespaced_tool(ns_name, cfg.mcp_servers)
+                            srv_name, tool_name = split if split else ("mcp", ns_name)
 
                         await self.storage.add_tool_call(
                             message_id=assistant_id,
@@ -947,12 +1232,20 @@ class ByteyDaemon:
                                 )
                             return approved
 
-                        tool_res = await self.mcp_manager.execute_tool_call(
-                            ns_name,
-                            args,
-                            cfg.mcp_servers,
-                            confirm_callback=confirm_cb,
-                        )
+                        if is_skill_tool:
+                            tool_res = await self._execute_skill_tool(
+                                tool_name,
+                                args,
+                                cfg,
+                                confirm_cb,
+                            )
+                        else:
+                            tool_res = await self.mcp_manager.execute_tool_call(
+                                ns_name,
+                                args,
+                                cfg.mcp_servers,
+                                confirm_callback=confirm_cb,
+                            )
                         status_str = (
                             "ok"
                             if tool_res.get("ok")
@@ -1131,6 +1424,15 @@ class ByteyDaemon:
         self.ipc.register_route("POST", "/api/v1/mcp/confirm", self._route_confirm_tool)
         self.ipc.register_route("POST", "/api/v1/tools/{call_id}/confirm", self._route_confirm_tool)
 
+        self.ipc.register_route("GET", "/api/v1/skills", self._route_list_skills)
+        self.ipc.register_route("POST", "/api/v1/skills/rescan", self._route_rescan_skills)
+        self.ipc.register_route("POST", "/api/v1/skills/import", self._route_import_skill)
+        self.ipc.register_route("POST", "/api/v1/skills", self._route_create_skill)
+        self.ipc.register_route("GET", "/api/v1/skills/{name}", self._route_get_skill)
+        self.ipc.register_route("PUT", "/api/v1/skills/{name}", self._route_update_skill)
+        self.ipc.register_route("PATCH", "/api/v1/skills/{name}", self._route_patch_skill)
+        self.ipc.register_route("DELETE", "/api/v1/skills/{name}", self._route_delete_skill)
+
         self.ipc.register_route("GET", "/api/v1/tts/voices", self._route_list_voices)
         self.ipc.register_route(
             "POST", "/api/v1/tts/piper/download", self._route_download_piper_model
@@ -1172,6 +1474,7 @@ class ByteyDaemon:
         *,
         refresh_provider: bool,
         broadcast_visuals: bool,
+        refresh_skills: bool = False,
         tools_hint: bool | None,
     ) -> dict[str, Any]:
         if refresh_provider:
@@ -1188,6 +1491,10 @@ class ByteyDaemon:
 
         if updated.voice_in.mic_muted != prev_muted:
             await self.voice_input.set_muted(updated.voice_in.mic_muted)
+
+        if refresh_skills:
+            self._rescan_skills()
+            await self._broadcast_skills_updated()
 
         serialized = self._serialize_config()
         await self.ipc.connection_manager.broadcast(
@@ -1209,6 +1516,7 @@ class ByteyDaemon:
             prev_muted,
             refresh_provider="provider" in canonical_patch,
             broadcast_visuals="visuals" in canonical_patch,
+            refresh_skills="skills" in canonical_patch,
             tools_hint=tools_hint,
         )
 
@@ -1222,6 +1530,7 @@ class ByteyDaemon:
             prev_muted,
             refresh_provider=True,
             broadcast_visuals=True,
+            refresh_skills=True,
             tools_hint=tools_hint,
         )
 
@@ -1337,6 +1646,163 @@ class ByteyDaemon:
             )
         fut.set_result(approved)
         return {"ok": True, "call_id": call_id, "approved": approved}
+
+    async def _route_list_skills(self, _req: IPCRequest) -> dict[str, Any]:
+        cfg = self.config_manager.config
+        skills = [
+            self._serialize_skill(s)
+            for s in self.skill_registry.list_skills(include_disabled=True)
+        ]
+        return {
+            "skills": skills,
+            "skills_dir": str(resolve_skills_dir(cfg.skills.skills_dir)),
+            "default_skills_dir": str(resolve_default_skills_dir()),
+            "enabled": cfg.skills.enabled,
+            "allow_script_execution": cfg.skills.allow_script_execution,
+        }
+
+    async def _route_rescan_skills(self, _req: IPCRequest) -> dict[str, Any]:
+        cfg = self.config_manager.config
+        self._rescan_skills()
+        skills = await self._broadcast_skills_updated()
+        return {
+            "skills": skills,
+            "skills_dir": str(resolve_skills_dir(cfg.skills.skills_dir)),
+        }
+
+    async def _route_create_skill(self, req: IPCRequest) -> IPCResponse:
+        body = req.json()
+        if not isinstance(body, dict):
+            raise ValueError("Request body must be a JSON object")
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise ValueError("Skill 'name' is required")
+        raw_content = body.get("content") if "content" in body else body.get("raw_content")
+        skill = self.skill_registry.create_or_update_skill(
+            name,
+            content=str(raw_content) if raw_content is not None else None,
+            description=str(body.get("description") or ""),
+            body=str(body.get("body") or ""),
+            version=str(body.get("version") or "1.0.0"),
+            slash_command=str(body.get("slash_command") or ""),
+            requires_confirmation=bool(body.get("requires_confirmation", False)),
+            allowed_tools=(
+                [str(t) for t in body["allowed_tools"]]
+                if isinstance(body.get("allowed_tools"), list)
+                else None
+            ),
+        )
+        await self._broadcast_skills_updated()
+        return IPCResponse(
+            status=201,
+            body={"skill": self._serialize_skill(skill, include_content=True)},
+        )
+
+    async def _route_get_skill(self, req: IPCRequest) -> dict[str, Any] | IPCResponse:
+        name = req.path_params["name"]
+        skill = self.skill_registry.get_skill(name)
+        if skill is None:
+            return IPCResponse(status=404, body={"error": f"Unknown skill: {name!r}"})
+        return self._serialize_skill(skill, include_content=True)
+
+    async def _route_update_skill(self, req: IPCRequest) -> dict[str, Any] | IPCResponse:
+        name = req.path_params["name"]
+        existing = self.skill_registry.get_skill(name)
+        if existing is None:
+            return IPCResponse(status=404, body={"error": f"Unknown skill: {name!r}"})
+        if not existing.editable:
+            return IPCResponse(
+                status=403,
+                body={"error": f"Skill {name!r} is not editable ({existing.source})"},
+            )
+
+        body = req.json()
+        if not isinstance(body, dict):
+            raise ValueError("Request body must be a JSON object")
+        raw_content = body.get("raw_content") if "raw_content" in body else body.get("content")
+        skill = self.skill_registry.create_or_update_skill(
+            name,
+            content=str(raw_content) if raw_content is not None else None,
+            description=str(
+                body["description"] if "description" in body else existing.description
+            ),
+            body=str(body["body"] if "body" in body else existing.body),
+            version=str(body["version"] if "version" in body else existing.version),
+            slash_command=str(
+                body["slash_command"]
+                if "slash_command" in body
+                else existing.slash_command
+            ),
+            requires_confirmation=bool(
+                body["requires_confirmation"]
+                if "requires_confirmation" in body
+                else existing.requires_confirmation
+            ),
+            allowed_tools=(
+                [str(t) for t in body["allowed_tools"]]
+                if isinstance(body.get("allowed_tools"), list)
+                else existing.allowed_tools
+            ),
+        )
+        await self._broadcast_skills_updated()
+        return {"skill": self._serialize_skill(skill, include_content=True)}
+
+    async def _route_patch_skill(self, req: IPCRequest) -> dict[str, Any] | IPCResponse:
+        name = req.path_params["name"]
+        existing = self.skill_registry.get_skill(name)
+        if existing is None:
+            return IPCResponse(status=404, body={"error": f"Unknown skill: {name!r}"})
+
+        body = req.json()
+        if not isinstance(body, dict):
+            raise ValueError("Request body must be a JSON object")
+
+        overrides = {
+            k: v.model_dump(mode="json")
+            for k, v in self.config_manager.config.skills.overrides.items()
+        }
+        entry = dict(overrides.get(name, {}))
+        if "enabled" in body:
+            entry["enabled"] = bool(body["enabled"])
+        if "require_confirmation" in body:
+            req_conf = body["require_confirmation"]
+            entry["require_confirmation"] = None if req_conf is None else bool(req_conf)
+        overrides[name] = SkillOverrideConfig.model_validate(entry).model_dump(mode="json")
+
+        self.config_manager.update_config({"skills": {"overrides": overrides}})
+        self._rescan_skills()
+        await self._broadcast_skills_updated()
+        updated = self.skill_registry.get_skill(name)
+        return {"skill": self._serialize_skill(updated) if updated is not None else None}
+
+    async def _route_import_skill(self, req: IPCRequest) -> dict[str, Any] | IPCResponse:
+        body = req.json()
+        if not isinstance(body, dict):
+            raise ValueError("Request body must be a JSON object")
+        path = str(body.get("path") or "").strip()
+        if not path:
+            raise ValueError("Missing 'path' in request body")
+        try:
+            skill = self.skill_registry.import_skill(path)
+        except FileNotFoundError as exc:
+            return IPCResponse(status=404, body={"error": str(exc)})
+        await self._broadcast_skills_updated()
+        return {"skill": self._serialize_skill(skill, include_content=True)}
+
+    async def _route_delete_skill(self, req: IPCRequest) -> dict[str, Any] | IPCResponse:
+        name = req.path_params["name"]
+        existing = self.skill_registry.get_skill(name)
+        if existing is not None and not existing.editable:
+            return IPCResponse(
+                status=403,
+                body={"error": f"Cannot delete {existing.source} skill {name!r}"},
+            )
+        try:
+            self.skill_registry.delete_user_skill(name)
+        except FileNotFoundError as exc:
+            return IPCResponse(status=404, body={"error": str(exc)})
+        skills = await self._broadcast_skills_updated()
+        return {"deleted": name, "skills": skills}
 
     async def _route_list_voices(self, req: IPCRequest) -> dict[str, Any]:
         cfg = self.config_manager.config
