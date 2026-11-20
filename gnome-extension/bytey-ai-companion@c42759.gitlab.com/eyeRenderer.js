@@ -692,6 +692,9 @@ export class EyeRenderer {
             const mouthY = height * 0.74 + offsetY * 0.5;
             const blushY = faceCy + height * 0.18 + offsetY * 0.7;
             const blushSpread = sep + baseW * 0.78;
+            const speakMouthScale = state === 'SPEAKING'
+                ? (isFull ? (1.0 + 0.45 * tts + 0.1 * Math.sin(this._phase * 12.0)) : 1.15)
+                : 1.0;
 
             if (emotion === 'happy' && !this._blinking) {
                 const bounceY = isFull ? Math.sin(this._phase * 6.0) * (height * 0.04) : 0;
@@ -706,7 +709,7 @@ export class EyeRenderer {
                     alpha
                 );
                 this._drawBlushCheeks(cr, cx + offsetX, blushY + bounceY * 0.6, blushSpread, baseW * 0.52, alpha);
-                this._drawMouth(cr, mouthX, mouthY + bounceY * 0.6, 'open_smile', baseW * 0.62, color, alpha);
+                this._drawMouth(cr, mouthX, mouthY + bounceY * 0.6, 'open_smile', baseW * 0.62 * speakMouthScale, color, alpha);
                 if (isFull) {
                     const s1 = 0.4 + 0.6 * Math.abs(Math.sin(this._phase * 3.4));
                     const s2 = 0.4 + 0.6 * Math.abs(Math.cos(this._phase * 2.7));
@@ -728,7 +731,7 @@ export class EyeRenderer {
                     alpha
                 );
                 this._drawBlushCheeks(cr, cx + offsetX, blushY, blushSpread, baseW * 0.52, alpha);
-                this._drawMouth(cr, mouthX, mouthY, 'smile', baseW * 0.56, color, alpha);
+                this._drawMouth(cr, mouthX, mouthY, state === 'SPEAKING' ? 'open_smile' : 'smile', baseW * 0.56 * speakMouthScale, color, alpha);
                 if (isFull) {
                     const t = (this._phase * 0.7) % 1.0;
                     const floatY = (faceCy - height * 0.12) - t * (height * 0.28);
@@ -752,7 +755,7 @@ export class EyeRenderer {
                     color,
                     alpha
                 );
-                this._drawMouth(cr, mouthX + tremorX * 0.5, mouthY + tremorY * 0.5, 'o', baseW * 0.34, color, alpha);
+                this._drawMouth(cr, mouthX + tremorX * 0.5, mouthY + tremorY * 0.5, 'o', baseW * 0.34 * speakMouthScale, color, alpha);
                 return;
             }
             if (emotion === 'surprised' && !this._blinking) {
@@ -766,7 +769,7 @@ export class EyeRenderer {
                     color,
                     alpha
                 );
-                this._drawMouth(cr, mouthX, mouthY, 'o', baseW * 0.3, color, alpha);
+                this._drawMouth(cr, mouthX, mouthY, 'o', baseW * 0.3 * speakMouthScale, color, alpha);
                 return;
             }
             if (emotion === 'focus') {
@@ -791,7 +794,7 @@ export class EyeRenderer {
                     color,
                     alpha
                 );
-                this._drawMouth(cr, mouthX + scanX * 0.5, mouthY, 'flat', baseW * 0.48, color, alpha);
+                this._drawMouth(cr, mouthX + scanX * 0.5, mouthY, state === 'SPEAKING' ? 'o' : 'flat', baseW * (state === 'SPEAKING' ? 0.26 * speakMouthScale : 0.48), color, alpha);
                 return;
             }
             if (emotion === 'annoyed') {
@@ -817,7 +820,7 @@ export class EyeRenderer {
                     annoyedColor,
                     alpha
                 );
-                this._drawMouth(cr, mouthX + glanceX * 0.4, mouthY, 'flat', baseW * 0.5, annoyedColor, alpha);
+                this._drawMouth(cr, mouthX + glanceX * 0.4, mouthY, state === 'SPEAKING' ? 'o' : 'flat', baseW * (state === 'SPEAKING' ? 0.26 * speakMouthScale : 0.5), annoyedColor, alpha);
                 return;
             }
             if (emotion === 'curious') {
@@ -849,7 +852,7 @@ export class EyeRenderer {
                     color,
                     sleepyAlpha
                 );
-                this._drawMouth(cr, mouthX, mouthY + bob * 0.6, 'dot', baseW * 0.22, color, sleepyAlpha);
+                this._drawMouth(cr, mouthX, mouthY + bob * 0.6, state === 'SPEAKING' ? 'o' : 'dot', baseW * 0.22 * speakMouthScale, color, sleepyAlpha);
                 if (isFull) {
                     const t = (this._phase * 0.55) % 1.0;
                     const zX = cx + sep + baseW * 0.95 + t * 5.0;

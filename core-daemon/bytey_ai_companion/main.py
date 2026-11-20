@@ -804,7 +804,8 @@ class ByteyDaemon:
             async def on_emotion(tag: str) -> None:
                 nonlocal final_emotion
                 final_emotion = tag
-                await self._set_state("THINKING", emotion=tag)
+                target_state = "SPEAKING" if self.state == "SPEAKING" else "THINKING"
+                await self._set_state(target_state, emotion=tag)
 
             async def on_text_chunk(delta: str) -> None:
                 if not delta:
@@ -954,10 +955,6 @@ class ByteyDaemon:
 
                     await self._set_state("THINKING", emotion=final_emotion)
 
-                tail = chunker.flush()
-                if tail:
-                    await self.tts_player.enqueue_sentence(tail)
-
                 if final_emotion == "neutral":
                     if data_volume_chars >= self.astonished_data_threshold_chars:
                         final_emotion = "astonished"
@@ -967,6 +964,15 @@ class ByteyDaemon:
                         final_emotion = "focus"
                     else:
                         final_emotion = "happy"
+
+                if self.state == "SPEAKING" and self.emotion != final_emotion:
+                    await self._set_state("SPEAKING", emotion=final_emotion)
+                else:
+                    self.emotion = final_emotion
+
+                tail = chunker.flush()
+                if tail:
+                    await self.tts_player.enqueue_sentence(tail)
 
                 full_content = "".join(accumulated_parts).strip()
                 updated_msg = await self.storage.update_message(
