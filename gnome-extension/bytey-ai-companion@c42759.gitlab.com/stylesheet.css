@@ -102,11 +102,12 @@
 
 .bytey-drawer {
   background-color: rgba(14, 14, 18, 0.96);
-  border-radius: 16px;
+  border-radius: 1.15em;
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.68);
-  padding: 12px;
-  spacing: 8px;
+  padding: 0.85em;
+  spacing: 0.6em;
+  font-size: 1em;
   color: #f4f4f7;
 }
 
@@ -115,24 +116,24 @@
 }
 
 .bytey-drawer-header {
-  spacing: 6px;
-  padding-bottom: 8px;
+  spacing: 0.45em;
+  padding-bottom: 0.6em;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .bytey-provider-pill {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  height: 26px;
-  padding: 0 10px;
-  max-width: 165px;
+  border-radius: 0.55em;
+  height: 1.85em;
+  padding: 0 0.7em;
+  max-width: 12em;
   color: #e4e4ec;
 }
 
 .bytey-provider-pill-label {
-  max-width: 145px;
-  font-size: 8.5pt;
+  max-width: 10.5em;
+  font-size: 0.9em;
   font-weight: 600;
   color: #e4e4ec;
 }
@@ -140,10 +141,10 @@
 .bytey-workspace-pill {
   background-color: rgba(56, 189, 248, 0.12);
   border: 1px solid rgba(56, 189, 248, 0.28);
-  border-radius: 8px;
-  height: 26px;
-  padding: 0 10px;
-  max-width: 155px;
+  border-radius: 0.55em;
+  height: 1.85em;
+  padding: 0 0.7em;
+  max-width: 11em;
   color: #e0f2fe;
   transition: 120ms ease;
 }
@@ -154,8 +155,8 @@
 }
 
 .bytey-workspace-pill-label {
-  max-width: 135px;
-  font-size: 8.5pt;
+  max-width: 9.5em;
+  font-size: 0.9em;
   font-weight: 600;
   color: #e0f2fe;
 }
@@ -163,16 +164,16 @@
 .bytey-workspace-menu {
   background-color: rgba(15, 23, 42, 0.96);
   border: 1px solid rgba(148, 163, 184, 0.25);
-  border-radius: 10px;
-  padding: 6px;
-  margin-top: 6px;
-  spacing: 4px;
+  border-radius: 0.7em;
+  padding: 0.45em;
+  margin-top: 0.45em;
+  spacing: 0.3em;
 }
 
 .bytey-workspace-menu-item {
-  border-radius: 6px;
-  padding: 5px 8px;
-  font-size: 8.5pt;
+  border-radius: 0.45em;
+  padding: 0.35em 0.6em;
+  font-size: 0.9em;
   color: #e2e8f0;
   text-align: left;
 }
@@ -194,17 +195,17 @@
 .bytey-workspace-menu-sep {
   height: 1px;
   background-color: rgba(255, 255, 255, 0.1);
-  margin: 2px 4px;
+  margin: 0.15em 0.3em;
 }
 
 .bytey-status-indicator {
-  width: 20px;
-  height: 20px;
+  width: 1.45em;
+  height: 1.45em;
 }
 
 .bytey-status-dot {
-  width: 10px;
-  height: 10px;
+  width: 0.7em;
+  height: 0.7em;
   border-radius: 999px;
 }
 
@@ -226,9 +227,9 @@
 .bytey-status-tooltip {
   background-color: rgba(10, 10, 14, 0.96);
   border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 7px;
-  padding: 4px 8px;
-  font-size: 8pt;
+  border-radius: 0.5em;
+  padding: 0.3em 0.6em;
+  font-size: 0.85em;
   font-weight: 600;
   color: #f4f4f7;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.55);
@@ -240,10 +241,10 @@
 .bytey-close-btn {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  height: 26px;
-  padding: 0 8px;
-  font-size: 8.5pt;
+  border-radius: 0.55em;
+  height: 1.85em;
+  padding: 0 0.6em;
+  font-size: 0.9em;
   font-weight: 600;
   color: #f4f4f7;
   transition: 120ms ease;
@@ -258,7 +259,7 @@
 
 .bytey-sidebar-toggle-btn,
 .bytey-close-btn {
-  width: 26px;
+  width: 1.85em;
   padding: 0;
 }
 
@@ -271,27 +272,27 @@
 /* Collapsible Chat Sidebar */
 
 .bytey-drawer-body {
-  spacing: 8px;
+  spacing: 0.6em;
 }
 
 .bytey-chat-sidebar {
-  spacing: 6px;
-  padding-right: 8px;
+  spacing: 0.45em;
+  padding-right: 0.6em;
   border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .bytey-chat-column {
-  spacing: 8px;
+  spacing: 0.6em;
 }
 
 .bytey-sidebar-new-btn {
   background-color: rgba(56, 189, 248, 0.14);
   border: 1px solid rgba(56, 189, 248, 0.3);
-  border-radius: 8px;
-  height: 28px;
-  padding: 0 10px;
+  border-radius: 0.55em;
+  height: 2em;
+  padding: 0 0.7em;
   color: #e0f2fe;
-  font-size: 8.5pt;
+  font-size: 0.9em;
   font-weight: 600;
   transition: 120ms ease;
 }
@@ -302,34 +303,34 @@
 }
 
 .bytey-sidebar-new-content {
-  spacing: 6px;
+  spacing: 0.45em;
 }
 
 .bytey-sidebar-new-label {
-  font-size: 8.5pt;
+  font-size: 1em;
   font-weight: 600;
   color: #e0f2fe;
 }
 
 .bytey-sessions-scroll {
-  min-height: 100px;
+  min-height: 7em;
 }
 
 .bytey-sessions-list {
-  spacing: 4px;
-  padding-right: 2px;
+  spacing: 0.3em;
+  padding-right: 0.15em;
 }
 
 .bytey-sidebar-empty {
   color: rgba(255, 255, 255, 0.45);
-  font-size: 8.5pt;
-  padding: 16px 8px;
+  font-size: 0.9em;
+  padding: 1.15em 0.6em;
 }
 
 .bytey-session-row {
-  border-radius: 8px;
-  padding: 5px 6px;
-  spacing: 4px;
+  border-radius: 0.55em;
+  padding: 0.35em 0.45em;
+  spacing: 0.3em;
   background-color: rgba(255, 255, 255, 0.03);
   border: 1px solid transparent;
   transition: 120ms ease;
@@ -357,25 +358,25 @@
 }
 
 .bytey-session-title {
-  font-size: 8.5pt;
+  font-size: 0.9em;
   font-weight: 600;
   color: #f4f4f7;
 }
 
 .bytey-session-title-entry {
-  font-size: 8.5pt;
+  font-size: 0.9em;
   font-weight: 600;
   color: #f4f4f7;
   background-color: rgba(0, 0, 0, 0.28);
   border: 1px solid rgba(56, 189, 248, 0.55);
-  border-radius: 5px;
-  padding: 2px 5px;
+  border-radius: 0.35em;
+  padding: 0.15em 0.35em;
   caret-color: #38bdf8;
   selection-background-color: rgba(56, 189, 248, 0.35);
 }
 
 .bytey-session-subtitle {
-  font-size: 7.3pt;
+  font-size: 0.8em;
   color: rgba(255, 255, 255, 0.52);
 }
 
@@ -383,9 +384,9 @@
 .bytey-session-delete-btn,
 .bytey-session-confirm-delete-btn,
 .bytey-session-cancel-delete-btn {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+  width: 1.6em;
+  height: 1.6em;
+  border-radius: 0.45em;
   padding: 0;
   background-color: transparent;
   color: rgba(255, 255, 255, 0.42);
@@ -418,18 +419,18 @@
 }
 
 .bytey-scroll {
-  min-height: 100px;
+  min-height: 7em;
 }
 
 .bytey-messages {
-  spacing: 8px;
-  padding: 4px 6px 4px 2px;
+  spacing: 0.6em;
+  padding: 0.3em 0.45em 0.3em 0.15em;
 }
 
 .bytey-empty-state {
   color: rgba(255, 255, 255, 0.48);
-  font-size: 9.5pt;
-  padding: 24px 12px;
+  font-size: 1em;
+  padding: 1.7em 0.85em;
   text-align: center;
 }
 
@@ -437,40 +438,40 @@
 
 .bytey-msg-user,
 .bytey-msg-assistant {
-  border-radius: 12px;
-  padding: 8px 10px;
-  spacing: 5px;
+  border-radius: 0.85em;
+  padding: 0.6em 0.7em;
+  spacing: 0.35em;
 }
 
 .bytey-msg-user {
   background-color: rgba(56, 189, 248, 0.14);
   border: 1px solid rgba(56, 189, 248, 0.25);
-  margin-left: 16px;
-  margin-right: 4px;
+  margin-left: 1.15em;
+  margin-right: 0.3em;
 }
 
 .bytey-msg-assistant {
   background-color: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.09);
-  margin-left: 2px;
-  margin-right: 12px;
+  margin-left: 0.15em;
+  margin-right: 0.85em;
 }
 
 .bytey-msg-meta {
-  spacing: 6px;
-  min-height: 24px;
+  spacing: 0.45em;
+  min-height: 1.7em;
 }
 
 .bytey-msg-role {
-  font-size: 8.5pt;
+  font-size: 0.9em;
   font-weight: 700;
   color: rgba(255, 255, 255, 0.78);
 }
 
 .bytey-source-badge {
-  border-radius: 6px;
-  padding: 2px 7px;
-  font-size: 7.5pt;
+  border-radius: 0.45em;
+  padding: 0.15em 0.5em;
+  font-size: 0.8em;
   font-weight: 600;
   background-color: rgba(255, 255, 255, 0.1);
   color: #cbd5e1;
@@ -487,37 +488,37 @@
 }
 
 .bytey-emotion-tag {
-  border-radius: 6px;
-  padding: 2px 7px;
-  font-size: 7.5pt;
+  border-radius: 0.45em;
+  padding: 0.15em 0.5em;
+  font-size: 0.8em;
   font-weight: 600;
   background-color: rgba(168, 85, 247, 0.22);
   color: #d8b4fe;
 }
 
 .bytey-msg-body {
-  spacing: 6px;
+  spacing: 0.45em;
 }
 
 .bytey-msg-text {
-  font-size: 9.5pt;
+  font-size: 1em;
   color: #f8fafc;
 }
 
 .bytey-code-block {
   background-color: rgba(2, 6, 23, 0.72);
   border: 1px solid rgba(148, 163, 184, 0.25);
-  border-radius: 8px;
-  padding: 6px 8px;
-  spacing: 4px;
+  border-radius: 0.55em;
+  padding: 0.45em 0.6em;
+  spacing: 0.3em;
 }
 
 .bytey-code-header {
-  spacing: 6px;
+  spacing: 0.45em;
 }
 
 .bytey-code-lang {
-  font-size: 7.5pt;
+  font-size: 0.8em;
   font-weight: 700;
   color: #94a3b8;
 }
@@ -525,9 +526,9 @@
 .bytey-code-copy-btn {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 5px;
-  width: 22px;
-  height: 22px;
+  border-radius: 0.35em;
+  width: 1.6em;
+  height: 1.6em;
   padding: 0;
   color: #cbd5e1;
 }
@@ -539,7 +540,7 @@
 
 .bytey-code-text {
   font-family: monospace;
-  font-size: 8.5pt;
+  font-size: 0.9em;
   color: #e2e8f0;
 }
 
@@ -550,9 +551,9 @@
 .bytey-msg-cancel-delete-btn {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
-  width: 24px;
-  height: 24px;
+  border-radius: 0.45em;
+  width: 1.7em;
+  height: 1.7em;
   padding: 0;
   color: #e2e8f0;
   transition: 120ms ease;
@@ -593,14 +594,14 @@
 /* Tool-Call Badges */
 
 .bytey-tool-list {
-  spacing: 5px;
-  margin-top: 2px;
+  spacing: 0.35em;
+  margin-top: 0.15em;
 }
 
 .bytey-tool-badge {
-  border-radius: 10px;
-  padding: 5px 8px;
-  spacing: 4px;
+  border-radius: 0.7em;
+  padding: 0.35em 0.6em;
+  spacing: 0.3em;
   background-color: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
@@ -626,43 +627,43 @@
 }
 
 .bytey-tool-header {
-  spacing: 6px;
+  spacing: 0.45em;
 }
 
 .bytey-tool-title {
-  font-size: 8.5pt;
+  font-size: 0.9em;
   font-weight: 700;
   color: #f1f5f9;
 }
 
 .bytey-tool-status-chip {
-  font-size: 7.5pt;
+  font-size: 0.8em;
   font-weight: 700;
   color: rgba(255, 255, 255, 0.85);
 }
 
 .bytey-tool-details {
-  font-size: 8.5pt;
+  font-size: 0.9em;
   color: rgba(226, 232, 240, 0.82);
-  padding-top: 2px;
+  padding-top: 0.15em;
 }
 
 .bytey-confirm-card {
   background-color: rgba(2, 6, 23, 0.72);
   border: 1px solid rgba(148, 163, 184, 0.25);
-  border-radius: 8px;
-  padding: 6px;
-  margin-top: 4px;
+  border-radius: 0.55em;
+  padding: 0.45em;
+  margin-top: 0.3em;
 }
 
 .bytey-confirm-scroll {
-  max-height: 180px;
+  max-height: 13em;
 }
 
 .bytey-confirm-diff,
 .bytey-confirm-cmd {
   font-family: monospace;
-  font-size: 8pt;
+  font-size: 0.85em;
   color: #e2e8f0;
 }
 
@@ -671,18 +672,18 @@
 }
 
 .bytey-confirm-row {
-  spacing: 6px;
-  padding-top: 4px;
+  spacing: 0.45em;
+  padding-top: 0.3em;
 }
 
 .bytey-btn-allow,
 .bytey-btn-deny,
 .bytey-confirm-approve-btn,
 .bytey-confirm-reject-btn {
-  border-radius: 8px;
-  height: 28px;
-  padding: 0 12px;
-  font-size: 8.5pt;
+  border-radius: 0.55em;
+  height: 2em;
+  padding: 0 0.85em;
+  font-size: 0.9em;
   font-weight: 700;
   transition: 120ms ease;
 }
@@ -710,22 +711,22 @@
 .bytey-skill-suggest {
   background-color: rgba(18, 22, 32, 0.96);
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 10px;
-  padding: 4px;
-  margin-bottom: 4px;
+  border-radius: 0.7em;
+  padding: 0.3em;
+  margin-bottom: 0.3em;
 }
 
 .bytey-skill-suggest-scroll {
-  max-height: 150px;
+  max-height: 11em;
 }
 
 .bytey-skill-suggest-list {
-  spacing: 2px;
+  spacing: 0.15em;
 }
 
 .bytey-skill-suggest-row {
-  padding: 5px 8px;
-  border-radius: 7px;
+  padding: 0.35em 0.6em;
+  border-radius: 0.5em;
   background-color: transparent;
 }
 
@@ -738,28 +739,28 @@
 }
 
 .bytey-skill-suggest-cmd {
-  font-size: 9pt;
+  font-size: 0.95em;
   font-weight: 700;
   color: #7dd3fc;
-  margin-right: 8px;
+  margin-right: 0.6em;
 }
 
 .bytey-skill-suggest-desc {
-  font-size: 8.5pt;
+  font-size: 0.9em;
   color: rgba(255, 255, 255, 0.72);
 }
 
 .bytey-drawer-footer {
-  spacing: 6px;
-  padding-top: 8px;
+  spacing: 0.45em;
+  padding-top: 0.6em;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .bytey-entry-scroll {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 10px;
-  min-height: 34px;
+  border-radius: 0.7em;
+  min-height: 2.4em;
 }
 
 .bytey-entry-scroll:focus {
@@ -770,19 +771,19 @@
 .bytey-entry {
   background-color: transparent;
   border: none;
-  padding: 6px 10px;
+  padding: 0.45em 0.7em;
   color: #ffffff;
   caret-color: #38bdf8;
-  font-size: 9.5pt;
+  font-size: 1em;
 }
 
 .bytey-send-btn,
 .bytey-mic-btn {
   background-color: rgba(255, 255, 255, 0.1);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 10px;
-  width: 34px;
-  height: 34px;
+  border-radius: 0.7em;
+  width: 2.4em;
+  height: 2.4em;
   padding: 0;
   color: #f8fafc;
   transition: 120ms ease;
@@ -800,13 +801,13 @@
 }
 
 .bytey-resize-grip {
-  width: 16px;
-  height: 24px;
-  padding: 0 0 1px 2px;
+  width: 1.15em;
+  height: 1.7em;
+  padding: 0 0 0.1em 0.15em;
 }
 
 .bytey-resize-grip-label {
-  font-size: 9pt;
+  font-size: 0.9em;
   color: rgba(255, 255, 255, 0.32);
 }
 
@@ -817,353 +818,219 @@
 /* Desktop Density Presets: Compact & Spacious */
 
 .bytey-density-compact {
-  padding: 8px;
-  spacing: 6px;
-  border-radius: 14px;
+  font-size: 0.9em;
+  padding: 0.6em;
+  spacing: 0.45em;
+  border-radius: 1em;
 }
 
 .bytey-density-compact .bytey-drawer-header {
-  spacing: 4px;
-  padding-bottom: 5px;
+  spacing: 0.3em;
+  padding-bottom: 0.4em;
 }
 
 .bytey-density-compact .bytey-provider-pill,
+.bytey-density-compact .bytey-workspace-pill,
 .bytey-density-compact .bytey-sidebar-toggle-btn,
 .bytey-density-compact .bytey-density-btn,
 .bytey-density-compact .bytey-clear-btn,
 .bytey-density-compact .bytey-close-btn {
-  height: 22px;
-  border-radius: 6px;
-  font-size: 7.5pt;
-  padding: 0 6px;
+  height: 1.65em;
+  border-radius: 0.45em;
+  padding: 0 0.5em;
 }
 
 .bytey-density-compact .bytey-sidebar-toggle-btn,
 .bytey-density-compact .bytey-close-btn {
-  width: 22px;
+  width: 1.65em;
   padding: 0;
 }
 
 .bytey-density-compact .bytey-drawer-body,
 .bytey-density-compact .bytey-chat-column {
-  spacing: 6px;
+  spacing: 0.45em;
 }
 
 .bytey-density-compact .bytey-chat-sidebar {
-  spacing: 4px;
-  padding-right: 6px;
+  spacing: 0.3em;
+  padding-right: 0.45em;
 }
 
 .bytey-density-compact .bytey-sidebar-new-btn {
-  height: 24px;
-  border-radius: 6px;
-  padding: 0 8px;
-}
-
-.bytey-density-compact .bytey-sidebar-new-label {
-  font-size: 7.5pt;
+  height: 1.8em;
+  border-radius: 0.45em;
+  padding: 0 0.6em;
 }
 
 .bytey-density-compact .bytey-session-row {
-  padding: 4px 5px;
-  border-radius: 6px;
-}
-
-.bytey-density-compact .bytey-session-title,
-.bytey-density-compact .bytey-session-title-entry {
-  font-size: 7.8pt;
-}
-
-.bytey-density-compact .bytey-session-subtitle {
-  font-size: 6.8pt;
-}
-
-.bytey-density-compact .bytey-session-edit-btn,
-.bytey-density-compact .bytey-session-delete-btn,
-.bytey-density-compact .bytey-session-confirm-delete-btn,
-.bytey-density-compact .bytey-session-cancel-delete-btn {
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
-}
-
-.bytey-density-compact .bytey-provider-pill-label {
-  font-size: 7.5pt;
-}
-
-.bytey-density-compact .bytey-status-indicator {
-  width: 18px;
-  height: 18px;
-}
-
-.bytey-density-compact .bytey-status-dot {
-  width: 8px;
-  height: 8px;
+  padding: 0.3em 0.35em;
+  border-radius: 0.45em;
 }
 
 .bytey-density-compact .bytey-messages {
-  spacing: 5px;
+  spacing: 0.4em;
 }
 
 .bytey-density-compact .bytey-msg-user,
 .bytey-density-compact .bytey-msg-assistant {
-  padding: 5px 8px;
-  spacing: 3px;
-  border-radius: 9px;
+  padding: 0.4em 0.6em;
+  spacing: 0.25em;
+  border-radius: 0.65em;
 }
 
 .bytey-density-compact .bytey-msg-meta {
-  min-height: 20px;
-  spacing: 4px;
-}
-
-.bytey-density-compact .bytey-msg-role {
-  font-size: 7.5pt;
+  min-height: 1.45em;
+  spacing: 0.3em;
 }
 
 .bytey-density-compact .bytey-source-badge,
 .bytey-density-compact .bytey-emotion-tag {
-  font-size: 6.8pt;
-  padding: 1px 5px;
-  border-radius: 5px;
-}
-
-.bytey-density-compact .bytey-msg-text {
-  font-size: 8.5pt;
-}
-
-.bytey-density-compact .bytey-code-text {
-  font-size: 7.5pt;
-}
-
-.bytey-density-compact .bytey-replay-btn,
-.bytey-density-compact .bytey-copy-btn,
-.bytey-density-compact .bytey-msg-delete-btn,
-.bytey-density-compact .bytey-msg-confirm-delete-btn,
-.bytey-density-compact .bytey-msg-cancel-delete-btn {
-  width: 20px;
-  height: 20px;
-  border-radius: 5px;
+  padding: 0.1em 0.4em;
+  border-radius: 0.35em;
 }
 
 .bytey-density-compact .bytey-drawer-footer {
-  spacing: 4px;
-  padding-top: 5px;
+  spacing: 0.3em;
+  padding-top: 0.4em;
 }
 
 .bytey-density-compact .bytey-skill-suggest {
-  padding: 3px;
-  border-radius: 8px;
+  padding: 0.25em;
+  border-radius: 0.55em;
 }
 
 .bytey-density-compact .bytey-skill-suggest-scroll {
-  max-height: 120px;
+  max-height: 9em;
 }
 
 .bytey-density-compact .bytey-skill-suggest-row {
-  padding: 3px 6px;
-  border-radius: 5px;
-}
-
-.bytey-density-compact .bytey-skill-suggest-cmd {
-  font-size: 8pt;
-}
-
-.bytey-density-compact .bytey-skill-suggest-desc {
-  font-size: 7.5pt;
+  padding: 0.25em 0.45em;
+  border-radius: 0.35em;
 }
 
 .bytey-density-compact .bytey-entry-scroll {
-  min-height: 28px;
-  border-radius: 8px;
+  min-height: 2.1em;
+  border-radius: 0.55em;
 }
 
 .bytey-density-compact .bytey-entry {
-  padding: 4px 8px;
-  font-size: 8.5pt;
+  padding: 0.3em 0.6em;
 }
 
 .bytey-density-compact .bytey-send-btn,
 .bytey-density-compact .bytey-mic-btn {
-  width: 28px;
-  height: 28px;
+  width: 2.1em;
+  height: 2.1em;
   padding: 0;
-  border-radius: 8px;
+  border-radius: 0.55em;
 }
 
 .bytey-density-spacious {
-  padding: 16px;
-  spacing: 12px;
-  border-radius: 20px;
+  font-size: 1.08em;
+  padding: 1.1em;
+  spacing: 0.8em;
+  border-radius: 1.35em;
 }
 
 .bytey-density-spacious .bytey-drawer-header {
-  spacing: 8px;
-  padding-bottom: 10px;
+  spacing: 0.55em;
+  padding-bottom: 0.7em;
 }
 
 .bytey-density-spacious .bytey-provider-pill,
+.bytey-density-spacious .bytey-workspace-pill,
 .bytey-density-spacious .bytey-sidebar-toggle-btn,
 .bytey-density-spacious .bytey-density-btn,
 .bytey-density-spacious .bytey-clear-btn,
 .bytey-density-spacious .bytey-close-btn {
-  height: 30px;
-  border-radius: 10px;
-  font-size: 9.5pt;
-  padding: 0 11px;
+  height: 2em;
+  border-radius: 0.65em;
+  padding: 0 0.75em;
 }
 
 .bytey-density-spacious .bytey-sidebar-toggle-btn,
 .bytey-density-spacious .bytey-close-btn {
-  width: 30px;
+  width: 2em;
   padding: 0;
 }
 
 .bytey-density-spacious .bytey-drawer-body,
 .bytey-density-spacious .bytey-chat-column {
-  spacing: 10px;
+  spacing: 0.7em;
 }
 
 .bytey-density-spacious .bytey-chat-sidebar {
-  spacing: 8px;
-  padding-right: 10px;
+  spacing: 0.55em;
+  padding-right: 0.7em;
 }
 
 .bytey-density-spacious .bytey-sidebar-new-btn {
-  height: 32px;
-  border-radius: 10px;
-  padding: 0 12px;
-}
-
-.bytey-density-spacious .bytey-sidebar-new-label {
-  font-size: 9.5pt;
+  height: 2.15em;
+  border-radius: 0.65em;
+  padding: 0 0.85em;
 }
 
 .bytey-density-spacious .bytey-session-row {
-  padding: 7px 8px;
-  border-radius: 10px;
-}
-
-.bytey-density-spacious .bytey-session-title,
-.bytey-density-spacious .bytey-session-title-entry {
-  font-size: 9.5pt;
-}
-
-.bytey-density-spacious .bytey-session-subtitle {
-  font-size: 8pt;
-}
-
-.bytey-density-spacious .bytey-session-edit-btn,
-.bytey-density-spacious .bytey-session-delete-btn,
-.bytey-density-spacious .bytey-session-confirm-delete-btn,
-.bytey-density-spacious .bytey-session-cancel-delete-btn {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-}
-
-.bytey-density-spacious .bytey-provider-pill-label {
-  font-size: 9.5pt;
-}
-
-.bytey-density-spacious .bytey-status-indicator {
-  width: 24px;
-  height: 24px;
-}
-
-.bytey-density-spacious .bytey-status-dot {
-  width: 12px;
-  height: 12px;
+  padding: 0.5em 0.55em;
+  border-radius: 0.65em;
 }
 
 .bytey-density-spacious .bytey-messages {
-  spacing: 10px;
+  spacing: 0.7em;
 }
 
 .bytey-density-spacious .bytey-msg-user,
 .bytey-density-spacious .bytey-msg-assistant {
-  padding: 10px 14px;
-  spacing: 7px;
-  border-radius: 14px;
+  padding: 0.7em 0.95em;
+  spacing: 0.5em;
+  border-radius: 0.95em;
 }
 
 .bytey-density-spacious .bytey-msg-meta {
-  min-height: 28px;
-  spacing: 8px;
-}
-
-.bytey-density-spacious .bytey-msg-role {
-  font-size: 9.5pt;
+  min-height: 1.9em;
+  spacing: 0.55em;
 }
 
 .bytey-density-spacious .bytey-source-badge,
 .bytey-density-spacious .bytey-emotion-tag {
-  font-size: 8.2pt;
-  padding: 2px 9px;
-  border-radius: 7px;
-}
-
-.bytey-density-spacious .bytey-msg-text {
-  font-size: 10.5pt;
-}
-
-.bytey-density-spacious .bytey-code-text {
-  font-size: 9.5pt;
-}
-
-.bytey-density-spacious .bytey-replay-btn,
-.bytey-density-spacious .bytey-copy-btn,
-.bytey-density-spacious .bytey-msg-delete-btn,
-.bytey-density-spacious .bytey-msg-confirm-delete-btn,
-.bytey-density-spacious .bytey-msg-cancel-delete-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
+  padding: 0.15em 0.65em;
+  border-radius: 0.5em;
 }
 
 .bytey-density-spacious .bytey-drawer-footer {
-  spacing: 8px;
-  padding-top: 10px;
+  spacing: 0.55em;
+  padding-top: 0.7em;
 }
 
 .bytey-density-spacious .bytey-skill-suggest {
-  padding: 6px;
-  border-radius: 12px;
+  padding: 0.45em;
+  border-radius: 0.85em;
 }
 
 .bytey-density-spacious .bytey-skill-suggest-scroll {
-  max-height: 185px;
+  max-height: 12.5em;
 }
 
 .bytey-density-spacious .bytey-skill-suggest-row {
-  padding: 7px 10px;
-  border-radius: 8px;
-}
-
-.bytey-density-spacious .bytey-skill-suggest-cmd {
-  font-size: 10pt;
-}
-
-.bytey-density-spacious .bytey-skill-suggest-desc {
-  font-size: 9.5pt;
+  padding: 0.5em 0.7em;
+  border-radius: 0.55em;
 }
 
 .bytey-density-spacious .bytey-entry-scroll {
-  min-height: 40px;
-  border-radius: 12px;
+  min-height: 2.65em;
+  border-radius: 0.85em;
 }
 
 .bytey-density-spacious .bytey-entry {
-  padding: 8px 12px;
-  font-size: 10.5pt;
+  padding: 0.55em 0.85em;
 }
 
 .bytey-density-spacious .bytey-send-btn,
 .bytey-density-spacious .bytey-mic-btn {
-  width: 40px;
-  height: 40px;
+  width: 2.65em;
+  height: 2.65em;
   padding: 0;
-  border-radius: 12px;
+  border-radius: 0.85em;
 }
 
 /* Right-Click Context Menu */

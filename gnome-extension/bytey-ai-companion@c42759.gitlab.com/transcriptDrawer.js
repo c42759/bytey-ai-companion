@@ -13,7 +13,8 @@ const DRAWER_MIN_WIDTH = 260;
 const DRAWER_MAX_WIDTH = 900;
 const DRAWER_MIN_HEIGHT = 220;
 const DRAWER_MAX_HEIGHT = 900;
-const SIDEBAR_WIDTH = 210;
+const SIDEBAR_WIDTH_EM = 15;
+const THEME_BASE_PX_FALLBACK = 14;
 const SIDEBAR_ANIM_DURATION_MS = 220;
 
 const DENSITY_ORDER = ['compact', 'comfortable', 'spacious'];
@@ -22,15 +23,10 @@ const DENSITY_LABELS = {
     comfortable: 'Comfort',
     spacious: 'Spacious',
 };
-const DENSITY_ICON_SIZES = {
-    compact: {close: 12, mic: 13, replay: 11},
-    comfortable: {close: 14, mic: 15, replay: 13},
-    spacious: {close: 16, mic: 17, replay: 15},
-};
-const DENSITY_ENTRY_METRICS = {
-    compact: {minHeight: 28, lineHeight: 16},
-    comfortable: {minHeight: 34, lineHeight: 18},
-    spacious: {minHeight: 40, lineHeight: 20},
+const DENSITY_SCALE_FACTORS = {
+    compact: 0.9,
+    comfortable: 1.0,
+    spacious: 1.08,
 };
 const ENTRY_MAX_LINES = 5;
 
@@ -131,6 +127,9 @@ export class TranscriptDrawer {
         });
 
         Main.layoutManager.addTopChrome(this._container);
+        this._connect(this._container, 'style-changed', () => this._onThemeStyleChanged());
+        this._syncAllIconSizes();
+        this._syncEntryHeight();
         this._statusTooltip = new St.Label({
             style_class: 'bytey-status-tooltip',
             text: CONNECTION_STATUS_LABELS.disconnected,
@@ -161,6 +160,85 @@ export class TranscriptDrawer {
         return id;
     }
 
+    _getThemeBasePx() {
+        try {
+            const node = this._container?.get_theme_node?.();
+            const fontDesc = node?.get_font?.();
+            if (fontDesc) {
+                const rawSize = fontDesc.get_size();
+                if (rawSize > 0) {
+                    const basePx = fontDesc.get_size_is_absolute()
+                        ? rawSize / Pango.SCALE
+                        : (rawSize / Pango.SCALE) * (96 / 72);
+                    return Math.max(8, basePx);
+                }
+            }
+        } catch (_e) {
+            // Fallback when theme node is not yet realized.
+        }
+        const scale = DENSITY_SCALE_FACTORS[this._density] ?? 1.0;
+        return THEME_BASE_PX_FALLBACK * scale;
+    }
+
+    _getIconSizes() {
+        const basePx = this._getThemeBasePx();
+        return {
+            close: Math.max(10, Math.round(basePx * 1.0)),
+            mic: Math.max(11, Math.round(basePx * 1.08)),
+            replay: Math.max(9, Math.round(basePx * 0.92)),
+        };
+    }
+
+    _getEntryMetrics() {
+        const basePx = this._getThemeBasePx();
+        return {
+            minHeight: Math.max(22, Math.round(basePx * 2.4)),
+            lineHeight: Math.max(12, Math.round(basePx * 1.3)),
+        };
+    }
+
+    _getSidebarWidth() {
+        const basePx = this._getThemeBasePx();
+        return Math.round(Math.max(180, Math.min(280, basePx * SIDEBAR_WIDTH_EM)));
+    }
+
+    _syncAllIconSizes() {
+        if (this._destroyed)
+            return;
+        const sizes = this._getIconSizes();
+        if (this._closeIcon)
+            this._closeIcon.icon_size = sizes.close;
+        if (this._sidebarToggleIcon)
+            this._sidebarToggleIcon.icon_size = sizes.close;
+        if (this._sidebarNewIcon)
+            this._sidebarNewIcon.icon_size = sizes.close;
+        if (this._sendIcon)
+            this._sendIcon.icon_size = sizes.mic;
+        if (this._micIcon)
+            this._micIcon.icon_size = sizes.mic;
+        for (const rec of this._messageWidgets.values()) {
+            if (rec.replayIcon)
+                rec.replayIcon.icon_size = sizes.replay;
+            if (rec.copyIcon)
+                rec.copyIcon.icon_size = sizes.replay;
+            if (rec.deleteIcon)
+                rec.deleteIcon.icon_size = sizes.replay;
+            if (rec.confirmDeleteIcon)
+                rec.confirmDeleteIcon.icon_size = sizes.replay;
+            if (rec.cancelDeleteIcon)
+                rec.cancelDeleteIcon.icon_size = sizes.replay;
+        }
+    }
+
+    _onThemeStyleChanged() {
+        if (this._destroyed || !this._container)
+            return;
+        this._syncAllIconSizes();
+        this._syncEntryHeight();
+        if (this._sidebarBox && this._sidebarOpen)
+            this._sidebarBox.width = this._getSidebarWidth();
+    }
+
     _buildHeader() {
         const header = new St.BoxLayout({
             style_class: 'bytey-drawer-header',
@@ -170,7 +248,7 @@ export class TranscriptDrawer {
 
         this._sidebarToggleIcon = new St.Icon({
             icon_name: 'sidebar-show-symbolic',
-            icon_size: DENSITY_ICON_SIZES[this._density].close,
+            icon_size: this._getIconSizes().close,
         });
         this._sidebarToggleBtn = new St.Button({
             style_class: 'bytey-sidebar-toggle-btn',
@@ -268,7 +346,7 @@ export class TranscriptDrawer {
 
         this._closeIcon = new St.Icon({
             icon_name: 'window-close-symbolic',
-            icon_size: DENSITY_ICON_SIZES[this._density].close,
+            icon_size: this._getIconSizes().close,
         });
         const closeBtn = new St.Button({
             style_class: 'bytey-close-btn',
@@ -301,7 +379,7 @@ export class TranscriptDrawer {
         this._sidebarBox = new St.BoxLayout({
             style_class: 'bytey-chat-sidebar',
             orientation: Clutter.Orientation.VERTICAL,
-            width: SIDEBAR_WIDTH,
+            width: this._getSidebarWidth(),
             visible: false,
             clip_to_allocation: true,
             x_expand: false,
@@ -310,7 +388,7 @@ export class TranscriptDrawer {
 
         this._sidebarNewIcon = new St.Icon({
             icon_name: 'list-add-symbolic',
-            icon_size: DENSITY_ICON_SIZES[this._density].close,
+            icon_size: this._getIconSizes().close,
         });
         const newChatContent = new St.BoxLayout({
             style_class: 'bytey-sidebar-new-content',
@@ -486,9 +564,10 @@ export class TranscriptDrawer {
 
         footer.add_child(this._entryScroll);
 
+        const iconSizes = this._getIconSizes();
         this._sendIcon = new St.Icon({
             icon_name: 'mail-send-symbolic',
-            icon_size: DENSITY_ICON_SIZES[this._density].mic,
+            icon_size: iconSizes.mic,
         });
         const sendBtn = new St.Button({
             style_class: 'bytey-send-btn',
@@ -501,7 +580,7 @@ export class TranscriptDrawer {
 
         this._micIcon = new St.Icon({
             icon_name: 'audio-input-microphone-symbolic',
-            icon_size: DENSITY_ICON_SIZES[this._density].mic,
+            icon_size: iconSizes.mic,
         });
         this._micBtn = new St.Button({
             style_class: 'bytey-mic-btn',
@@ -540,7 +619,7 @@ export class TranscriptDrawer {
     _syncEntryHeight() {
         if (this._destroyed || !this._entry || !this._entryScroll)
             return;
-        const metrics = DENSITY_ENTRY_METRICS[this._density] ?? DENSITY_ENTRY_METRICS.comfortable;
+        const metrics = this._getEntryMetrics();
         const minH = metrics.minHeight;
         const maxH = minH + (ENTRY_MAX_LINES - 1) * metrics.lineHeight;
         const scrollW = this._entryScroll.width;
@@ -864,30 +943,8 @@ export class TranscriptDrawer {
         if (this._densityBtn)
             this._densityBtn.label = DENSITY_LABELS[density] ?? 'Comfort';
 
-        const sizes = DENSITY_ICON_SIZES[density] ?? DENSITY_ICON_SIZES.comfortable;
-        if (this._closeIcon)
-            this._closeIcon.icon_size = sizes.close;
-        if (this._sidebarToggleIcon)
-            this._sidebarToggleIcon.icon_size = sizes.close;
-        if (this._sidebarNewIcon)
-            this._sidebarNewIcon.icon_size = sizes.close;
-        if (this._sendIcon)
-            this._sendIcon.icon_size = sizes.mic;
-        if (this._micIcon)
-            this._micIcon.icon_size = sizes.mic;
+        this._syncAllIconSizes();
         this._syncEntryHeight();
-        for (const rec of this._messageWidgets.values()) {
-            if (rec.replayIcon)
-                rec.replayIcon.icon_size = sizes.replay;
-            if (rec.copyIcon)
-                rec.copyIcon.icon_size = sizes.replay;
-            if (rec.deleteIcon)
-                rec.deleteIcon.icon_size = sizes.replay;
-            if (rec.confirmDeleteIcon)
-                rec.confirmDeleteIcon.icon_size = sizes.replay;
-            if (rec.cancelDeleteIcon)
-                rec.cancelDeleteIcon.icon_size = sizes.replay;
-        }
         this._renderSessions();
 
         if (notifyCallback)
@@ -1024,10 +1081,11 @@ export class TranscriptDrawer {
         this._sidebarBox?.remove_all_transitions();
         this._container?.remove_all_transitions();
 
+        const sidebarWidth = this._getSidebarWidth();
         if (!this._isOpen || !this._container) {
             if (this._sidebarBox) {
                 this._sidebarBox.visible = nextOpen;
-                this._sidebarBox.width = SIDEBAR_WIDTH;
+                this._sidebarBox.width = sidebarWidth;
                 this._sidebarBox.opacity = 255;
             }
             this._applyDrawerSize();
@@ -1056,7 +1114,7 @@ export class TranscriptDrawer {
                     this._sidebarBox.visible = true;
                 }
                 this._sidebarBox.ease({
-                    width: SIDEBAR_WIDTH,
+                    width: sidebarWidth,
                     opacity: 255,
                     duration: SIDEBAR_ANIM_DURATION_MS,
                     mode: Clutter.AnimationMode.EASE_OUT_QUAD,
@@ -1071,7 +1129,7 @@ export class TranscriptDrawer {
                         if (this._destroyed || this._sidebarOpen !== false || !this._sidebarBox)
                             return;
                         this._sidebarBox.visible = false;
-                        this._sidebarBox.width = SIDEBAR_WIDTH;
+                        this._sidebarBox.width = sidebarWidth;
                         this._sidebarBox.opacity = 255;
                     },
                 });
@@ -1137,7 +1195,7 @@ export class TranscriptDrawer {
             // Split inside wide drawers (>= 520px), otherwise expand by sidebar width.
             targetW = this._drawerWidth >= 520
                 ? this._drawerWidth
-                : this._drawerWidth + SIDEBAR_WIDTH;
+                : this._drawerWidth + this._getSidebarWidth();
         }
 
         return {
@@ -1184,7 +1242,7 @@ export class TranscriptDrawer {
             return;
         }
 
-        const iconSizes = DENSITY_ICON_SIZES[this._density] ?? DENSITY_ICON_SIZES.comfortable;
+        const iconSizes = this._getIconSizes();
 
         for (const session of this._sessions) {
             if (!session || !session.id)
@@ -2004,7 +2062,7 @@ export class TranscriptDrawer {
         const spacer = new St.Widget({x_expand: true});
         metaRow.add_child(spacer);
 
-        const iconSizes = DENSITY_ICON_SIZES[this._density] ?? DENSITY_ICON_SIZES.comfortable;
+        const iconSizes = this._getIconSizes();
 
         let replayBtn = null;
         let replayIcon = null;
@@ -2323,7 +2381,7 @@ export class TranscriptDrawer {
                 });
                 const copyIcon = new St.Icon({
                     icon_name: 'edit-copy-symbolic',
-                    icon_size: 12,
+                    icon_size: this._getIconSizes().replay,
                 });
                 const copyBtn = new St.Button({
                     style_class: 'bytey-code-copy-btn',
