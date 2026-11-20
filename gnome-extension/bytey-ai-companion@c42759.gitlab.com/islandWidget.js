@@ -438,16 +438,64 @@ export class IslandWidget {
      * Show the island overlay.
      */
     show() {
-        if (!this._destroyed && this._island)
-            this._island.show();
+        if (this._destroyed || !this._island)
+            return;
+        this._island.remove_all_transitions();
+        this._island.opacity = 255;
+        this._island.show();
     }
 
     /**
      * Hide the island overlay.
      */
     hide() {
-        if (!this._destroyed && this._island)
-            this._island.hide();
+        if (this._destroyed || !this._island)
+            return;
+        this._island.remove_all_transitions();
+        this._island.hide();
+        this._island.opacity = 255;
+    }
+
+    /**
+     * Fade the island overlay in smoothly.
+     *
+     * @param {number} [durationMs=200]
+     */
+    fadeIn(durationMs = 200) {
+        if (this._destroyed || !this._island)
+            return;
+        this._island.remove_all_transitions();
+        if (!this._island.visible) {
+            this._island.opacity = 0;
+            this._island.show();
+        }
+        this._island.ease({
+            opacity: 255,
+            duration: durationMs,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        });
+    }
+
+    /**
+     * Fade the island overlay out smoothly and hide it on completion.
+     *
+     * @param {number} [durationMs=200]
+     */
+    fadeOut(durationMs = 200) {
+        if (this._destroyed || !this._island)
+            return;
+        this._island.remove_all_transitions();
+        if (!this._island.visible)
+            return;
+        this._island.ease({
+            opacity: 0,
+            duration: durationMs,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            onComplete: () => {
+                if (!this._destroyed && this._island && this._island.opacity === 0)
+                    this._island.hide();
+            },
+        });
     }
 
     /**
@@ -565,6 +613,7 @@ export class IslandWidget {
         }
 
         if (this._island) {
+            this._island.remove_all_transitions();
             Main.layoutManager.removeChrome(this._island);
             this._island.destroy();
             this._island = null;

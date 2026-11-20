@@ -151,6 +151,20 @@ export default class ByteyExtension extends Extension {
             this._islandWidget?.reposition();
             this._syncDrawerPosition();
         });
+        this._overviewShowingId = Main.overview.connect('showing', () => {
+            if (this._disabled)
+                return;
+            this._drawer?.close();
+            this._contextMenu?.close();
+            this._islandWidget?.fadeOut();
+        });
+        this._overviewHiddenId = Main.overview.connect('hidden', () => {
+            if (this._disabled || this._exitedByUser)
+                return;
+            this._islandWidget?.fadeIn();
+        });
+        if (Main.overview.visible)
+            this._islandWidget?.hide();
 
         this._applyConfig(this._config);
         this._connectWebSocket();
@@ -190,6 +204,14 @@ export default class ByteyExtension extends Extension {
         if (this._workareasChangedId) {
             global.display.disconnect(this._workareasChangedId);
             this._workareasChangedId = 0;
+        }
+        if (this._overviewShowingId) {
+            Main.overview.disconnect(this._overviewShowingId);
+            this._overviewShowingId = 0;
+        }
+        if (this._overviewHiddenId) {
+            Main.overview.disconnect(this._overviewHiddenId);
+            this._overviewHiddenId = 0;
         }
 
         if (this._contextMenu) {
@@ -689,7 +711,8 @@ export default class ByteyExtension extends Extension {
                 this._wsBackoffMs = WS_BACKOFF_MIN_MS;
                 this._wsHadError = false;
                 this._drawer?.setConnectionStatus('connected');
-                this._islandWidget?.show();
+                if (!Main.overview.visible)
+                    this._islandWidget?.show();
 
                 const msgId = conn.connect('message', (_c, dataType, bytes) => {
                     if (dataType !== Soup.WebsocketDataType.TEXT || !bytes)
