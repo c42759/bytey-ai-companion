@@ -703,6 +703,7 @@ class LLMRouter:
         return {
             "content": content,
             "emotion": emotion,
+            "title": parser.captured_title,
             "tool_calls": tool_calls,
             "raw_assistant_message": _build_raw_assistant_message(
                 content, tool_calls, gemini_parts=gemini_parts

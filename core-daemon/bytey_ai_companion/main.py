@@ -21,7 +21,12 @@ from .audio import VoiceInputService
 from .config import PIPER_VOICE_PRESETS, ConfigManager, MCPServerConfig, SecretStore
 from .ipc import IPCRequest, IPCResponse, IPCServer
 from .llm import LLMRouter
-from .llm.emotions import DEFAULT_SYSTEM_PROMPT, VALID_EMOTIONS, parse_emotion_prefix
+from .llm.emotions import (
+    DEFAULT_SYSTEM_PROMPT,
+    VALID_EMOTIONS,
+    parse_emotion_prefix,
+    parse_reply_tags,
+)
 from .mcp_host import MCPClientManager, from_mcp_servers_json, to_mcp_servers_json
 from .tts import (
     ElevenLabsTTSClient,
@@ -133,6 +138,21 @@ def _accepts_kwarg(fn: Any, kwarg: str) -> bool:
     return kwarg in sig.parameters or any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
     )
+
+
+def _auto_title_from_prompt(text: str, max_len: int = 48) -> str:
+    """Build a clean single-line title from the first user prompt."""
+    clean = " ".join((text or "").split())
+    if not clean:
+        return "New Chat"
+    if len(clean) <= max_len:
+        return clean
+    cutoff = max_len - 3
+    snippet = clean[:cutoff]
+    last_space = snippet.rfind(" ")
+    if last_space >= cutoff // 2:
+        snippet = snippet[:last_space]
+    return snippet.rstrip() + "..."
 
 
 class ByteyDaemon:
@@ -636,6 +656,16 @@ class ByteyDaemon:
             if fut is not None and not fut.done():
                 fut.set_result(approved)
 
+    async def _broadcast_sessions_updated(self) -> None:
+        sessions = await self.storage.list_sessions()
+        await self.ipc.connection_manager.broadcast(
+            {
+                "type": "sessions_updated",
+                "sessions": sessions,
+                "active_session_id": self._active_session_id,
+            }
+        )
+
     async def _ensure_active_session(self, requested_session_id: str | None = None) -> str:
         if requested_session_id and requested_session_id != "active":
             sessions = await self.storage.list_sessions()
@@ -707,6 +737,8 @@ class ByteyDaemon:
                 input_mode=input_mode,
                 emotion="neutral",
             )
+            session_obj = await self.storage.get_session(sid)
+            needs_auto_title = session_obj is not None and session_obj.get("title") == "New Chat"
             await self.ipc.connection_manager.broadcast(
                 {
                     "type": "transcript_delta",
@@ -796,10 +828,16 @@ class ByteyDaemon:
                 mood_hints.append("heavy_information=true (consider [emotion:focus])")
 
             runtime_context_note = f"\n\n[Runtime Mood Context: {'; '.join(mood_hints)}]"
+            if needs_auto_title:
+                runtime_context_note += (
+                    "\n[Runtime Title Request: This is a new conversation. Begin your reply with "
+                    "[title: <2-5 word topic>] alongside your [emotion:<tag>] tag.]"
+                )
             effective_system_prompt = (cfg.general.system_prompt or "") + runtime_context_note
 
             final_emotion = "neutral"
             accumulated_parts: list[str] = []
+            last_result: dict[str, Any] | None = None
 
             async def on_emotion(tag: str) -> None:
                 nonlocal final_emotion
@@ -843,6 +881,7 @@ class ByteyDaemon:
                     if _accepts_kwarg(self.llm_router.generate_chat, "context_size"):
                         chat_kwargs["context_size"] = effective_context_size
                     result = await self.llm_router.generate_chat(**chat_kwargs)
+                    last_result = result
                     if result.get("emotion"):
                         final_emotion = str(result["emotion"])
                     tool_calls = result.get("tool_calls") or []
@@ -974,10 +1013,21 @@ class ByteyDaemon:
                 if tail:
                     await self.tts_player.enqueue_sentence(tail)
 
-                full_content = "".join(accumulated_parts).strip()
+                raw_content = "".join(accumulated_parts).strip()
+                _, parsed_title, clean_reply = parse_reply_tags(raw_content)
+                clean_reply = clean_reply.strip()
                 updated_msg = await self.storage.update_message(
-                    assistant_id, content=full_content, emotion=final_emotion
+                    assistant_id, content=clean_reply, emotion=final_emotion
                 )
+                if needs_auto_title:
+                    captured_title = (
+                        (last_result.get("title") if last_result else None) or parsed_title or ""
+                    ).strip()
+                    current_session = await self.storage.get_session(sid)
+                    if current_session is not None and current_session.get("title") == "New Chat":
+                        new_title = captured_title or _auto_title_from_prompt(text)
+                        await self.storage.rename_session(sid, new_title)
+                        await self._broadcast_sessions_updated()
                 await self.ipc.connection_manager.broadcast(
                     {
                         "type": "transcript_delta",
@@ -985,7 +1035,7 @@ class ByteyDaemon:
                         "message_id": assistant_id,
                         "role": "assistant",
                         "source": input_mode,
-                        "text": full_content,
+                        "text": clean_reply,
                         "emotion": final_emotion,
                         "is_final": True,
                     }
@@ -1096,6 +1146,10 @@ class ByteyDaemon:
         self.ipc.register_route("GET", "/api/v1/sessions/active", self._route_active_session)
         self.ipc.register_route("GET", "/api/v1/sessions/{session_id}/messages", self._route_session_messages)
         self.ipc.register_route("POST", "/api/v1/sessions", self._route_post_sessions)
+        self.ipc.register_route(
+            "POST", "/api/v1/sessions/{session_id}/activate", self._route_activate_session
+        )
+        self.ipc.register_route("PATCH", "/api/v1/sessions/{session_id}", self._route_patch_session)
         self.ipc.register_route("POST", "/api/v1/sessions/{session_id}/messages", self._route_post_message)
         self.ipc.register_route("DELETE", "/api/v1/sessions/{session_id}", self._route_delete_session)
         self.ipc.register_route("POST", "/api/v1/chat", self._route_chat)
@@ -1394,7 +1448,45 @@ class ByteyDaemon:
         title = str((body or {}).get("title") or "New Chat")
         session = await self.storage.create_session(title=title)
         self._active_session_id = str(session["id"])
+        await self._broadcast_sessions_updated()
         return {**session, "session": session}
+
+    async def _route_activate_session(self, req: IPCRequest) -> dict[str, Any]:
+        sid = req.path_params["session_id"]
+        session = await self.storage.get_session(sid)
+        if session is None:
+            return IPCResponse(  # type: ignore[return-value]
+                status=404,
+                body={"error": f"Session not found: {sid}"},
+            )
+        self._active_session_id = sid
+        messages = await self.storage.list_messages(sid, limit=100)
+        await self.ipc.connection_manager.broadcast(
+            {
+                "type": "session_activated",
+                "session_id": sid,
+                "messages": messages,
+            }
+        )
+        return {"active_session_id": sid, "messages": messages}
+
+    async def _route_patch_session(self, req: IPCRequest) -> dict[str, Any]:
+        sid = req.path_params["session_id"]
+        body = req.json()
+        raw_title = body.get("title") if isinstance(body, dict) else None
+        if not isinstance(raw_title, str) or not raw_title.strip():
+            return IPCResponse(  # type: ignore[return-value]
+                status=400,
+                body={"error": "title must be a non-empty string"},
+            )
+        updated = await self.storage.rename_session(sid, raw_title)
+        if updated is None:
+            return IPCResponse(  # type: ignore[return-value]
+                status=404,
+                body={"error": f"Session not found: {sid}"},
+            )
+        await self._broadcast_sessions_updated()
+        return {"session": updated}
 
     async def _route_delete_session(self, req: IPCRequest) -> dict[str, Any]:
         sid = req.path_params["session_id"]
@@ -1402,6 +1494,7 @@ class ByteyDaemon:
         if self._active_session_id == sid:
             self._active_session_id = None
         new_sid = await self._ensure_active_session()
+        await self._broadcast_sessions_updated()
         return {"ok": True, "active_session_id": new_sid}
 
     async def _route_post_message(self, req: IPCRequest) -> dict[str, Any]:

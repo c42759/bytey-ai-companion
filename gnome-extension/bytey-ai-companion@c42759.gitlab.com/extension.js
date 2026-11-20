@@ -65,6 +65,8 @@ export default class ByteyExtension extends Extension {
         };
 
         this._activeSessionId = null;
+        this._sessions = [];
+        this._daemonState = 'IDLE';
         this._wsConn = null;
         this._wsSignalIds = [];
         this._wsBackoffMs = WS_BACKOFF_MIN_MS;
@@ -100,6 +102,14 @@ export default class ByteyExtension extends Extension {
             onOpenChanged: isOpen => {
                 if (isOpen)
                     this._refreshActiveSession().catch(() => {});
+            },
+            onSelectSession: sessionId => this._handleSelectSession(sessionId),
+            onDeleteSession: sessionId => this._handleDeleteSession(sessionId),
+            onRenameSession: (sessionId, title) => this._handleRenameSession(sessionId, title),
+            onCreateSession: () => this._handleNewChat(),
+            onToggleSidebar: isOpen => {
+                if (isOpen)
+                    this._refreshSessionsList().catch(() => {});
             },
         });
 
@@ -200,6 +210,8 @@ export default class ByteyExtension extends Extension {
         this._positionManager = null;
         this._config = null;
         this._activeSessionId = null;
+        this._sessions = [];
+        this._daemonState = 'IDLE';
         this._baseUrl = null;
         this._wsUrl = null;
         this._wsSignalIds = [];
@@ -295,6 +307,7 @@ export default class ByteyExtension extends Extension {
 
         if (Array.isArray(payload)) {
             sessionId = payload[0]?.id ?? null;
+            this._sessions = payload;
         } else if (typeof payload === 'object') {
             sessionId = payload.active_session_id ??
                 payload.session?.id ??
@@ -303,6 +316,8 @@ export default class ByteyExtension extends Extension {
                 null;
             if (Array.isArray(payload.messages))
                 messages = payload.messages;
+            if (Array.isArray(payload.sessions))
+                this._sessions = payload.sessions;
         }
 
         this._activeSessionId = sessionId;
@@ -321,6 +336,114 @@ export default class ByteyExtension extends Extension {
 
         if (!this._disabled && Array.isArray(messages))
             this._drawer?.setMessages(messages);
+
+        await this._refreshSessionsList();
+    }
+
+    async _refreshSessionsList() {
+        const resp = await this._httpJson('GET', '/api/v1/sessions');
+        if (this._disabled || !resp.ok || !resp.data)
+            return;
+
+        const payload = resp.data;
+        const sessions = Array.isArray(payload)
+            ? payload
+            : (Array.isArray(payload.sessions) ? payload.sessions : []);
+        this._sessions = sessions;
+
+        if (!this._activeSessionId && payload && typeof payload === 'object') {
+            this._activeSessionId = payload.active_session_id ??
+                sessions[0]?.id ??
+                null;
+        }
+
+        this._drawer?.setSessions(this._sessions, this._activeSessionId);
+    }
+
+    _isDaemonBusy() {
+        const state = String(this._daemonState ?? this._islandWidget?.state ?? 'IDLE').toUpperCase();
+        return state === 'THINKING' || state === 'TOOL_CALLING' || state === 'SPEAKING';
+    }
+
+    async _handleSelectSession(sessionId) {
+        if (this._disabled || !sessionId || this._isDaemonBusy())
+            return;
+
+        if (sessionId === this._activeSessionId) {
+            this._drawer?.focusInput();
+            return;
+        }
+
+        const resp = await this._httpJson(
+            'POST',
+            `/api/v1/sessions/${encodeURIComponent(sessionId)}/activate`,
+            {}
+        );
+        if (this._disabled || !resp.ok || !resp.data)
+            return;
+
+        const nextId = resp.data.active_session_id ?? sessionId;
+        const messages = Array.isArray(resp.data.messages) ? resp.data.messages : [];
+        this._activeSessionId = nextId;
+        this._drawer?.setSessions(this._sessions, this._activeSessionId);
+        this._drawer?.loadMessages(messages);
+        this._drawer?.focusInput();
+    }
+
+    async _handleDeleteSession(sessionId) {
+        if (this._disabled || !sessionId)
+            return;
+
+        const wasActive = sessionId === this._activeSessionId;
+        if (wasActive && this._isDaemonBusy())
+            return;
+
+        const resp = await this._httpJson(
+            'DELETE',
+            `/api/v1/sessions/${encodeURIComponent(sessionId)}`
+        );
+        if (this._disabled || !resp.ok)
+            return;
+
+        const nextActiveId = resp.data?.active_session_id ?? null;
+        if (wasActive || (nextActiveId && nextActiveId !== this._activeSessionId)) {
+            this._activeSessionId = nextActiveId;
+            if (this._activeSessionId) {
+                const msgResp = await this._httpJson(
+                    'GET',
+                    `/api/v1/sessions/${encodeURIComponent(this._activeSessionId)}/messages`
+                );
+                if (!this._disabled && msgResp.ok && msgResp.data) {
+                    const messages = Array.isArray(msgResp.data)
+                        ? msgResp.data
+                        : (msgResp.data.messages ?? []);
+                    this._drawer?.loadMessages(messages);
+                }
+            } else {
+                this._drawer?.clearMessages();
+            }
+        }
+
+        await this._refreshSessionsList();
+    }
+
+    async _handleRenameSession(sessionId, title) {
+        if (this._disabled || !sessionId)
+            return;
+
+        const cleanTitle = typeof title === 'string' ? title.trim() : '';
+        if (!cleanTitle)
+            return;
+
+        const resp = await this._httpJson(
+            'PATCH',
+            `/api/v1/sessions/${encodeURIComponent(sessionId)}`,
+            {title: cleanTitle}
+        );
+        if (this._disabled || !resp.ok)
+            return;
+
+        await this._refreshSessionsList();
     }
 
     async _patchConfig(patch) {
@@ -378,6 +501,9 @@ export default class ByteyExtension extends Extension {
     }
 
     async _handleNewChat() {
+        if (this._disabled || this._isDaemonBusy())
+            return;
+
         let resp = await this._httpJson('POST', '/api/v1/sessions', {title: 'New Chat'});
         if (!resp.ok && resp.status === 405 && this._activeSessionId) {
             resp = await this._httpJson(
@@ -389,6 +515,8 @@ export default class ByteyExtension extends Extension {
             if (resp.ok && resp.data)
                 this._activeSessionId = resp.data.id ?? resp.data.session?.id ?? null;
             this._drawer?.clearMessages();
+            await this._refreshSessionsList();
+            this._drawer?.focusInput();
         }
     }
 
@@ -628,8 +756,9 @@ export default class ByteyExtension extends Extension {
         switch (event.type) {
         case 'state_changed': {
             const state = event.state ?? 'IDLE';
+            this._daemonState = String(state).toUpperCase();
             this._islandWidget?.setState(state, event.emotion, event.label);
-            this._drawer?.setListening(String(state).toUpperCase() === 'LISTENING');
+            this._drawer?.setListening(this._daemonState === 'LISTENING');
             break;
         }
         case 'audio_level': {
@@ -665,6 +794,42 @@ export default class ByteyExtension extends Extension {
         case 'position_updated': {
             const visuals = event.visuals ?? event;
             this._applyConfig({visuals});
+            break;
+        }
+        case 'sessions_updated': {
+            if (Array.isArray(event.sessions)) {
+                this._sessions = event.sessions;
+                if (event.active_session_id && event.active_session_id !== this._activeSessionId) {
+                    this._activeSessionId = event.active_session_id;
+                    if (Array.isArray(event.messages))
+                        this._drawer?.loadMessages(event.messages);
+                }
+                this._drawer?.setSessions(this._sessions, this._activeSessionId);
+            } else {
+                this._refreshSessionsList().catch(() => {});
+            }
+            break;
+        }
+        case 'session_activated': {
+            const nextId = event.session_id ?? event.active_session_id ?? null;
+            if (nextId)
+                this._activeSessionId = nextId;
+            if (Array.isArray(event.messages)) {
+                this._drawer?.loadMessages(event.messages);
+            } else if (this._activeSessionId) {
+                this._httpJson(
+                    'GET',
+                    `/api/v1/sessions/${encodeURIComponent(this._activeSessionId)}/messages`
+                ).then(msgResp => {
+                    if (!this._disabled && msgResp.ok && msgResp.data) {
+                        const msgs = Array.isArray(msgResp.data)
+                            ? msgResp.data
+                            : (msgResp.data.messages ?? []);
+                        this._drawer?.loadMessages(msgs);
+                    }
+                }).catch(() => {});
+            }
+            this._drawer?.setSessions(this._sessions, this._activeSessionId);
             break;
         }
         case 'shutdown': {

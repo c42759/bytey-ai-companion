@@ -13,6 +13,8 @@ const DRAWER_MIN_WIDTH = 260;
 const DRAWER_MAX_WIDTH = 900;
 const DRAWER_MIN_HEIGHT = 220;
 const DRAWER_MAX_HEIGHT = 900;
+const SIDEBAR_WIDTH = 210;
+const SIDEBAR_ANIM_DURATION_MS = 220;
 
 const DENSITY_ORDER = ['compact', 'comfortable', 'spacious'];
 const DENSITY_LABELS = {
@@ -54,12 +56,18 @@ export class TranscriptDrawer {
      * @param {(width: number, height: number) => void} [callbacks.onResizeCommit]
      * @param {(density: string) => void} [callbacks.onDensityChange]
      * @param {(isOpen: boolean) => void} [callbacks.onOpenChanged]
+     * @param {(sessionId: string) => void} [callbacks.onSelectSession]
+     * @param {(sessionId: string) => void} [callbacks.onDeleteSession]
+     * @param {(sessionId: string, newTitle: string) => void} [callbacks.onRenameSession]
+     * @param {() => void} [callbacks.onCreateSession]
+     * @param {(isOpen: boolean) => void} [callbacks.onToggleSidebar]
      */
     constructor(positionManager, callbacks = {}) {
         this._positionManager = positionManager;
         this._callbacks = callbacks;
 
         this._isOpen = false;
+        this._sidebarOpen = false;
         this._destroyed = false;
         this._connectionState = 'disconnected';
         this._online = false;
@@ -78,11 +86,16 @@ export class TranscriptDrawer {
         this._resizeStartSize = [DRAWER_WIDTH_FALLBACK, DRAWER_HEIGHT_FALLBACK];
 
         this._messages = [];
+        this._sessions = [];
+        this._activeSessionId = null;
+        this._pendingDeleteSessionId = null;
+        this._editingSessionId = null;
         this._messageWidgets = new Map();
         this._toolWidgets = new Map();
         this._emptyStateActor = null;
         this._scrollIdleId = 0;
         this._focusIdleId = 0;
+        this._renameFocusIdleId = 0;
         this._signalIds = [];
 
         this._container = new St.BoxLayout({
@@ -97,8 +110,7 @@ export class TranscriptDrawer {
         });
 
         this._buildHeader();
-        this._buildMessageArea();
-        this._buildFooter();
+        this._buildBody();
 
         this._connect(this._container, 'key-press-event', (_actor, event) => {
             if (event.get_key_symbol() === Clutter.KEY_Escape) {
@@ -145,6 +157,22 @@ export class TranscriptDrawer {
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
+
+        this._sidebarToggleIcon = new St.Icon({
+            icon_name: 'sidebar-show-symbolic',
+            icon_size: DENSITY_ICON_SIZES[this._density].close,
+        });
+        this._sidebarToggleBtn = new St.Button({
+            style_class: 'bytey-sidebar-toggle-btn',
+            can_focus: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            accessible_name: 'Toggle chat history',
+            child: this._sidebarToggleIcon,
+        });
+        this._connect(this._sidebarToggleBtn, 'clicked', () => {
+            this.toggleSidebar();
+        });
+        header.add_child(this._sidebarToggleBtn);
 
         this._providerLabel = new St.Label({
             style_class: 'bytey-provider-pill-label',
@@ -224,7 +252,87 @@ export class TranscriptDrawer {
         this._container.add_child(header);
     }
 
-    _buildMessageArea() {
+    _buildBody() {
+        this._bodyRow = new St.BoxLayout({
+            style_class: 'bytey-drawer-body',
+            orientation: Clutter.Orientation.HORIZONTAL,
+            x_expand: true,
+            y_expand: true,
+        });
+
+        this._sidebarBox = new St.BoxLayout({
+            style_class: 'bytey-chat-sidebar',
+            orientation: Clutter.Orientation.VERTICAL,
+            width: SIDEBAR_WIDTH,
+            visible: false,
+            clip_to_allocation: true,
+            x_expand: false,
+            y_expand: true,
+        });
+
+        this._sidebarNewIcon = new St.Icon({
+            icon_name: 'list-add-symbolic',
+            icon_size: DENSITY_ICON_SIZES[this._density].close,
+        });
+        const newChatContent = new St.BoxLayout({
+            style_class: 'bytey-sidebar-new-content',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        newChatContent.add_child(this._sidebarNewIcon);
+        newChatContent.add_child(new St.Label({
+            style_class: 'bytey-sidebar-new-label',
+            text: 'New Chat',
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+
+        const newChatBtn = new St.Button({
+            style_class: 'bytey-sidebar-new-btn',
+            can_focus: true,
+            x_expand: true,
+            child: newChatContent,
+        });
+        this._connect(newChatBtn, 'clicked', () => {
+            if (this._callbacks.onCreateSession)
+                this._callbacks.onCreateSession();
+            else
+                this._callbacks.onClearChat?.();
+        });
+        this._sidebarBox.add_child(newChatBtn);
+
+        this._sessionsList = new St.BoxLayout({
+            style_class: 'bytey-sessions-list',
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+        });
+        this._sessionsScroll = new St.ScrollView({
+            style_class: 'bytey-sessions-scroll',
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+            enable_mouse_scrolling: true,
+            overlay_scrollbars: false,
+            x_expand: true,
+            y_expand: true,
+        });
+        this._sessionsScroll.set_child(this._sessionsList);
+        this._sidebarBox.add_child(this._sessionsScroll);
+
+        this._chatColumn = new St.BoxLayout({
+            style_class: 'bytey-chat-column',
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+            y_expand: true,
+        });
+
+        this._buildMessageArea(this._chatColumn);
+        this._buildFooter(this._chatColumn);
+
+        this._bodyRow.add_child(this._sidebarBox);
+        this._bodyRow.add_child(this._chatColumn);
+        this._container.add_child(this._bodyRow);
+    }
+
+    _buildMessageArea(parent) {
         this._messagesBox = new St.BoxLayout({
             style_class: 'bytey-messages',
             orientation: Clutter.Orientation.VERTICAL,
@@ -242,10 +350,10 @@ export class TranscriptDrawer {
         });
         this._scrollView.set_child(this._messagesBox);
 
-        this._container.add_child(this._scrollView);
+        parent.add_child(this._scrollView);
     }
 
-    _buildFooter() {
+    _buildFooter(parent) {
         const footer = new St.BoxLayout({
             style_class: 'bytey-drawer-footer',
             x_expand: true,
@@ -360,7 +468,7 @@ export class TranscriptDrawer {
         this._connect(this._resizeHandle, 'button-release-event', (_a, ev) => this._onResizeRelease(ev));
         footer.add_child(this._resizeHandle);
 
-        this._container.add_child(footer);
+        parent.add_child(footer);
         this._syncEntryHeight();
     }
 
@@ -518,13 +626,8 @@ export class TranscriptDrawer {
                 sizeChanged = true;
             }
         }
-        if (sizeChanged && this._container) {
-            this._container.set_size(this._drawerWidth, this._drawerHeight);
-            if (this._isOpen) {
-                const b = this._lastIslandBounds;
-                this.updatePosition(b.x, b.y, b.width, b.height, this._monitorIndex);
-            }
-        }
+        if (sizeChanged && this._container)
+            this._applyDrawerSize();
 
         const rawDensity = String(config.visuals?.chat_density ?? config.chat_density ?? '').toLowerCase().trim();
         if (DENSITY_ORDER.includes(rawDensity))
@@ -551,6 +654,10 @@ export class TranscriptDrawer {
         const sizes = DENSITY_ICON_SIZES[density] ?? DENSITY_ICON_SIZES.comfortable;
         if (this._closeIcon)
             this._closeIcon.icon_size = sizes.close;
+        if (this._sidebarToggleIcon)
+            this._sidebarToggleIcon.icon_size = sizes.close;
+        if (this._sidebarNewIcon)
+            this._sidebarNewIcon.icon_size = sizes.close;
         if (this._sendIcon)
             this._sendIcon.icon_size = sizes.mic;
         if (this._micIcon)
@@ -560,6 +667,7 @@ export class TranscriptDrawer {
             if (rec.replayIcon)
                 rec.replayIcon.icon_size = sizes.replay;
         }
+        this._renderSessions();
 
         if (notifyCallback)
             this._callbacks.onDensityChange?.(density);
@@ -607,8 +715,7 @@ export class TranscriptDrawer {
         if (nextW !== this._drawerWidth || nextH !== this._drawerHeight) {
             this._drawerWidth = nextW;
             this._drawerHeight = nextH;
-            this._container.set_size(nextW, nextH);
-            this.updatePosition(b.x, b.y, b.width, b.height, this._monitorIndex);
+            this._applyDrawerSize();
         }
         return Clutter.EVENT_STOP;
     }
@@ -663,6 +770,409 @@ export class TranscriptDrawer {
         }
 
         this._scheduleScrollToBottom();
+    }
+
+    /**
+     * Load a full list of messages into the transcript view.
+     *
+     * @param {Array<object>} messages
+     */
+    loadMessages(messages) {
+        this.setMessages(messages);
+    }
+
+    /**
+     * Toggle or explicitly set the chat history sidebar visibility.
+     *
+     * @param {boolean} [forceState]
+     */
+    toggleSidebar(forceState) {
+        if (this._destroyed)
+            return;
+
+        const nextOpen = typeof forceState === 'boolean' ? forceState : !this._sidebarOpen;
+        this._sidebarOpen = nextOpen;
+
+        if (this._sidebarToggleBtn) {
+            if (this._sidebarOpen)
+                this._sidebarToggleBtn.add_style_class_name('bytey-sidebar-toggle-active');
+            else
+                this._sidebarToggleBtn.remove_style_class_name('bytey-sidebar-toggle-active');
+        }
+
+        this._sidebarBox?.remove_all_transitions();
+        this._container?.remove_all_transitions();
+
+        if (!this._isOpen || !this._container) {
+            if (this._sidebarBox) {
+                this._sidebarBox.visible = nextOpen;
+                this._sidebarBox.width = SIDEBAR_WIDTH;
+                this._sidebarBox.opacity = 255;
+            }
+            this._applyDrawerSize();
+            this._syncEntryHeight();
+            this._callbacks.onToggleSidebar?.(this._sidebarOpen);
+            return;
+        }
+
+        const {width: targetW, height: targetH} = this._getEffectiveSize();
+        const b = this._lastIslandBounds;
+        const clamped = this._computeClampedPosition(
+            targetW,
+            targetH,
+            b.x,
+            b.y,
+            b.width,
+            b.height,
+            this._monitorIndex
+        );
+
+        if (this._sidebarBox) {
+            if (nextOpen) {
+                if (!this._sidebarBox.visible) {
+                    this._sidebarBox.width = 0;
+                    this._sidebarBox.opacity = 0;
+                    this._sidebarBox.visible = true;
+                }
+                this._sidebarBox.ease({
+                    width: SIDEBAR_WIDTH,
+                    opacity: 255,
+                    duration: SIDEBAR_ANIM_DURATION_MS,
+                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                });
+            } else if (this._sidebarBox.visible) {
+                this._sidebarBox.ease({
+                    width: 0,
+                    opacity: 0,
+                    duration: SIDEBAR_ANIM_DURATION_MS,
+                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                    onComplete: () => {
+                        if (this._destroyed || this._sidebarOpen !== false || !this._sidebarBox)
+                            return;
+                        this._sidebarBox.visible = false;
+                        this._sidebarBox.width = SIDEBAR_WIDTH;
+                        this._sidebarBox.opacity = 255;
+                    },
+                });
+            }
+        }
+
+        this._container.ease({
+            width: targetW,
+            x: clamped.x,
+            duration: SIDEBAR_ANIM_DURATION_MS,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            onComplete: () => {
+                if (this._destroyed || this._sidebarOpen !== nextOpen)
+                    return;
+                this._syncEntryHeight();
+            },
+        });
+
+        this._syncEntryHeight();
+        this._callbacks.onToggleSidebar?.(this._sidebarOpen);
+    }
+
+    /**
+     * Populate the sidebar sessions list and highlight the active session.
+     *
+     * @param {Array<object>} sessions
+     * @param {string|null} [activeSessionId]
+     */
+    setSessions(sessions, activeSessionId = this._activeSessionId) {
+        if (this._destroyed)
+            return;
+        this._sessions = Array.isArray(sessions) ? sessions : [];
+        if (activeSessionId !== undefined)
+            this._activeSessionId = activeSessionId;
+        this._renderSessions();
+    }
+
+    /**
+     * Focus the text entry on the next idle tick when the drawer is open.
+     */
+    focusInput() {
+        if (this._destroyed || !this._isOpen || !this._entry)
+            return;
+        if (this._focusIdleId) {
+            GLib.Source.remove(this._focusIdleId);
+            this._focusIdleId = 0;
+        }
+        this._focusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._focusIdleId = 0;
+            if (!this._destroyed && this._isOpen && this._entry)
+                this._entry.clutter_text.grab_key_focus();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _getEffectiveSize() {
+        const area = this._positionManager.getWorkArea(this._monitorIndex);
+        const maxAvailW = Math.max(DRAWER_MIN_WIDTH, (area?.width ?? 1920) - 16);
+        const maxAvailH = Math.max(DRAWER_MIN_HEIGHT, (area?.height ?? 1080) - 16);
+
+        let targetW = this._drawerWidth;
+        if (this._sidebarOpen) {
+            // Split inside wide drawers (>= 520px), otherwise expand by sidebar width.
+            targetW = this._drawerWidth >= 520
+                ? this._drawerWidth
+                : this._drawerWidth + SIDEBAR_WIDTH;
+        }
+
+        return {
+            width: Math.min(maxAvailW, Math.max(DRAWER_MIN_WIDTH, targetW)),
+            height: Math.min(maxAvailH, Math.max(DRAWER_MIN_HEIGHT, this._drawerHeight)),
+        };
+    }
+
+    _applyDrawerSize() {
+        if (this._destroyed || !this._container)
+            return;
+        const {width, height} = this._getEffectiveSize();
+        this._container.set_size(width, height);
+        if (this._isOpen) {
+            const b = this._lastIslandBounds;
+            this.updatePosition(b.x, b.y, b.width, b.height, this._monitorIndex);
+        }
+    }
+
+    _renderSessions() {
+        if (this._destroyed || !this._sessionsList)
+            return;
+
+        if (this._renameFocusIdleId) {
+            GLib.Source.remove(this._renameFocusIdleId);
+            this._renameFocusIdleId = 0;
+        }
+
+        this._sessionsList.destroy_all_children();
+
+        if (this._sessions.length === 0) {
+            const empty = new St.Label({
+                style_class: 'bytey-sidebar-empty',
+                text: 'No saved chats',
+                x_expand: true,
+                x_align: Clutter.ActorAlign.CENTER,
+            });
+            this._sessionsList.add_child(empty);
+            return;
+        }
+
+        const iconSizes = DENSITY_ICON_SIZES[this._density] ?? DENSITY_ICON_SIZES.comfortable;
+
+        for (const session of this._sessions) {
+            if (!session || !session.id)
+                continue;
+            const sid = String(session.id);
+            const isActive = sid === this._activeSessionId;
+            const isEditing = sid === this._editingSessionId;
+            const isPendingDelete = sid === this._pendingDeleteSessionId;
+
+            const row = new St.BoxLayout({
+                style_class: isActive
+                    ? 'bytey-session-row bytey-session-row-active'
+                    : 'bytey-session-row',
+                orientation: Clutter.Orientation.HORIZONTAL,
+                x_expand: true,
+                reactive: true,
+            });
+
+            const textCol = new St.BoxLayout({
+                orientation: Clutter.Orientation.VERTICAL,
+                x_expand: true,
+                y_align: Clutter.ActorAlign.CENTER,
+            });
+
+            const subLabel = new St.Label({
+                style_class: 'bytey-session-subtitle',
+                text: this._formatSessionSubtitle(session),
+                x_align: Clutter.ActorAlign.START,
+                x_expand: true,
+            });
+            subLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            subLabel.clutter_text.single_line_mode = true;
+
+            if (isEditing) {
+                const currentTitle = String(session.title || 'New Chat');
+                const titleEntry = new St.Entry({
+                    style_class: 'bytey-session-title-entry',
+                    text: currentTitle,
+                    can_focus: true,
+                    x_expand: true,
+                });
+                titleEntry.clutter_text.connect('activate', () => {
+                    if (this._destroyed)
+                        return;
+                    const newTitle = titleEntry.get_text().trim();
+                    this._editingSessionId = null;
+                    if (newTitle && newTitle !== currentTitle.trim())
+                        this._callbacks.onRenameSession?.(sid, newTitle);
+                    this._renderSessions();
+                });
+                titleEntry.connect('key-press-event', (_actor, event) => {
+                    if (event.get_key_symbol() === Clutter.KEY_Escape) {
+                        this._editingSessionId = null;
+                        this._renderSessions();
+                        return Clutter.EVENT_STOP;
+                    }
+                    return Clutter.EVENT_PROPAGATE;
+                });
+
+                textCol.add_child(titleEntry);
+                textCol.add_child(subLabel);
+                row.add_child(textCol);
+
+                this._renameFocusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    this._renameFocusIdleId = 0;
+                    if (!this._destroyed && this._editingSessionId === sid && titleEntry.clutter_text) {
+                        titleEntry.clutter_text.grab_key_focus();
+                        titleEntry.clutter_text.set_selection(0, -1);
+                    }
+                    return GLib.SOURCE_REMOVE;
+                });
+            } else {
+                const titleLabel = new St.Label({
+                    style_class: 'bytey-session-title',
+                    text: String(session.title || 'New Chat'),
+                    x_align: Clutter.ActorAlign.START,
+                    x_expand: true,
+                });
+                titleLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+                titleLabel.clutter_text.single_line_mode = true;
+
+                textCol.add_child(titleLabel);
+                textCol.add_child(subLabel);
+
+                const selectBtn = new St.Button({
+                    style_class: 'bytey-session-select-btn',
+                    can_focus: true,
+                    x_expand: true,
+                    child: textCol,
+                });
+                selectBtn.connect('clicked', () => {
+                    this._callbacks.onSelectSession?.(sid);
+                });
+                row.add_child(selectBtn);
+            }
+
+            if (isPendingDelete) {
+                const confirmBtn = new St.Button({
+                    style_class: 'bytey-session-confirm-delete-btn',
+                    can_focus: true,
+                    y_align: Clutter.ActorAlign.CENTER,
+                    accessible_name: 'Confirm delete chat',
+                    child: new St.Icon({
+                        icon_name: 'object-select-symbolic',
+                        icon_size: iconSizes.replay,
+                    }),
+                });
+                confirmBtn.connect('clicked', () => {
+                    this._pendingDeleteSessionId = null;
+                    this._callbacks.onDeleteSession?.(sid);
+                    this._renderSessions();
+                });
+
+                const cancelBtn = new St.Button({
+                    style_class: 'bytey-session-cancel-delete-btn',
+                    can_focus: true,
+                    y_align: Clutter.ActorAlign.CENTER,
+                    accessible_name: 'Cancel delete chat',
+                    child: new St.Icon({
+                        icon_name: 'window-close-symbolic',
+                        icon_size: iconSizes.replay,
+                    }),
+                });
+                cancelBtn.connect('clicked', () => {
+                    this._pendingDeleteSessionId = null;
+                    this._renderSessions();
+                });
+
+                row.add_child(confirmBtn);
+                row.add_child(cancelBtn);
+            } else {
+                const editBtn = new St.Button({
+                    style_class: 'bytey-session-edit-btn',
+                    can_focus: true,
+                    y_align: Clutter.ActorAlign.CENTER,
+                    accessible_name: 'Rename chat',
+                    child: new St.Icon({
+                        icon_name: 'document-edit-symbolic',
+                        icon_size: iconSizes.replay,
+                    }),
+                });
+                editBtn.connect('clicked', () => {
+                    this._editingSessionId = sid;
+                    this._pendingDeleteSessionId = null;
+                    this._renderSessions();
+                });
+
+                const delBtn = new St.Button({
+                    style_class: 'bytey-session-delete-btn',
+                    can_focus: true,
+                    y_align: Clutter.ActorAlign.CENTER,
+                    accessible_name: 'Delete chat',
+                    child: new St.Icon({
+                        icon_name: 'user-trash-symbolic',
+                        icon_size: iconSizes.replay,
+                    }),
+                });
+                delBtn.connect('clicked', () => {
+                    this._pendingDeleteSessionId = sid;
+                    this._editingSessionId = null;
+                    this._renderSessions();
+                });
+
+                row.add_child(editBtn);
+                row.add_child(delBtn);
+            }
+
+            this._sessionsList.add_child(row);
+        }
+    }
+
+    _formatSessionSubtitle(session) {
+        const rel = this._formatRelativeTime(session.updated_at ?? session.created_at);
+        const count = Number(session.message_count);
+        if (Number.isFinite(count) && count >= 0) {
+            const countText = `${count} msg${count === 1 ? '' : 's'}`;
+            return rel ? `${rel} · ${countText}` : countText;
+        }
+        const preview = typeof session.preview === 'string' ? session.preview.trim() : '';
+        if (preview)
+            return rel ? `${rel} · ${preview}` : preview;
+        return rel || 'Chat';
+    }
+
+    _formatRelativeTime(rawTs) {
+        if (!rawTs)
+            return '';
+        let ms = NaN;
+        if (typeof rawTs === 'number') {
+            ms = rawTs > 1e12 ? rawTs : rawTs * 1000;
+        } else if (typeof rawTs === 'string') {
+            const parsed = Date.parse(rawTs);
+            if (Number.isFinite(parsed)) {
+                ms = parsed;
+            } else {
+                const num = Number(rawTs);
+                if (Number.isFinite(num))
+                    ms = num > 1e12 ? num : num * 1000;
+            }
+        }
+        if (!Number.isFinite(ms))
+            return '';
+
+        const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+        if (diffSec < 60)
+            return 'just now';
+        const diffMin = Math.floor(diffSec / 60);
+        if (diffMin < 60)
+            return `${diffMin}m ago`;
+        const diffHr = Math.floor(diffMin / 60);
+        if (diffHr < 24)
+            return `${diffHr}h ago`;
+        const diffDay = Math.floor(diffHr / 24);
+        return `${diffDay}d ago`;
     }
 
     /**
@@ -794,27 +1304,38 @@ export class TranscriptDrawer {
      * @param {number} islandH
      * @param {number} [monitorIndex]
      */
-    updatePosition(islandX, islandY, islandW, islandH, monitorIndex = this._monitorIndex) {
-        if (this._destroyed || !this._container)
-            return;
-
-        this._monitorIndex = monitorIndex;
-        this._lastIslandBounds = {x: islandX, y: islandY, width: islandW, height: islandH};
-        const drawerW = this._drawerWidth;
-        const drawerH = this._drawerHeight;
-        this._container.set_size(drawerW, drawerH);
-
+    _computeClampedPosition(drawerW, drawerH, islandX, islandY, islandW, islandH, monitorIndex) {
         const inLowerHalf = this._positionManager.isInLowerHalf(islandY, islandH, monitorIndex);
         const targetX = Math.round(islandX + islandW / 2 - drawerW / 2);
         const targetY = inLowerHalf
             ? Math.round(islandY - drawerH - DRAWER_GAP_PX)
             : Math.round(islandY + islandH + DRAWER_GAP_PX);
 
-        const clamped = this._positionManager.clampToMonitor(
+        return this._positionManager.clampToMonitor(
             targetX,
             targetY,
             drawerW,
             drawerH,
+            monitorIndex
+        );
+    }
+
+    updatePosition(islandX, islandY, islandW, islandH, monitorIndex = this._monitorIndex) {
+        if (this._destroyed || !this._container)
+            return;
+
+        this._monitorIndex = monitorIndex;
+        this._lastIslandBounds = {x: islandX, y: islandY, width: islandW, height: islandH};
+        const {width: drawerW, height: drawerH} = this._getEffectiveSize();
+        this._container.set_size(drawerW, drawerH);
+
+        const clamped = this._computeClampedPosition(
+            drawerW,
+            drawerH,
+            islandX,
+            islandY,
+            islandW,
+            islandH,
             monitorIndex
         );
         this._container.set_position(clamped.x, clamped.y);
@@ -858,10 +1379,16 @@ export class TranscriptDrawer {
         if (this._destroyed || !this._isOpen)
             return;
         this._isOpen = false;
+        this._pendingDeleteSessionId = null;
+        this._editingSessionId = null;
         this._hideStatusTooltip();
         if (this._focusIdleId) {
             GLib.Source.remove(this._focusIdleId);
             this._focusIdleId = 0;
+        }
+        if (this._renameFocusIdleId) {
+            GLib.Source.remove(this._renameFocusIdleId);
+            this._renameFocusIdleId = 0;
         }
         if (this._container)
             this._container.visible = false;
@@ -903,6 +1430,14 @@ export class TranscriptDrawer {
             GLib.Source.remove(this._focusIdleId);
             this._focusIdleId = 0;
         }
+        if (this._renameFocusIdleId) {
+            GLib.Source.remove(this._renameFocusIdleId);
+            this._renameFocusIdleId = 0;
+        }
+        this._pendingDeleteSessionId = null;
+        this._editingSessionId = null;
+        this._sidebarBox?.remove_all_transitions();
+        this._container?.remove_all_transitions();
 
         for (const [obj, id] of this._signalIds) {
             try {
@@ -930,6 +1465,16 @@ export class TranscriptDrawer {
         }
         this._messagesBox = null;
         this._scrollView = null;
+        this._bodyRow = null;
+        this._sidebarBox = null;
+        this._sidebarToggleBtn = null;
+        this._sidebarToggleIcon = null;
+        this._sidebarNewIcon = null;
+        this._sessionsScroll = null;
+        this._sessionsList = null;
+        this._chatColumn = null;
+        this._sessions = [];
+        this._activeSessionId = null;
         this._entry = null;
         this._entryScroll = null;
         this._sendIcon = null;

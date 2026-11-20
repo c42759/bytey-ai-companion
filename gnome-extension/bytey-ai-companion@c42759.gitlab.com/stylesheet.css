@@ -174,6 +174,7 @@
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.55);
 }
 
+.bytey-sidebar-toggle-btn,
 .bytey-density-btn,
 .bytey-clear-btn,
 .bytey-close-btn {
@@ -188,15 +189,172 @@
   transition: 120ms ease;
 }
 
+.bytey-sidebar-toggle-btn:hover,
 .bytey-density-btn:hover,
 .bytey-clear-btn:hover,
 .bytey-close-btn:hover {
   background-color: rgba(255, 255, 255, 0.16);
 }
 
+.bytey-sidebar-toggle-btn,
 .bytey-close-btn {
   width: 26px;
   padding: 0;
+}
+
+.bytey-sidebar-toggle-active {
+  background-color: rgba(56, 189, 248, 0.22);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #7dd3fc;
+}
+
+/* Collapsible Chat Sidebar */
+
+.bytey-drawer-body {
+  spacing: 8px;
+}
+
+.bytey-chat-sidebar {
+  spacing: 6px;
+  padding-right: 8px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.bytey-chat-column {
+  spacing: 8px;
+}
+
+.bytey-sidebar-new-btn {
+  background-color: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 8px;
+  height: 28px;
+  padding: 0 10px;
+  color: #e0f2fe;
+  font-size: 8.5pt;
+  font-weight: 600;
+  transition: 120ms ease;
+}
+
+.bytey-sidebar-new-btn:hover {
+  background-color: rgba(56, 189, 248, 0.24);
+  border-color: rgba(56, 189, 248, 0.55);
+}
+
+.bytey-sidebar-new-content {
+  spacing: 6px;
+}
+
+.bytey-sidebar-new-label {
+  font-size: 8.5pt;
+  font-weight: 600;
+  color: #e0f2fe;
+}
+
+.bytey-sessions-scroll {
+  min-height: 100px;
+}
+
+.bytey-sessions-list {
+  spacing: 4px;
+  padding-right: 2px;
+}
+
+.bytey-sidebar-empty {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 8.5pt;
+  padding: 16px 8px;
+}
+
+.bytey-session-row {
+  border-radius: 8px;
+  padding: 5px 6px;
+  spacing: 4px;
+  background-color: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  transition: 120ms ease;
+}
+
+.bytey-session-row:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.bytey-session-row-active {
+  background-color: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.38);
+}
+
+.bytey-session-row-active:hover {
+  background-color: rgba(56, 189, 248, 0.22);
+  border-color: rgba(56, 189, 248, 0.5);
+}
+
+.bytey-session-select-btn {
+  padding: 0;
+  border: none;
+  background-color: transparent;
+}
+
+.bytey-session-title {
+  font-size: 8.5pt;
+  font-weight: 600;
+  color: #f4f4f7;
+}
+
+.bytey-session-title-entry {
+  font-size: 8.5pt;
+  font-weight: 600;
+  color: #f4f4f7;
+  background-color: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(56, 189, 248, 0.55);
+  border-radius: 5px;
+  padding: 2px 5px;
+  caret-color: #38bdf8;
+  selection-background-color: rgba(56, 189, 248, 0.35);
+}
+
+.bytey-session-subtitle {
+  font-size: 7.3pt;
+  color: rgba(255, 255, 255, 0.52);
+}
+
+.bytey-session-edit-btn,
+.bytey-session-delete-btn,
+.bytey-session-confirm-delete-btn,
+.bytey-session-cancel-delete-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  padding: 0;
+  background-color: transparent;
+  color: rgba(255, 255, 255, 0.42);
+  transition: 120ms ease;
+}
+
+.bytey-session-edit-btn:hover {
+  background-color: rgba(56, 189, 248, 0.2);
+  color: #7dd3fc;
+}
+
+.bytey-session-delete-btn:hover {
+  background-color: rgba(255, 90, 95, 0.22);
+  color: #ff6b70;
+}
+
+.bytey-session-confirm-delete-btn {
+  color: #ff6b70;
+  background-color: rgba(255, 90, 95, 0.16);
+}
+
+.bytey-session-confirm-delete-btn:hover {
+  background-color: rgba(255, 90, 95, 0.32);
+  color: #ff8a8e;
+}
+
+.bytey-session-cancel-delete-btn:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+  color: #f4f4f7;
 }
 
 .bytey-scroll {
@@ -469,6 +627,7 @@
 }
 
 .bytey-density-compact .bytey-provider-pill,
+.bytey-density-compact .bytey-sidebar-toggle-btn,
 .bytey-density-compact .bytey-density-btn,
 .bytey-density-compact .bytey-clear-btn,
 .bytey-density-compact .bytey-close-btn {
@@ -478,9 +637,53 @@
   padding: 0 6px;
 }
 
+.bytey-density-compact .bytey-sidebar-toggle-btn,
 .bytey-density-compact .bytey-close-btn {
   width: 22px;
   padding: 0;
+}
+
+.bytey-density-compact .bytey-drawer-body,
+.bytey-density-compact .bytey-chat-column {
+  spacing: 6px;
+}
+
+.bytey-density-compact .bytey-chat-sidebar {
+  spacing: 4px;
+  padding-right: 6px;
+}
+
+.bytey-density-compact .bytey-sidebar-new-btn {
+  height: 24px;
+  border-radius: 6px;
+  padding: 0 8px;
+}
+
+.bytey-density-compact .bytey-sidebar-new-label {
+  font-size: 7.5pt;
+}
+
+.bytey-density-compact .bytey-session-row {
+  padding: 4px 5px;
+  border-radius: 6px;
+}
+
+.bytey-density-compact .bytey-session-title,
+.bytey-density-compact .bytey-session-title-entry {
+  font-size: 7.8pt;
+}
+
+.bytey-density-compact .bytey-session-subtitle {
+  font-size: 6.8pt;
+}
+
+.bytey-density-compact .bytey-session-edit-btn,
+.bytey-density-compact .bytey-session-delete-btn,
+.bytey-density-compact .bytey-session-confirm-delete-btn,
+.bytey-density-compact .bytey-session-cancel-delete-btn {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
 }
 
 .bytey-density-compact .bytey-provider-pill-label {
@@ -569,6 +772,7 @@
 }
 
 .bytey-density-spacious .bytey-provider-pill,
+.bytey-density-spacious .bytey-sidebar-toggle-btn,
 .bytey-density-spacious .bytey-density-btn,
 .bytey-density-spacious .bytey-clear-btn,
 .bytey-density-spacious .bytey-close-btn {
@@ -578,9 +782,53 @@
   padding: 0 11px;
 }
 
+.bytey-density-spacious .bytey-sidebar-toggle-btn,
 .bytey-density-spacious .bytey-close-btn {
   width: 30px;
   padding: 0;
+}
+
+.bytey-density-spacious .bytey-drawer-body,
+.bytey-density-spacious .bytey-chat-column {
+  spacing: 10px;
+}
+
+.bytey-density-spacious .bytey-chat-sidebar {
+  spacing: 8px;
+  padding-right: 10px;
+}
+
+.bytey-density-spacious .bytey-sidebar-new-btn {
+  height: 32px;
+  border-radius: 10px;
+  padding: 0 12px;
+}
+
+.bytey-density-spacious .bytey-sidebar-new-label {
+  font-size: 9.5pt;
+}
+
+.bytey-density-spacious .bytey-session-row {
+  padding: 7px 8px;
+  border-radius: 10px;
+}
+
+.bytey-density-spacious .bytey-session-title,
+.bytey-density-spacious .bytey-session-title-entry {
+  font-size: 9.5pt;
+}
+
+.bytey-density-spacious .bytey-session-subtitle {
+  font-size: 8pt;
+}
+
+.bytey-density-spacious .bytey-session-edit-btn,
+.bytey-density-spacious .bytey-session-delete-btn,
+.bytey-density-spacious .bytey-session-confirm-delete-btn,
+.bytey-density-spacious .bytey-session-cancel-delete-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
 }
 
 .bytey-density-spacious .bytey-provider-pill-label {

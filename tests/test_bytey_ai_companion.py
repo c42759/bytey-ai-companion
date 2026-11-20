@@ -60,9 +60,14 @@ from bytey_ai_companion.config import (  # noqa: E402
     VoiceOutConfig,
     resolve_config_dir,
 )
-from bytey_ai_companion.llm.emotions import EmotionStreamParser, VALID_EMOTIONS  # noqa: E402
+from bytey_ai_companion.llm.emotions import (  # noqa: E402
+    EmotionStreamParser,
+    VALID_EMOTIONS,
+    parse_emotion_prefix,
+    parse_reply_tags,
+)
 from bytey_ai_companion.llm.router import LLMRouter  # noqa: E402
-from bytey_ai_companion.main import ByteyDaemon  # noqa: E402
+from bytey_ai_companion.main import ByteyDaemon, _auto_title_from_prompt  # noqa: E402
 from bytey_ai_companion.mcp_host import (  # noqa: E402
     MCPClientManager,
     from_mcp_servers_json,
@@ -208,6 +213,7 @@ class _MockLLMRouter:
         self.calls: list[dict[str, Any]] = []
         self.tool_trigger_phrase = "use_echo_tool"
         self.tool_arguments: dict[str, Any] | None = None
+        self.next_raw_reply: str | None = None
 
     async def detect_tool_support(
         self,
@@ -301,6 +307,32 @@ class _MockLLMRouter:
                         }
                     ],
                 },
+            }
+
+        if self.next_raw_reply is not None:
+            raw_reply = self.next_raw_reply
+            self.next_raw_reply = None
+            parser = EmotionStreamParser(on_emotion=on_emotion)
+            out_parts: list[str] = []
+            for idx in range(0, len(raw_reply), 5):
+                clean_delta = parser.feed(raw_reply[idx : idx + 5])
+                if clean_delta:
+                    out_parts.append(clean_delta)
+                    if on_text_chunk is not None:
+                        await on_text_chunk(clean_delta)
+            tail = parser.flush()
+            if tail:
+                out_parts.append(tail)
+                if on_text_chunk is not None:
+                    await on_text_chunk(tail)
+            await parser.wait_callbacks()
+            content = "".join(out_parts)
+            return {
+                "content": content,
+                "emotion": parser.emotion or "neutral",
+                "title": parser.captured_title,
+                "tool_calls": [],
+                "raw_assistant_message": {"role": "assistant", "content": content},
             }
 
         if on_emotion is not None:
@@ -764,6 +796,43 @@ class TestStorageManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(msg_count, 0)
         self.assertEqual(tc_count, 0)
 
+    async def test_list_sessions_enrichment_and_rename_session(self) -> None:
+        s1 = await self.storage.create_session("Older Session")
+        await asyncio.sleep(0.01)
+        s2 = await self.storage.create_session("Newer Session")
+
+        # Initial ordering: s2 (more recently created) is first, message_count=0, preview=""
+        listed = await self.storage.list_sessions()
+        self.assertEqual([s["id"] for s in listed], [s2["id"], s1["id"]])
+        self.assertEqual(listed[0]["message_count"], 0)
+        self.assertEqual(listed[0]["preview"], "")
+        self.assertIn("updated_at", listed[0])
+
+        # Adding a message to s1 bumps its updated_at and moves it to the top
+        await asyncio.sleep(0.01)
+        long_prompt = "   Hello   multichat\nworld! " + ("x" * 90)
+        await self.storage.add_message(s1["id"], role="user", content=long_prompt)
+        await self.storage.add_message(s1["id"], role="assistant", content="   ")  # blank ignored for preview
+        listed_after = await self.storage.list_sessions()
+        self.assertEqual([s["id"] for s in listed_after], [s1["id"], s2["id"]])
+        self.assertEqual(listed_after[0]["message_count"], 2)
+        self.assertEqual(len(listed_after[0]["preview"]), 80)
+        self.assertTrue(listed_after[0]["preview"].endswith("..."))
+        self.assertNotIn("\n", listed_after[0]["preview"])
+
+        # rename_session: whitespace strip, 80-char truncation, empty fallback, missing -> None
+        long_title = "   " + ("T" * 95) + "   "
+        renamed = await self.storage.rename_session(s2["id"], long_title)
+        self.assertIsNotNone(renamed)
+        self.assertEqual(renamed["title"], "T" * 80)
+
+        fallback = await self.storage.rename_session(s2["id"], "   \t\n  ")
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback["title"], "New Chat")
+
+        missing = await self.storage.rename_session("nonexistent-session-id", "Valid Title")
+        self.assertIsNone(missing)
+
 
 class TestStoragePathFallback(unittest.TestCase):
     """Test legacy data directory and SQLite path fallback resolution."""
@@ -940,6 +1009,57 @@ class TestChunkerAndEmotions(unittest.TestCase):
         plain_out = "".join(plain_parser.feed(c) for c in ["Hello ", "world!"]) + plain_parser.flush()
         self.assertIsNone(plain_parser.emotion)
         self.assertEqual(plain_out, "Hello world!")
+
+    def test_parse_reply_tags_and_emotion_prefix_with_title(self) -> None:
+        for raw in (
+            "[emotion:happy][title: Async Tips] Use gather.",
+            "[title: Async Tips][emotion:happy] Use gather.",
+            "  [emotion:happy]  [title:   Async   Tips  ]  Use gather.",
+            "  [title: Async Tips]\n[emotion:happy] Use gather.",
+        ):
+            with self.subTest(raw=raw):
+                emotion, title, clean = parse_reply_tags(raw)
+                self.assertEqual(emotion, "happy")
+                self.assertEqual(title, "Async Tips")
+                self.assertEqual(clean, "Use gather.")
+
+                p_emotion, p_clean = parse_emotion_prefix(raw)
+                self.assertEqual(p_emotion, "happy")
+                self.assertEqual(p_clean, "Use gather.")
+
+        em_only, ti_only, cl_only = parse_reply_tags("[title: Async Tips] Plain reply.")
+        self.assertIsNone(em_only)
+        self.assertEqual(ti_only, "Async Tips")
+        self.assertEqual(cl_only, "Plain reply.")
+
+    def test_emotion_stream_parser_with_title_both_orders_and_chunked(self) -> None:
+        cases = (
+            ("emotion_then_title", ["[em", "otion:", "hap", "py][ti", "tle: As", "ync Tips]  ", "Use ", "gather."]),
+            ("title_then_emotion", ["[ti", "tle: As", "ync Tips]", "[em", "otion:", "hap", "py] ", "Use ", "gather."]),
+        )
+        for label, chunks in cases:
+            with self.subTest(case=label, mode="chunked"):
+                emotions: list[str] = []
+                titles: list[str] = []
+                parser = EmotionStreamParser(on_emotion=emotions.append, on_title=titles.append)
+                out = "".join(parser.feed(c) for c in chunks) + parser.flush()
+                self.assertEqual(parser.emotion, "happy")
+                self.assertEqual(parser.captured_title, "Async Tips")
+                self.assertEqual(emotions, ["happy"])
+                self.assertEqual(titles, ["Async Tips"])
+                self.assertEqual(out, "Use gather.")
+
+            with self.subTest(case=label, mode="char_by_char"):
+                raw = "".join(chunks)
+                emotions = []
+                titles = []
+                parser = EmotionStreamParser(on_emotion=emotions.append, on_title=titles.append)
+                out = "".join(parser.feed(ch) for ch in raw) + parser.flush()
+                self.assertEqual(parser.emotion, "happy")
+                self.assertEqual(parser.captured_title, "Async Tips")
+                self.assertEqual(emotions, ["happy"])
+                self.assertEqual(titles, ["Async Tips"])
+                self.assertEqual(out, "Use gather.")
 
 
 class TestSchemaSyncAndMCP(unittest.IsolatedAsyncioTestCase):
@@ -1698,6 +1818,203 @@ asyncio.run(main())
         self.assertEqual(len(ok_events), 1)
         self.assertEqual(ok_events[0]["summary"], expected_summary)
         self.assertGreater(len(ok_events[0]["summary"]), 400)
+
+    async def test_multichat_activate_rename_autotitle_and_delete(self) -> None:
+        """Verify multichat activate, PATCH rename, auto-titling, voice turn, and active delete."""
+        events: list[dict[str, Any]] = []
+
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+            async with websockets.connect(self.ws_url) as ws:
+                async def _ws_reader() -> None:
+                    try:
+                        async for raw in ws:
+                            events.append(json.loads(raw))
+                    except websockets.ConnectionClosed:
+                        pass
+
+                reader_task = asyncio.create_task(_ws_reader())
+                try:
+                    # 1. Create first session ("New Chat") and send prompt -> auto-titles
+                    r_s1 = await client.post("/api/v1/sessions", json={})
+                    self.assertEqual(r_s1.status_code, 200)
+                    s1_id = r_s1.json()["id"]
+
+                    r_msg1 = await client.post(
+                        f"/api/v1/sessions/{s1_id}/messages",
+                        json={"content": "Explain quantum tunneling simply", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_msg1.status_code, 200)
+
+                    # 2. Create second session with custom title -> prompt must NOT overwrite custom title
+                    r_s2 = await client.post("/api/v1/sessions", json={"title": "Custom Topic"})
+                    self.assertEqual(r_s2.status_code, 200)
+                    s2_id = r_s2.json()["id"]
+
+                    r_msg2 = await client.post(
+                        "/api/v1/sessions/active/messages",
+                        json={"content": "First prompt in custom chat", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_msg2.status_code, 200)
+
+                    r_list = await client.get("/api/v1/sessions")
+                    self.assertEqual(r_list.status_code, 200)
+                    sessions_by_id = {s["id"]: s for s in r_list.json()["sessions"]}
+                    self.assertEqual(sessions_by_id[s1_id]["title"], "Explain quantum tunneling simply")
+                    self.assertEqual(sessions_by_id[s2_id]["title"], "Custom Topic")
+
+                    # 3. Activate unknown session -> 404
+                    r_404 = await client.post("/api/v1/sessions/does-not-exist/activate")
+                    self.assertEqual(r_404.status_code, 404)
+
+                    # 4. Activate older session s1 -> updates active_session_id, returns messages, broadcasts session_activated
+                    events.clear()
+                    r_act = await client.post(f"/api/v1/sessions/{s1_id}/activate")
+                    self.assertEqual(r_act.status_code, 200)
+                    act_data = r_act.json()
+                    self.assertEqual(act_data["active_session_id"], s1_id)
+                    self.assertEqual(len(act_data["messages"]), 2)
+
+                    r_active = await client.get("/api/v1/sessions/active")
+                    self.assertEqual(r_active.status_code, 200)
+                    self.assertEqual(r_active.json()["active_session_id"], s1_id)
+
+                    # Subsequent text prompt on "active" and voice turn persist into resumed s1
+                    r_msg1b = await client.post(
+                        "/api/v1/sessions/active/messages",
+                        json={"content": "Follow up in resumed session", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_msg1b.status_code, 200)
+                    self.assertEqual(r_msg1b.json()["session_id"], s1_id)
+
+                    await self.daemon._on_voice_prompt("Voice follow up in resumed session")
+
+                    r_s1_msgs = await client.get(f"/api/v1/sessions/{s1_id}/messages")
+                    self.assertEqual(r_s1_msgs.status_code, 200)
+                    s1_contents = [m["content"] for m in r_s1_msgs.json()["messages"]]
+                    self.assertIn("Follow up in resumed session", s1_contents)
+                    self.assertIn("Voice follow up in resumed session", s1_contents)
+
+                    # s2 should still only have its original 2 messages
+                    r_s2_msgs = await client.get(f"/api/v1/sessions/{s2_id}/messages")
+                    self.assertEqual(len(r_s2_msgs.json()["messages"]), 2)
+
+                    # 5. PATCH /api/v1/sessions/{id} validation & rename
+                    r_bad1 = await client.patch(f"/api/v1/sessions/{s1_id}", json={})
+                    self.assertEqual(r_bad1.status_code, 400)
+                    r_bad2 = await client.patch(f"/api/v1/sessions/{s1_id}", json={"title": "   "})
+                    self.assertEqual(r_bad2.status_code, 400)
+                    r_bad3 = await client.patch(f"/api/v1/sessions/{s1_id}", json={"title": 123})
+                    self.assertEqual(r_bad3.status_code, 400)
+                    r_patch_404 = await client.patch(
+                        "/api/v1/sessions/missing-id", json={"title": "Valid"}
+                    )
+                    self.assertEqual(r_patch_404.status_code, 404)
+
+                    r_patch = await client.patch(
+                        f"/api/v1/sessions/{s1_id}", json={"title": "  Renamed Quantum Chat  "}
+                    )
+                    self.assertEqual(r_patch.status_code, 200)
+                    self.assertEqual(r_patch.json()["session"]["title"], "Renamed Quantum Chat")
+
+                    # 6. Delete currently active session s1 -> falls back to valid active session s2
+                    r_del = await client.delete(f"/api/v1/sessions/{s1_id}")
+                    self.assertEqual(r_del.status_code, 200)
+                    del_data = r_del.json()
+                    self.assertTrue(del_data["ok"])
+                    self.assertEqual(del_data["active_session_id"], s2_id)
+
+                    await asyncio.sleep(0.05)
+                finally:
+                    reader_task.cancel()
+                    await asyncio.gather(reader_task, return_exceptions=True)
+
+        activated_ev = [e for e in events if e.get("type") == "session_activated"]
+        self.assertEqual(len(activated_ev), 1)
+        self.assertEqual(activated_ev[0]["session_id"], s1_id)
+        self.assertEqual(len(activated_ev[0]["messages"]), 2)
+
+        updated_ev = [e for e in events if e.get("type") == "sessions_updated"]
+        self.assertGreaterEqual(len(updated_ev), 2)
+        self.assertEqual(updated_ev[-1]["active_session_id"], s2_id)
+        self.assertTrue(all(s["id"] != s1_id for s in updated_ev[-1]["sessions"]))
+
+    async def test_auto_title_from_llm_and_prompt_fallback(self) -> None:
+        events: list[dict[str, Any]] = []
+
+        async with websockets.connect(self.ws_url) as ws:
+            async def _reader() -> None:
+                while True:
+                    raw = await ws.recv()
+                    events.append(json.loads(raw))
+
+            reader_task = asyncio.create_task(_reader())
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+                try:
+                    # 1. First turn on "New Chat" where LLM returns [emotion:happy][title: Python Async Tips]
+                    r_create1 = await client.post("/api/v1/sessions", json={})
+                    self.assertEqual(r_create1.status_code, 200)
+                    sid1 = r_create1.json()["session"]["id"]
+                    self.assertEqual(r_create1.json()["session"]["title"], "New Chat")
+
+                    events.clear()
+                    self.mock_llm.next_raw_reply = "[emotion:happy][title: Python Async Tips] Use asyncio.gather."
+                    r_msg1 = await client.post(
+                        f"/api/v1/sessions/{sid1}/messages",
+                        json={"content": "How do I run tasks concurrently in Python?", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_msg1.status_code, 200)
+
+                    s1_db = await self.daemon.storage.get_session(sid1)
+                    self.assertIsNotNone(s1_db)
+                    self.assertEqual(s1_db["title"], "Python Async Tips")
+
+                    msgs1 = await self.daemon.storage.list_messages(sid1)
+                    assistant_msgs1 = [m for m in msgs1 if m["role"] == "assistant"]
+                    self.assertEqual(len(assistant_msgs1), 1)
+                    self.assertEqual(assistant_msgs1[0]["content"], "Use asyncio.gather.")
+                    self.assertNotIn("[title:", assistant_msgs1[0]["content"])
+                    self.assertNotIn("[emotion:", assistant_msgs1[0]["content"])
+                    self.assertEqual(assistant_msgs1[0]["emotion"], "happy")
+
+                    await asyncio.sleep(0.05)
+                    updated1 = [e for e in events if e.get("type") == "sessions_updated"]
+                    self.assertGreaterEqual(len(updated1), 1)
+                    titles1 = {s["id"]: s["title"] for s in updated1[-1]["sessions"]}
+                    self.assertEqual(titles1.get(sid1), "Python Async Tips")
+
+                    # 2. First turn on "New Chat" where LLM omits [title:...] -> falls back to _auto_title_from_prompt
+                    r_create2 = await client.post("/api/v1/sessions", json={})
+                    self.assertEqual(r_create2.status_code, 200)
+                    sid2 = r_create2.json()["session"]["id"]
+                    self.assertEqual(r_create2.json()["session"]["title"], "New Chat")
+
+                    events.clear()
+                    prompt2 = "Explain Python asyncio event loop internals in detail please"
+                    self.mock_llm.next_raw_reply = "[emotion:curious] Check the event loop."
+                    r_msg2 = await client.post(
+                        f"/api/v1/sessions/{sid2}/messages",
+                        json={"content": prompt2, "input_mode": "text"},
+                    )
+                    self.assertEqual(r_msg2.status_code, 200)
+
+                    expected_fallback = _auto_title_from_prompt(prompt2)
+                    s2_db = await self.daemon.storage.get_session(sid2)
+                    self.assertIsNotNone(s2_db)
+                    self.assertEqual(s2_db["title"], expected_fallback)
+
+                    msgs2 = await self.daemon.storage.list_messages(sid2)
+                    assistant_msgs2 = [m for m in msgs2 if m["role"] == "assistant"]
+                    self.assertEqual(len(assistant_msgs2), 1)
+                    self.assertEqual(assistant_msgs2[0]["content"], "Check the event loop.")
+
+                    await asyncio.sleep(0.05)
+                    updated2 = [e for e in events if e.get("type") == "sessions_updated"]
+                    self.assertGreaterEqual(len(updated2), 1)
+                    titles2 = {s["id"]: s["title"] for s in updated2[-1]["sessions"]}
+                    self.assertEqual(titles2.get(sid2), expected_fallback)
+                finally:
+                    reader_task.cancel()
+                    await asyncio.gather(reader_task, return_exceptions=True)
 
 
 

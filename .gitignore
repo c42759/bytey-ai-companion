@@ -2,6 +2,7 @@
 .agents
 .agents/
 .agents-memory/
+PLAN_*.md
 
 # Secrets & Local Configuration (keep template tracked)
 .env

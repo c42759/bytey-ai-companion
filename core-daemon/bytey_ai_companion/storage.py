@@ -175,17 +175,93 @@ class StorageManager:
         """Create and persist a new chat session."""
         return await asyncio.to_thread(self._create_session_sync, title)
 
+    def _get_session_sync(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            conn = self._get_conn()
+            row = conn.execute(
+                """
+                SELECT id, title, created_at, updated_at
+                FROM sessions
+                WHERE id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    async def get_session(self, session_id: str) -> dict[str, Any] | None:
+        """Return a single session record by id, or None if not found."""
+        return await asyncio.to_thread(self._get_session_sync, session_id)
+
+    def _rename_session_sync(self, session_id: str, title: str) -> dict[str, Any] | None:
+        clean_title = (title or "").strip()[:80].strip() or "New Chat"
+        now = _utc_now_iso()
+        with self._lock:
+            conn = self._get_conn()
+            cur = conn.execute(
+                "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (clean_title, now, session_id),
+            )
+            if cur.rowcount == 0:
+                conn.commit()
+                return None
+            conn.commit()
+            row = conn.execute(
+                """
+                SELECT id, title, created_at, updated_at
+                FROM sessions
+                WHERE id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    async def rename_session(self, session_id: str, title: str) -> dict[str, Any] | None:
+        """Rename a session (capped to 80 chars, defaulting to 'New Chat' if empty)."""
+        return await asyncio.to_thread(self._rename_session_sync, session_id, title)
+
     def _list_sessions_sync(self) -> list[dict[str, Any]]:
         with self._lock:
             conn = self._get_conn()
             rows = conn.execute(
                 """
-                SELECT id, title, created_at, updated_at
-                FROM sessions
-                ORDER BY updated_at DESC, rowid DESC
+                SELECT
+                    s.id,
+                    s.title,
+                    s.created_at,
+                    COALESCE(MAX(m.created_at), s.created_at) AS updated_at,
+                    COUNT(m.id) AS message_count,
+                    (
+                        SELECT m2.content
+                        FROM messages m2
+                        WHERE m2.session_id = s.id
+                          AND m2.role IN ('user', 'assistant')
+                          AND TRIM(m2.content) != ''
+                        ORDER BY m2.created_at DESC, m2.rowid DESC
+                        LIMIT 1
+                    ) AS last_content
+                FROM sessions s
+                LEFT JOIN messages m ON m.session_id = s.id
+                GROUP BY s.id
+                ORDER BY updated_at DESC, s.rowid DESC
                 """
             ).fetchall()
-            return [dict(row) for row in rows]
+            sessions: list[dict[str, Any]] = []
+            for row in rows:
+                raw_preview = row["last_content"]
+                preview = " ".join(str(raw_preview).split()) if raw_preview else ""
+                if len(preview) > 80:
+                    preview = preview[:77].rstrip() + "..."
+                sessions.append(
+                    {
+                        "id": row["id"],
+                        "title": row["title"],
+                        "created_at": row["created_at"],
+                        "updated_at": row["updated_at"],
+                        "message_count": int(row["message_count"] or 0),
+                        "preview": preview,
+                    }
+                )
+            return sessions
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         """List all sessions ordered by most recently updated first."""
