@@ -90,6 +90,19 @@ The daemon runs with graceful fallback in text-only / PipeWire CLI mode if ML au
 pip install faster-whisper silero-vad rapidfuzz sounddevice numpy
 ```
 
+> **Note for Python 3.15+ systems**: `faster-whisper` depends on native C/C++ Python extensions (`ctranslate2`, `onnxruntime`) that often lag behind newly released Python versions and lack prebuilt binary wheels on PyPI (causing `pip install` to fail with missing-wheel or source-compilation errors).
+>
+> **Why use a `uv` Python 3.14 virtualenv (recommended for local voice)**: [`uv`](https://docs.astral.sh/uv/) fetches a standalone Python 3.14 interpreter without modifying or downgrading your system Python 3.15. Because `./systemd/install-service.sh` prefers `bytey-ai-companion-daemon` on `PATH`, installing inside a 3.14 venv automatically wires the `systemd --user` service to that venv:
+>
+> ```bash
+> uv venv --python 3.14 ~/.local/share/bytey-venv
+> source ~/.local/share/bytey-venv/bin/activate
+> pip install -e "./core-daemon[voice]"
+> ./systemd/install-service.sh
+> ```
+>
+> **Alternative without Python 3.14**: Install only the base daemon on system Python 3.15 (`pip install --user -e ./core-daemon`) and configure **Speech-to-Text** in Settings to use an OpenAI-compatible HTTP Whisper endpoint (e.g., `whisper.cpp` `whisper-server`, containerized `faster-whisper-server` / `speaches`, or the OpenAI Whisper API).
+
 ### 3. Secrets & `.env` Usage
 
 Never store API keys in `~/.config/bytey-ai-companion/config.json`. Provide secrets in one of two ways:

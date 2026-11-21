@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
-import copy
-import inspect
-import json
-import logging
 import os
-import shlex
-import signal
+import copy
+import json
 import time
 import uuid
+import shlex
+import inspect
+import asyncio
+import logging
+import signal
+
+from typing import Any
+from pathlib import Path
 from collections import deque
 from datetime import datetime
-from pathlib import Path
-from typing import Any
 
 from .audio import VoiceInputService
 from .config import (
