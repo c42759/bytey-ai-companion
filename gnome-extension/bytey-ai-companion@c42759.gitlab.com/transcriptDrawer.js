@@ -493,7 +493,7 @@ export class TranscriptDrawer {
             y_align: Clutter.ActorAlign.END,
         });
         const entryBox = new St.BoxLayout({
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
         entryBox.add_child(this._entry);
@@ -635,13 +635,13 @@ export class TranscriptDrawer {
     _buildSkillSuggest(parent) {
         this._skillSuggestBox = new St.BoxLayout({
             style_class: 'bytey-skill-suggest',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             visible: false,
             x_expand: true,
         });
         this._skillSuggestList = new St.BoxLayout({
             style_class: 'bytey-skill-suggest-list',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
         this._skillSuggestScroll = new St.ScrollView({
@@ -716,7 +716,7 @@ export class TranscriptDrawer {
             const desc = rawDesc.length > 64 ? `${rawDesc.slice(0, 61)}...` : rawDesc;
 
             const rowContent = new St.BoxLayout({
-                vertical: false,
+                orientation: Clutter.Orientation.HORIZONTAL,
                 x_expand: true,
                 y_align: Clutter.ActorAlign.CENTER,
             });
@@ -1114,6 +1114,11 @@ export class TranscriptDrawer {
             this._monitorIndex
         );
 
+        const animDuration = (St.ReducedMotion &&
+            St.Settings.get?.().reducedMotion === St.ReducedMotion.REDUCE)
+            ? 0
+            : SIDEBAR_ANIM_DURATION_MS;
+
         if (this._sidebarBox) {
             if (nextOpen) {
                 if (!this._sidebarBox.visible) {
@@ -1124,14 +1129,14 @@ export class TranscriptDrawer {
                 this._sidebarBox.ease({
                     width: sidebarWidth,
                     opacity: 255,
-                    duration: SIDEBAR_ANIM_DURATION_MS,
+                    duration: animDuration,
                     mode: Clutter.AnimationMode.EASE_OUT_QUAD,
                 });
             } else if (this._sidebarBox.visible) {
                 this._sidebarBox.ease({
                     width: 0,
                     opacity: 0,
-                    duration: SIDEBAR_ANIM_DURATION_MS,
+                    duration: animDuration,
                     mode: Clutter.AnimationMode.EASE_OUT_QUAD,
                     onComplete: () => {
                         if (this._destroyed || this._sidebarOpen !== false || !this._sidebarBox)
@@ -1147,7 +1152,7 @@ export class TranscriptDrawer {
         this._container.ease({
             width: targetW,
             x: clamped.x,
-            duration: SIDEBAR_ANIM_DURATION_MS,
+            duration: animDuration,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
                 if (this._destroyed || this._sidebarOpen !== nextOpen)

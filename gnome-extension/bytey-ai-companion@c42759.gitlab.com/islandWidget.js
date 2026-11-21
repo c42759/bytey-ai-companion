@@ -464,6 +464,10 @@ export class IslandWidget {
     fadeIn(durationMs = 200) {
         if (this._destroyed || !this._island)
             return;
+        const effectiveDuration = (St.ReducedMotion &&
+            St.Settings.get?.().reducedMotion === St.ReducedMotion.REDUCE)
+            ? 0
+            : durationMs;
         this._island.remove_all_transitions();
         if (!this._island.visible) {
             this._island.opacity = 0;
@@ -471,7 +475,7 @@ export class IslandWidget {
         }
         this._island.ease({
             opacity: 255,
-            duration: durationMs,
+            duration: effectiveDuration,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
         });
     }
@@ -484,12 +488,16 @@ export class IslandWidget {
     fadeOut(durationMs = 200) {
         if (this._destroyed || !this._island)
             return;
+        const effectiveDuration = (St.ReducedMotion &&
+            St.Settings.get?.().reducedMotion === St.ReducedMotion.REDUCE)
+            ? 0
+            : durationMs;
         this._island.remove_all_transitions();
         if (!this._island.visible)
             return;
         this._island.ease({
             opacity: 0,
-            duration: durationMs,
+            duration: effectiveDuration,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
                 if (!this._destroyed && this._island && this._island.opacity === 0)

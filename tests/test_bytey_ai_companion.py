@@ -2621,6 +2621,8 @@ class TestSettingsClientAndSyntax(unittest.TestCase):
                 )
                 js_text = js_file.read_text(encoding="utf-8")
                 self.assertNotIn("ai-pet-", js_text)
+                self.assertNotRegex(js_text, r"^\s*vertical\s*:", msg=f"Removed GNOME 51 St.BoxLayout 'vertical' property in {js_file}")
+                self.assertNotRegex(js_text, r"\basync\s+disable\s*\(", msg=f"Async disable() throws in GNOME 51 in {js_file}")
 
         css_path = GNOME_EXT_DIR / "stylesheet.css"
         self.assertTrue(css_path.is_file())
@@ -2634,7 +2636,7 @@ class TestSettingsClientAndSyntax(unittest.TestCase):
         self.assertEqual(meta.get("uuid"), "bytey-ai-companion@c42759.gitlab.com")
         self.assertEqual(meta.get("name"), "Bytey AI Companion")
         self.assertIsInstance(meta.get("description"), str)
-        self.assertEqual(meta.get("shell-version"), ["48", "49", "50"])
+        self.assertEqual(meta.get("shell-version"), ["48", "49", "50", "51"])
         self.assertEqual(meta.get("url"), "https://gitlab.com/c42759/bytey")
         self.assertEqual(
             meta.get("settings-schema"),

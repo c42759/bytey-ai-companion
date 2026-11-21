@@ -18,7 +18,7 @@ const WS_BACKOFF_MAX_MS = 30000;
 const WS_MAX_INCOMING_PAYLOAD = 16 * 1024 * 1024;
 
 /**
- * GNOME Shell 48-50 Extension entrypoint for Bytey AI Companion Dynamic Island.
+ * GNOME Shell 48-51 Extension entrypoint for Bytey AI Companion Dynamic Island.
  */
 export default class ByteyExtension extends Extension {
     enable() {

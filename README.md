@@ -2,7 +2,7 @@
 
 <div align="center">
   <img src="./docs/banner.svg" alt="Bytey AI Companion Banner" width="100%" />
-  <p><strong>Always-on-top Dynamic Island desktop AI assistant for GNOME Shell 48–50 (Wayland / PipeWire)</strong></p>
+  <p><strong>Always-on-top Dynamic Island desktop AI assistant for GNOME Shell 48–51 (Wayland / PipeWire)</strong></p>
 </div>
 
 ---
@@ -41,7 +41,7 @@
 ## Architecture Overview
 
 - **`core-daemon/` (`bytey_ai_companion`)**: Python `asyncio` + HTTP/WebSocket daemon (`127.0.0.1:8765`, `/api/v1/*` + `/ws`) handling PipeWire audio capture (`pw-record`/`pw-play`), VAD/wake-word/STT, multi-provider LLM routing, MCP tool hosting, sentence-chunked TTS playback, and SQLite conversation history (`~/.local/share/bytey-ai-companion/bytey.db`).
-- **`gnome-extension/bytey-ai-companion@c42759.gitlab.com/`**: GNOME Shell 48–50 ESM extension rendering procedural Cairo eyes, left-click expandable transcript drawer (with 3-state connection indicator, tool-call badges, density modes, and resize grip), right-click context menu, and native `prefs.js`.
+- **`gnome-extension/bytey-ai-companion@c42759.gitlab.com/`**: GNOME Shell 48–51 ESM extension rendering procedural Cairo eyes, left-click expandable transcript drawer (with 3-state connection indicator, tool-call badges, density modes, and resize grip), right-click context menu, and native `prefs.js`.
 - **`settings-ui/` (`bytey_settings`)**: Native GTK4 / Libadwaita (`Adw.PreferencesWindow`) settings panel talking to the daemon REST API (with offline fallback to `~/.config/bytey-ai-companion/config.json`).
 - **`systemd/`**: `systemd --user` service unit (`bytey-ai-companion-daemon.service`) managing the background Python daemon lifecycle.
 
@@ -54,6 +54,7 @@
 | **48** | Wayland / PipeWire | Supported |
 | **49** | Wayland / PipeWire | Supported |
 | **50** | Wayland / PipeWire | Supported |
+| **51** | Wayland / PipeWire | Supported |
 
 ---
 
@@ -72,7 +73,7 @@ System packages (Fedora / Ubuntu / Arch equivalents):
 - Python 3.11+ (tested on Python 3.14)
 - PyGObject (`python3-gobject`), GTK4, Libadwaita (`libadwaita`)
 - PipeWire tools (`pipewire-utils` for `pw-record` / `pw-play`)
-- GNOME Shell 48–50 (`libsoup3`, `gjs`, `glib-compile-schemas`)
+- GNOME Shell 48–51 (`libsoup3`, `gjs`, `glib-compile-schemas`)
 
 Install the core daemon package (installs required Python dependencies and the `bytey-ai-companion-daemon` command):
 ```bash
@@ -108,7 +109,7 @@ Never store API keys in `~/.config/bytey-ai-companion/config.json`. Provide secr
 
 ### 4. GNOME Shell Extension Installation
 
-The extension targets **GNOME Shell 48–50** (`bytey-ai-companion@c42759.gitlab.com`).
+The extension targets **GNOME Shell 48–51** (`bytey-ai-companion@c42759.gitlab.com`).
 
 **Standard install (recommended)**:
 ```bash
@@ -213,7 +214,7 @@ To publish on [extensions.gnome.org](https://extensions.gnome.org/):
 2. Sign in to [extensions.gnome.org](https://extensions.gnome.org/) and open **Upload Extension**.
 3. Upload `gnome-extension/bytey-ai-companion@c42759.gitlab.com.shell-extension.zip`.
 4. Upload `./gnome-extension/bytey-ai-companion@c42759.gitlab.com/icons/bytey-ai-companion-icon-128.png` (`128×128` PNG) as the extension listing icon on the EGO web form.
-5. Verify metadata (`uuid`: `bytey-ai-companion@c42759.gitlab.com`, `shell-version`: `48`, `49`, `50`, `license`: `GPL-3.0-or-later`, `url`: `https://gitlab.com/c42759/bytey`) and submit for review.
+5. Verify metadata (`uuid`: `bytey-ai-companion@c42759.gitlab.com`, `shell-version`: `48`, `49`, `50`, `51`, `license`: `GPL-3.0-or-later`, `url`: `https://gitlab.com/c42759/bytey`) and submit for review.
 
 ---
 
