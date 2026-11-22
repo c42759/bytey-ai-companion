@@ -641,41 +641,59 @@ class IPCServer:
         self._stopping = False
         loop = asyncio.get_running_loop()
 
-        async def _create_server() -> asyncio.Server:
+        if hasattr(WsServer, "wrap"):
+            # websockets 14/15 (e.g. Python 3.14 / Fedora 44) attaches an external
+            # asyncio.Server via Server.wrap() instead of awaitable Server(create_server, ...).
+            self._ws_server = WsServer(
+                self.connection_manager.handle_connection,
+                process_request=self._process_ws_request,
+                logger=logger,
+            )
             self._tcp_server = await loop.create_server(
                 lambda: _DualIPCProtocol(self),
                 self.host,
                 self.port,
             )
-            return self._tcp_server
+            self._ws_server.wrap(self._tcp_server)
+        else:
+            # websockets 16+ (e.g. Python 3.15 / Fedora 45) removed Server.wrap()
+            # and requires awaiting Server(create_server, protocol_handler).
+            async def _create_server() -> asyncio.Server:
+                self._tcp_server = await loop.create_server(
+                    lambda: _DualIPCProtocol(self),
+                    self.host,
+                    self.port,
+                )
+                return self._tcp_server
 
-        async def _protocol_handler(connection: ServerConnection) -> None:
-            ws_server = self._ws_server
-            try:
-                async with asyncio.timeout(10):
-                    await connection.handshake(self._process_ws_request)
-                if connection.protocol.state is not WsState.OPEN:
-                    connection.transport.abort()
-                    return
-                if ws_server is not None:
-                    ws_server.all_connections.add(connection)
-                connection.start_keepalive()
+            async def _protocol_handler(connection: ServerConnection) -> None:
+                ws_server = self._ws_server
                 try:
-                    async with connection:
-                        await self.connection_manager.handle_connection(connection)
+                    async with asyncio.timeout(10):
+                        await connection.handshake(self._process_ws_request)
+                    if connection.protocol.state is not WsState.OPEN:
+                        connection.transport.abort()
+                        return
+                    if ws_server is not None:
+                        ws_server.all_connections.add(connection)
+                    connection.start_keepalive()
+                    try:
+                        async with connection:
+                            await self.connection_manager.handle_connection(connection)
+                    except Exception:
+                        logger.exception("WebSocket connection handler failed")
+                    finally:
+                        if ws_server is not None:
+                            ws_server.all_connections.discard(connection)
                 except Exception:
-                    logger.exception("WebSocket connection handler failed")
+                    connection.transport.abort()
                 finally:
                     if ws_server is not None:
-                        ws_server.all_connections.discard(connection)
-            except Exception:
-                connection.transport.abort()
-            finally:
-                if ws_server is not None:
-                    ws_server.handler_tasks.discard(asyncio.current_task())
+                        ws_server.handler_tasks.discard(asyncio.current_task())
 
-        self._ws_server = WsServer(_create_server, _protocol_handler, logger=logger)
-        await self._ws_server
+            self._ws_server = WsServer(_create_server, _protocol_handler, logger=logger)
+            await self._ws_server
+
         if self._tcp_server is not None and self._tcp_server.sockets:
             self.port = int(self._tcp_server.sockets[0].getsockname()[1])
 
