@@ -533,6 +533,18 @@ def clamp_context_size(
     return max(le) if le else numeric[-1]
 
 
+def _expand_preferences_page(widget: Gtk.Widget) -> None:
+    """Remove the default 600px Adw.Clamp width limit inside an Adw.PreferencesPage."""
+    if isinstance(widget, Adw.Clamp):
+        widget.set_maximum_size(100000)
+        widget.set_tightening_threshold(100000)
+        return
+    child = widget.get_first_child()
+    while child is not None:
+        _expand_preferences_page(child)
+        child = child.get_next_sibling()
+
+
 class MCPServerDialog(Adw.Dialog):
     """Modal dialog for adding or editing a single MCP server configuration."""
 
@@ -785,6 +797,11 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
 
         self.connect("close-request", self._on_close_request)
         self.reload_all()
+
+    def add(self, page: Adw.PreferencesPage) -> None:
+        """Expand the page's internal Adw.Clamp before adding it to the window."""
+        _expand_preferences_page(page)
+        super().add(page)
 
     def _on_close_request(self, *_: object) -> bool:
         for source_id in list(self._debounce_timers.values()):

@@ -1237,13 +1237,30 @@ export default class ByteyPreferences extends ExtensionPreferences {
         workspacePolicyGroup.add(workspaceCmdApprovalRow);
         workspacePage.add(workspacePolicyGroup);
 
-        window.add(generalPage);
-        window.add(visualsPage);
-        window.add(voicePage);
-        window.add(aiPage);
-        window.add(skillsPage);
-        window.add(workspacePage);
-        window.add(importExportPage);
+        const expandPreferencesPage = widget => {
+            if (widget instanceof Adw.Clamp) {
+                widget.set_maximum_size(100000);
+                widget.set_tightening_threshold(100000);
+                return;
+            }
+            let child = widget.get_first_child?.();
+            while (child) {
+                expandPreferencesPage(child);
+                child = child.get_next_sibling?.();
+            }
+        };
+        for (const page of [
+            generalPage,
+            visualsPage,
+            voicePage,
+            aiPage,
+            skillsPage,
+            workspacePage,
+            importExportPage,
+        ]) {
+            expandPreferencesPage(page);
+            window.add(page);
+        }
 
         let workspaceRecentPaths = [];
         let workspaceUpdating = false;
