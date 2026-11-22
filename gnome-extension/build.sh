@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UUID="bytey-ai-companion@c42759.gitlab.com"
+UUID="bytey-ai-companion@c42759.github.com"
 EXT_DIR="${SCRIPT_DIR}/${UUID}"
 OUT_DIR="${SCRIPT_DIR}"
 
