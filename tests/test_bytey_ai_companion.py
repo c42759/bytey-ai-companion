@@ -2402,6 +2402,107 @@ asyncio.run(main())
                 self.assertIn("-x = 1", ev.get("diff", ""))
                 self.assertIn("+x = 2", ev.get("diff", ""))
 
+    async def test_workspace_delete_and_rename_approval_and_rejection(self) -> None:
+        ws = (self.root / "ws_del_ren").resolve()
+        ws.mkdir(parents=True)
+        src_file = ws / "old_name.py"
+        src_file.write_text("val = 42\n", encoding="utf-8")
+
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+            r_ws = await client.put("/api/v1/workspace", json={"path": str(ws)})
+            self.assertEqual(r_ws.status_code, 200)
+            r_cfg = await client.patch(
+                "/api/v1/config",
+                json={
+                    "llm": {
+                        "provider": "gemini",
+                        "model": "gemini-2.5-flash",
+                        "force_enable_tools": True,
+                    }
+                },
+            )
+            self.assertEqual(r_cfg.status_code, 200)
+
+            approve_next = {"value": False}
+            awaiting_events: list[dict[str, Any]] = []
+
+            async with websockets.connect(self.ws_url) as ws_conn:
+                async def _ws_reader() -> None:
+                    try:
+                        async for raw in ws_conn:
+                            ev = json.loads(raw)
+                            if (
+                                ev.get("type") == "tool_call_status"
+                                and ev.get("status") == "awaiting_confirm"
+                            ):
+                                awaiting_events.append(ev)
+                                call_id = ev["call_id"]
+                                resp = await client.post(
+                                    f"/api/v1/tools/{call_id}/confirm",
+                                    json={"approved": approve_next["value"]},
+                                )
+                                self.assertEqual(resp.status_code, 200)
+                    except websockets.ConnectionClosed:
+                        pass
+
+                reader_task = asyncio.create_task(_ws_reader())
+                try:
+                    # 1) Reject then approve rename_file
+                    self.mock_llm.tool_trigger_phrase = "trigger_rename"
+                    self.mock_llm.tool_name_override = "bytey_workspace__rename_file"
+                    self.mock_llm.tool_arguments = {
+                        "src_rel_path": "old_name.py",
+                        "dst_rel_path": "pkg/new_name.py",
+                    }
+                    approve_next["value"] = False
+                    r_ren_rej = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Please trigger_rename", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_ren_rej.status_code, 200)
+                    self.assertTrue(src_file.exists())
+                    self.assertFalse((ws / "pkg" / "new_name.py").exists())
+
+                    approve_next["value"] = True
+                    r_ren_ok = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Please trigger_rename", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_ren_ok.status_code, 200)
+                    self.assertFalse(src_file.exists())
+                    self.assertTrue((ws / "pkg" / "new_name.py").exists())
+
+                    # 2) Reject then approve delete_file
+                    self.mock_llm.tool_trigger_phrase = "trigger_delete"
+                    self.mock_llm.tool_name_override = "bytey_workspace__delete_file"
+                    self.mock_llm.tool_arguments = {"rel_path": "pkg/new_name.py"}
+                    approve_next["value"] = False
+                    r_del_rej = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Please trigger_delete", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_del_rej.status_code, 200)
+                    self.assertTrue((ws / "pkg" / "new_name.py").exists())
+
+                    approve_next["value"] = True
+                    r_del_ok = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Please trigger_delete", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_del_ok.status_code, 200)
+                    self.assertFalse((ws / "pkg" / "new_name.py").exists())
+                finally:
+                    self.mock_llm.tool_trigger_phrase = "use_echo_tool"
+                    self.mock_llm.tool_name_override = None
+                    self.mock_llm.tool_arguments = None
+                    reader_task.cancel()
+                    await asyncio.gather(reader_task, return_exceptions=True)
+
+            self.assertEqual(len(awaiting_events), 4)
+            self.assertEqual(awaiting_events[0].get("tool"), "rename_file")
+            self.assertEqual(awaiting_events[2].get("tool"), "delete_file")
+            self.assertIn("-val = 42", awaiting_events[2].get("diff", ""))
+
     async def test_delete_message_and_tts_pause_resume(self) -> None:
         """Verify DELETE message endpoint (404/200 + WS) and POST /api/v1/tts/pause."""
         events: list[dict[str, Any]] = []
@@ -5360,6 +5461,52 @@ class TestWorkspaceToolchain(unittest.IsolatedAsyncioTestCase):
                 [r[0] for r in rules],
                 ["AGENTS.md", ".agents/GEMINI.md", ".agents/CLAUDE.md"],
             )
+
+            # Delete preview/apply + guards
+            (ws / "obsolete.txt").write_text("bye\n", encoding="utf-8")
+            d_prev = tc.preview_delete("obsolete.txt")
+            self.assertTrue(d_prev["ok"])
+            self.assertIn("-bye", d_prev["diff"])
+            self.assertTrue((ws / "obsolete.txt").exists())
+
+            d_app = tc.apply_delete("obsolete.txt")
+            self.assertTrue(d_app["ok"])
+            self.assertFalse((ws / "obsolete.txt").exists())
+            self.assertFalse(tc.preview_delete("obsolete.txt")["ok"])
+            self.assertFalse(tc.preview_delete("nested")["ok"])
+            self.assertFalse(tc.preview_delete(".")["ok"])
+            with self.assertRaises(ValueError):
+                tc.preview_delete("../outside.txt")
+
+            # Rename preview/apply + guards
+            (ws / "src_file.txt").write_text("move me\n", encoding="utf-8")
+            r_prev = tc.preview_rename("src_file.txt", "moved/sub/dst_file.txt")
+            self.assertTrue(r_prev["ok"])
+            self.assertIn("rename src_file.txt -> moved/sub/dst_file.txt", r_prev["diff"])
+            self.assertTrue((ws / "src_file.txt").exists())
+
+            r_app = tc.apply_rename("src_file.txt", "moved/sub/dst_file.txt")
+            self.assertTrue(r_app["ok"])
+            self.assertFalse((ws / "src_file.txt").exists())
+            self.assertEqual(
+                (ws / "moved" / "sub" / "dst_file.txt").read_text(encoding="utf-8"),
+                "move me\n",
+            )
+
+            (ws / "conflict_src.txt").write_text("new\n", encoding="utf-8")
+            (ws / "conflict_dst.txt").write_text("old\n", encoding="utf-8")
+            self.assertFalse(
+                tc.preview_rename("conflict_src.txt", "conflict_dst.txt")["ok"]
+            )
+            r_ov = tc.apply_rename("conflict_src.txt", "conflict_dst.txt", overwrite=True)
+            self.assertTrue(r_ov["ok"])
+            self.assertEqual(
+                (ws / "conflict_dst.txt").read_text(encoding="utf-8"), "new\n"
+            )
+            self.assertFalse(tc.preview_rename("missing.txt", "x.txt")["ok"])
+            self.assertFalse(tc.preview_rename("conflict_dst.txt", "conflict_dst.txt")["ok"])
+            with self.assertRaises(ValueError):
+                tc.preview_rename("conflict_dst.txt", "../escape.txt")
 
     def test_skill_registry_workspace_precedence_and_eviction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

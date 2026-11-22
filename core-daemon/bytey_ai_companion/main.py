@@ -676,6 +676,53 @@ class ByteyDaemon:
             {
                 "type": "function",
                 "function": {
+                    "name": "bytey_workspace__delete_file",
+                    "description": "Delete a file inside the active workspace.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "rel_path": {
+                                "type": "string",
+                                "description": "Relative path to the file to delete.",
+                            },
+                        },
+                        "required": ["rel_path"],
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "delete_file",
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_workspace__rename_file",
+                    "description": "Rename or move a file inside the active workspace.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "src_rel_path": {
+                                "type": "string",
+                                "description": "Relative path to the existing source file.",
+                            },
+                            "dst_rel_path": {
+                                "type": "string",
+                                "description": "Relative destination path inside the workspace.",
+                            },
+                            "overwrite": {
+                                "type": "boolean",
+                                "description": "Whether to overwrite dst_rel_path if it already exists.",
+                                "default": False,
+                            },
+                        },
+                        "required": ["src_rel_path", "dst_rel_path"],
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "rename_file",
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "bytey_workspace__run_command",
                     "description": "Execute a shell command inside the active workspace root.",
                     "parameters": {
@@ -791,6 +838,71 @@ class ByteyDaemon:
                         "error": str(res.get("error") or "Write failed"),
                     }
                 return {"ok": True, "content": res.get("diff") or f"Wrote {rel_path}"}
+            if tool_name == "delete_file":
+                rel_path = str(args.get("rel_path") or "")
+                preview = toolchain.preview_delete(rel_path)
+                if not preview.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(preview.get("error") or "Delete preview failed"),
+                    }
+                if cfg.workspace.require_write_approval:
+                    approved = await confirm_cb(
+                        "bytey_workspace",
+                        "delete_file",
+                        args,
+                        {"diff": preview["diff"], "rel_path": preview["rel_path"]},
+                    )
+                    if not approved:
+                        return {
+                            "ok": False,
+                            "denied": True,
+                            "error": "User rejected the proposed change/command.",
+                        }
+                res = toolchain.apply_delete(rel_path)
+                if not res.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(res.get("error") or "Delete failed"),
+                    }
+                return {"ok": True, "content": res.get("diff") or f"Deleted {rel_path}"}
+            if tool_name == "rename_file":
+                src_rel_path = str(args.get("src_rel_path") or "")
+                dst_rel_path = str(args.get("dst_rel_path") or "")
+                overwrite = bool(args.get("overwrite", False))
+                preview = toolchain.preview_rename(
+                    src_rel_path, dst_rel_path, overwrite=overwrite
+                )
+                if not preview.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(preview.get("error") or "Rename preview failed"),
+                    }
+                if cfg.workspace.require_write_approval:
+                    approved = await confirm_cb(
+                        "bytey_workspace",
+                        "rename_file",
+                        args,
+                        {"diff": preview["diff"], "rel_path": preview["rel_path"]},
+                    )
+                    if not approved:
+                        return {
+                            "ok": False,
+                            "denied": True,
+                            "error": "User rejected the proposed change/command.",
+                        }
+                res = toolchain.apply_rename(
+                    src_rel_path, dst_rel_path, overwrite=overwrite
+                )
+                if not res.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(res.get("error") or "Rename failed"),
+                    }
+                return {
+                    "ok": True,
+                    "content": res.get("diff") or f"Renamed {src_rel_path} -> {dst_rel_path}",
+                }
             if tool_name == "run_command":
                 command = str(args.get("command") or "").strip()
                 if not command:
@@ -1514,11 +1626,13 @@ class ByteyDaemon:
                 runtime_context_note += f"\n[Active Workspace: {active_ws}{branch_suffix}]"
                 if supports_tools:
                     runtime_context_note += (
-                        "\n[Workspace Tool Rule: When the user asks to create, write, edit, inspect, "
-                        "or run files/scripts in the workspace, ALWAYS invoke bytey_workspace__write_file, "
-                        "bytey_workspace__propose_edit, bytey_workspace__list_files, "
-                        "bytey_workspace__read_file, or bytey_workspace__run_command instead of only "
-                        "pasting code in chat. The user will review and approve writes in the UI.]"
+                        "\n[Workspace Tool Rule: When the user asks to create, write, edit, rename, "
+                        "delete, inspect, or run files/scripts in the workspace, ALWAYS invoke "
+                        "bytey_workspace__write_file, bytey_workspace__propose_edit, "
+                        "bytey_workspace__rename_file, bytey_workspace__delete_file, "
+                        "bytey_workspace__list_files, bytey_workspace__read_file, or "
+                        "bytey_workspace__run_command instead of only pasting code in chat. "
+                        "The user will review and approve writes in the UI.]"
                     )
             if needs_auto_title:
                 runtime_context_note += (

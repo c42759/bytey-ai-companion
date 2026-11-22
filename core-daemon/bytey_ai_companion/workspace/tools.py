@@ -399,6 +399,96 @@ class WorkspaceToolchain:
         diff = _unified_diff(original, content, rel_path)
         return {"ok": True, "diff": diff, "rel_path": rel_path, "is_new": is_new}
 
+    def preview_delete(self, rel_path: str) -> dict[str, Any]:
+        """Validate target file and compute unified deletion diff without modifying disk."""
+        path = self._resolve_in_workspace(rel_path)
+        if path == self.root:
+            return {"ok": False, "error": "Cannot delete workspace root"}
+        if not path.exists():
+            return {"ok": False, "error": f"File not found: {rel_path}"}
+        if path.is_dir():
+            return {"ok": False, "error": f"Cannot delete directory: {rel_path}"}
+        size = path.stat().st_size
+        if size <= MAX_READ_BYTES:
+            original = path.read_text(encoding="utf-8", errors="replace")
+            diff = _unified_diff(original, "", rel_path) or (
+                f"--- a/{rel_path}\n+++ /dev/null\n(delete empty file)\n"
+            )
+        else:
+            diff = f"--- a/{rel_path}\n+++ /dev/null\n(delete file, {size} bytes)\n"
+        return {"ok": True, "diff": diff, "rel_path": rel_path}
+
+    def apply_delete(self, rel_path: str) -> dict[str, Any]:
+        """Delete a file inside the workspace after validation."""
+        preview = self.preview_delete(rel_path)
+        if not preview["ok"]:
+            return {
+                "ok": False,
+                "error": preview["error"],
+                "diff": "",
+                "rel_path": rel_path,
+            }
+        path = self._resolve_in_workspace(rel_path)
+        path.unlink()
+        return {"ok": True, "diff": preview["diff"], "rel_path": rel_path}
+
+    def preview_rename(
+        self, src_rel_path: str, dst_rel_path: str, overwrite: bool = False
+    ) -> dict[str, Any]:
+        """Validate source and destination paths for renaming/moving a file."""
+        src = self._resolve_in_workspace(src_rel_path)
+        dst = self._resolve_in_workspace(dst_rel_path)
+        if src == self.root or dst == self.root:
+            return {"ok": False, "error": "Cannot rename workspace root"}
+        if not src.exists():
+            return {"ok": False, "error": f"Source not found: {src_rel_path}"}
+        if src.is_dir():
+            return {"ok": False, "error": f"Cannot rename directory: {src_rel_path}"}
+        if src == dst:
+            return {"ok": False, "error": "Source and destination are identical"}
+        if dst.exists():
+            if dst.is_dir():
+                return {"ok": False, "error": f"Destination is a directory: {dst_rel_path}"}
+            if not overwrite:
+                return {"ok": False, "error": f"Destination already exists: {dst_rel_path}"}
+        diff = (
+            f"--- a/{src_rel_path}\n"
+            f"+++ b/{dst_rel_path}\n"
+            f"@@ rename {src_rel_path} -> {dst_rel_path} @@\n"
+        )
+        return {
+            "ok": True,
+            "diff": diff,
+            "src_rel_path": src_rel_path,
+            "dst_rel_path": dst_rel_path,
+            "rel_path": dst_rel_path,
+        }
+
+    def apply_rename(
+        self, src_rel_path: str, dst_rel_path: str, overwrite: bool = False
+    ) -> dict[str, Any]:
+        """Atomically rename/move a file inside the workspace, creating parent dirs."""
+        preview = self.preview_rename(src_rel_path, dst_rel_path, overwrite=overwrite)
+        if not preview["ok"]:
+            return {
+                "ok": False,
+                "error": preview["error"],
+                "diff": "",
+                "src_rel_path": src_rel_path,
+                "dst_rel_path": dst_rel_path,
+            }
+        src = self._resolve_in_workspace(src_rel_path)
+        dst = self._resolve_in_workspace(dst_rel_path)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
+        return {
+            "ok": True,
+            "diff": preview["diff"],
+            "src_rel_path": src_rel_path,
+            "dst_rel_path": dst_rel_path,
+            "rel_path": dst_rel_path,
+        }
+
     async def run_command(
         self, command: str, timeout_s: float = 30.0
     ) -> dict[str, Any]:
