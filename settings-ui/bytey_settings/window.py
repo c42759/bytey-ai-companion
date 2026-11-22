@@ -1353,9 +1353,38 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self.mcp_group.remove(widget)
         self._mcp_rows.clear()
 
+        host_row = Adw.ActionRow(
+            title="Bytey MCP Host",
+            subtitle="Built-in MCP host • Workspace & Skills tools (always enabled)",
+        )
+        host_badge = Gtk.Label(
+            label="Built-in",
+            valign=Gtk.Align.CENTER,
+        )
+        host_badge.add_css_class("caption")
+        host_badge.add_css_class("dim-label")
+        host_switch = Gtk.Switch(
+            active=True,
+            sensitive=False,
+            valign=Gtk.Align.CENTER,
+            tooltip_text="Built-in MCP Host cannot be disabled",
+        )
+        host_info_btn = Gtk.Button(
+            icon_name="dialog-information-symbolic",
+            valign=Gtk.Align.CENTER,
+            tooltip_text="Inspect MCP Host & tools",
+        )
+        host_info_btn.add_css_class("flat")
+        host_info_btn.connect("clicked", lambda *_: self._open_mcp_info_dialog(None))
+        host_row.add_suffix(host_badge)
+        host_row.add_suffix(host_switch)
+        host_row.add_suffix(host_info_btn)
+        self.mcp_group.add(host_row)
+        self._mcp_rows.append(host_row)
+
         if not self._mcp_servers:
             empty_row = Adw.ActionRow(
-                title="No MCP servers configured",
+                title="No external MCP servers configured",
                 subtitle="Click 'Add MCP Server' or edit the raw mcpServers JSON below.",
             )
             self.mcp_group.add(empty_row)
@@ -1383,6 +1412,14 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             test_btn = Gtk.Button(label="Test Connection", valign=Gtk.Align.CENTER)
             test_btn.connect("clicked", lambda *_, n=name: self._test_mcp_server(n))
 
+            info_btn = Gtk.Button(
+                icon_name="dialog-information-symbolic",
+                valign=Gtk.Align.CENTER,
+                tooltip_text="Inspect MCP details & tools",
+            )
+            info_btn.add_css_class("flat")
+            info_btn.connect("clicked", lambda *_, n=name: self._open_mcp_info_dialog(n))
+
             edit_btn = Gtk.Button(icon_name="document-edit-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Edit")
             edit_btn.add_css_class("flat")
             edit_btn.connect("clicked", lambda *_, n=name: self._open_mcp_dialog(n))
@@ -1398,6 +1435,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
 
             row.add_suffix(enabled_switch)
             row.add_suffix(test_btn)
+            row.add_suffix(info_btn)
             row.add_suffix(edit_btn)
             row.add_suffix(del_btn)
             self.mcp_group.add(row)
@@ -1491,6 +1529,113 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             alert.present(self)
 
         self._run_async(lambda: self.client.test_mcp_server(name, cfg), on_done)
+
+    def _open_mcp_info_dialog(self, name: str | None) -> None:
+        is_builtin = name is None
+        cfg = {} if is_builtin else dict(self._mcp_servers.get(name, {}))
+        mcp_title = "Bytey MCP Host" if is_builtin else str(name)
+        if is_builtin:
+            mcp_desc = "Built-in MCP host providing native Workspace and Skills tools for Bytey."
+        else:
+            transport = str(cfg.get("transport") or ("http" if cfg.get("url") else "stdio"))
+            target = (
+                str(cfg.get("url") or "")
+                if transport != "stdio"
+                else " ".join(
+                    [str(cfg.get("command") or ""), *[str(a) for a in (cfg.get("args") or [])]]
+                ).strip()
+            )
+            mcp_desc = (
+                str(cfg["description"])
+                if cfg.get("description")
+                else f"External {transport} MCP server{f': {target}' if target else ''}"
+            )
+
+        dialog = Adw.Dialog(title=mcp_title, content_width=540, content_height=520)
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=False)
+        close_btn = Gtk.Button(label="Close")
+        close_btn.connect("clicked", lambda *_: dialog.close())
+        header.pack_end(close_btn)
+        toolbar.add_top_bar(header)
+
+        page = Adw.PreferencesPage()
+        info_group = Adw.PreferencesGroup(title="MCP Details")
+        title_row = Adw.ActionRow(title="Title", subtitle=mcp_title, subtitle_selectable=True)
+        desc_row = Adw.ActionRow(
+            title="Description",
+            subtitle=mcp_desc,
+            subtitle_lines=0,
+            subtitle_selectable=True,
+        )
+        info_group.add(title_row)
+        info_group.add(desc_row)
+        page.add(info_group)
+
+        tools_group = Adw.PreferencesGroup(title="Tools", description="Discovering available tools...")
+        loading_row = Adw.ActionRow(
+            title="Loading tools...",
+            subtitle="Fetching built-in Bytey MCP Host tools" if is_builtin else f"Connecting to {mcp_title}",
+        )
+        tools_group.add(loading_row)
+        page.add(tools_group)
+
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.set_child(page)
+        toolbar.set_content(scroll)
+        dialog.set_child(toolbar)
+        dialog.present(self)
+
+        def on_done(res: ApiResult) -> None:
+            self._set_offline(res.offline)
+            tools_group.remove(loading_row)
+            if not res.ok:
+                tools_group.set_description("Failed to load tools")
+                tools_group.add(Adw.ActionRow(title="Error", subtitle=str(res.error or "Request failed"), subtitle_lines=0))
+                return
+
+            payload = res.data if isinstance(res.data, dict) else {}
+            if payload.get("title"):
+                title_row.set_subtitle(str(payload["title"]))
+            if payload.get("description"):
+                desc_row.set_subtitle(str(payload["description"]))
+            if payload.get("ok") is False:
+                err = str(payload.get("error") or "Connection failed")
+                tools_group.set_description("Failed to load tools")
+                tools_group.add(Adw.ActionRow(title="Connection Failed", subtitle=err, subtitle_lines=0))
+                return
+
+            tools = payload.get("tools") or []
+            tools_group.set_description(f"{len(tools)} tool(s) available")
+            if not tools:
+                tools_group.add(
+                    Adw.ActionRow(
+                        title="No tools exposed",
+                        subtitle="This MCP server did not report any tools.",
+                    )
+                )
+                return
+
+            for tool in tools:
+                if isinstance(tool, dict):
+                    t_name = str(tool.get("name") or "unnamed")
+                    t_desc = str(tool.get("description") or "No description provided.")
+                else:
+                    t_name = str(tool)
+                    t_desc = "No description provided."
+                tools_group.add(
+                    Adw.ActionRow(
+                        title=t_name,
+                        subtitle=t_desc,
+                        subtitle_lines=0,
+                        subtitle_selectable=True,
+                    )
+                )
+
+        if is_builtin:
+            self._run_async(self.client.get_mcp_host_info, on_done)
+        else:
+            self._run_async(lambda: self.client.test_mcp_server(mcp_title, cfg), on_done)
 
     def _apply_raw_mcp_json(self) -> None:
         buf = self.mcp_json_view.get_buffer()

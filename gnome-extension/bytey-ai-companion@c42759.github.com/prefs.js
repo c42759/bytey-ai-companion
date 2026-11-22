@@ -1775,10 +1775,40 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 mcpGroup.remove(widget);
             mcpRows = [];
 
+            const hostRow = new Adw.ActionRow({
+                title: 'Bytey MCP Host',
+                subtitle: 'Built-in MCP host • Workspace & Skills tools (always enabled)',
+            });
+            const hostBadge = new Gtk.Label({
+                label: 'Built-in',
+                valign: Gtk.Align.CENTER,
+                css_classes: ['caption', 'dim-label'],
+            });
+            const hostSwitch = new Gtk.Switch({
+                active: true,
+                sensitive: false,
+                valign: Gtk.Align.CENTER,
+                tooltip_text: 'Built-in MCP Host cannot be disabled',
+            });
+            const hostInfoBtn = new Gtk.Button({
+                icon_name: 'dialog-information-symbolic',
+                valign: Gtk.Align.CENTER,
+                tooltip_text: 'Inspect MCP Host & tools',
+                css_classes: ['flat'],
+            });
+            hostInfoBtn.connect('clicked', () => onUserChange(() => {
+                showMcpInfoDialog(null).catch(() => {});
+            }));
+            hostRow.add_suffix(hostBadge);
+            hostRow.add_suffix(hostSwitch);
+            hostRow.add_suffix(hostInfoBtn);
+            mcpGroup.add(hostRow);
+            mcpRows.push(hostRow);
+
             const names = Object.keys(mcpServers).sort();
             if (names.length === 0) {
                 const emptyRow = new Adw.ActionRow({
-                    title: 'No MCP servers configured',
+                    title: 'No external MCP servers configured',
                     subtitle: "Click 'Add MCP Server' or edit the raw mcpServers JSON below.",
                 });
                 mcpGroup.add(emptyRow);
@@ -1822,6 +1852,16 @@ export default class ByteyPreferences extends ExtensionPreferences {
                     testMcpServer(name).catch(() => {});
                 }));
 
+                const infoMcpBtn = new Gtk.Button({
+                    icon_name: 'dialog-information-symbolic',
+                    valign: Gtk.Align.CENTER,
+                    tooltip_text: 'Inspect MCP details & tools',
+                    css_classes: ['flat'],
+                });
+                infoMcpBtn.connect('clicked', () => onUserChange(() => {
+                    showMcpInfoDialog(name).catch(() => {});
+                }));
+
                 const editMcpBtn = new Gtk.Button({
                     icon_name: 'document-edit-symbolic',
                     valign: Gtk.Align.CENTER,
@@ -1847,6 +1887,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
                 row.add_suffix(enabledSwitch);
                 row.add_suffix(testMcpBtn);
+                row.add_suffix(infoMcpBtn);
                 row.add_suffix(editMcpBtn);
                 row.add_suffix(delMcpBtn);
                 mcpGroup.add(row);
@@ -1966,6 +2007,136 @@ export default class ByteyPreferences extends ExtensionPreferences {
             const alert = Adw.AlertDialog.new(`MCP Connected: ${name}`, summary);
             alert.add_response('close', 'Close');
             alert.present(window);
+        };
+
+        const showMcpInfoDialog = async name => {
+            if (destroyed)
+                return;
+            const isBuiltin = name === null;
+            const cfg = isBuiltin ? null : (mcpServers[name] ?? {});
+            const mcpTitle = isBuiltin ? 'Bytey MCP Host' : String(name);
+            let mcpDesc = 'Built-in MCP host providing native Workspace and Skills tools for Bytey.';
+            if (!isBuiltin) {
+                const transport = String(cfg.transport || (cfg.url ? 'http' : 'stdio'));
+                const target = transport !== 'stdio'
+                    ? String(cfg.url ?? '')
+                    : [String(cfg.command ?? ''), ...(Array.isArray(cfg.args) ? cfg.args.map(a => String(a)) : [])]
+                        .join(' ')
+                        .trim();
+                mcpDesc = cfg.description
+                    ? String(cfg.description)
+                    : `External ${transport} MCP server${target ? `: ${target}` : ''}`;
+            }
+
+            const dialog = new Adw.Dialog({
+                title: mcpTitle,
+                content_width: 540,
+                content_height: 520,
+            });
+            const toolbar = new Adw.ToolbarView();
+            const header = new Adw.HeaderBar({
+                show_start_title_buttons: false,
+                show_end_title_buttons: false,
+            });
+            const closeBtn = new Gtk.Button({label: 'Close'});
+            closeBtn.connect('clicked', () => dialog.close());
+            header.pack_end(closeBtn);
+            toolbar.add_top_bar(header);
+
+            const page = new Adw.PreferencesPage();
+            const infoGroup = new Adw.PreferencesGroup({title: 'MCP Details'});
+            const titleRow = new Adw.ActionRow({
+                title: 'Title',
+                subtitle: mcpTitle,
+                subtitle_selectable: true,
+            });
+            const descRow = new Adw.ActionRow({
+                title: 'Description',
+                subtitle: mcpDesc,
+                subtitle_lines: 0,
+                subtitle_selectable: true,
+            });
+            infoGroup.add(titleRow);
+            infoGroup.add(descRow);
+            page.add(infoGroup);
+
+            const toolsGroup = new Adw.PreferencesGroup({
+                title: 'Tools',
+                description: 'Discovering available tools...',
+            });
+            const loadingRow = new Adw.ActionRow({
+                title: 'Loading tools...',
+                subtitle: isBuiltin ? 'Fetching built-in Bytey MCP Host tools' : `Connecting to ${mcpTitle}`,
+            });
+            toolsGroup.add(loadingRow);
+            page.add(toolsGroup);
+
+            const scroll = new Gtk.ScrolledWindow({vexpand: true});
+            scroll.set_child(page);
+            toolbar.set_content(scroll);
+            dialog.set_child(toolbar);
+            dialog.present(window);
+
+            const resp = isBuiltin
+                ? await httpJson('GET', '/api/v1/mcp/host')
+                : await httpJson('POST', '/api/v1/mcp/test', {name: mcpTitle, config: cfg});
+            if (destroyed)
+                return;
+
+            toolsGroup.remove(loadingRow);
+            if (!resp.ok) {
+                if (resp.status === 0)
+                    setOfflineState(true);
+                const errMsg = resp.data?.error
+                    ? String(resp.data.error)
+                    : `HTTP ${resp.status || 'offline'}`;
+                toolsGroup.set_description('Failed to load tools');
+                toolsGroup.add(new Adw.ActionRow({
+                    title: 'Error',
+                    subtitle: errMsg,
+                    subtitle_lines: 0,
+                }));
+                return;
+            }
+
+            setOfflineState(false);
+            const payload = resp.data && typeof resp.data === 'object' ? resp.data : {};
+            if (payload.title)
+                titleRow.set_subtitle(String(payload.title));
+            if (payload.description)
+                descRow.set_subtitle(String(payload.description));
+            if (payload.ok === false) {
+                const err = String(payload.error ?? 'Connection failed');
+                toolsGroup.set_description('Failed to load tools');
+                toolsGroup.add(new Adw.ActionRow({
+                    title: 'Connection Failed',
+                    subtitle: err,
+                    subtitle_lines: 0,
+                }));
+                return;
+            }
+
+            const tools = Array.isArray(payload.tools) ? payload.tools : [];
+            toolsGroup.set_description(`${tools.length} tool(s) available`);
+            if (tools.length === 0) {
+                toolsGroup.add(new Adw.ActionRow({
+                    title: 'No tools exposed',
+                    subtitle: 'This MCP server did not report any tools.',
+                }));
+                return;
+            }
+            for (const tool of tools) {
+                const tName = typeof tool === 'object' ? String(tool.name ?? 'unnamed') : String(tool);
+                const tDesc = typeof tool === 'object' && tool.description
+                    ? String(tool.description)
+                    : 'No description provided.';
+                toolsGroup.add(new Adw.ActionRow({
+                    title: tName,
+                    subtitle: tDesc,
+                    subtitle_lines: 0,
+                    subtitle_selectable: true,
+                }));
+            }
         };
 
         const openMcpDialog = (existingName = null) => {

@@ -2502,6 +2502,19 @@ asyncio.run(main())
             ],
         )
 
+    async def test_get_mcp_host_builtin_tools(self) -> None:
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=5.0) as client:
+            resp = await client.get("/api/v1/mcp/host")
+            self.assertEqual(resp.status_code, 200)
+            data = resp.json()
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["title"], "Bytey MCP Host")
+            self.assertTrue(bool(data["description"]))
+            tools_by_name = {t["name"]: t["description"] for t in data["tools"]}
+            self.assertIn("bytey_workspace__list_files", tools_by_name)
+            self.assertIn("bytey_skill__load", tools_by_name)
+            self.assertTrue(all(bool(desc) for desc in tools_by_name.values()))
+
 
 class TestSettingsClientAndSyntax(unittest.TestCase):
     """Test DaemonClient offline fallback + secret stripping and static syntax checks."""
@@ -3866,6 +3879,75 @@ assert.strictEqual(elevenlabsApiKeyRow.visible, false);
         self.assertIn("language=pt", seen_api_calls[0][1])
         self.assertEqual(seen_api_calls[1][2], {"model": "pt_PT-tugão-medium"})
         self.assertEqual(seen_api_calls[2][2], {"text": "Olá!"})
+
+    def test_builtin_mcp_host_top_entry_in_settings(self) -> None:
+        ext_dir = Path(__file__).resolve().parent.parent / "gnome-extension" / "bytey-ai-companion@c42759.github.com"
+        prefs_js = (ext_dir / "prefs.js").read_text(encoding="utf-8")
+        window_py = (SETTINGS_UI_DIR / "bytey_settings" / "window.py").read_text(encoding="utf-8")
+
+        # prefs.js: Bytey MCP Host is added at the top of rebuildMcpList before empty-state return
+        prefs_start = prefs_js.index("const rebuildMcpList = () => {")
+        prefs_end = prefs_js.index("const pushMcpChanges =", prefs_start)
+        prefs_block = prefs_js[prefs_start:prefs_end]
+        self.assertIn("title: 'Bytey MCP Host'", prefs_block)
+        self.assertIn("active: true", prefs_block)
+        self.assertIn("sensitive: false", prefs_block)
+        self.assertLess(
+            prefs_block.index("title: 'Bytey MCP Host'"),
+            prefs_block.index("No external MCP servers configured"),
+        )
+
+        # window.py: Bytey MCP Host is added at the top of _rebuild_mcp_list before empty-state return
+        win_start = window_py.index("def _rebuild_mcp_list(self) -> None:")
+        win_end = window_py.index("def _sync_mcp_json_text(self) -> None:", win_start)
+        win_block = window_py[win_start:win_end]
+        self.assertIn('title="Bytey MCP Host"', win_block)
+        self.assertIn("active=True", win_block)
+        self.assertIn("sensitive=False", win_block)
+        self.assertLess(
+            win_block.index('title="Bytey MCP Host"'),
+            win_block.index("No external MCP servers configured"),
+        )
+
+    def test_mcp_info_icon_and_dialog_parity(self) -> None:
+        ext_dir = Path(__file__).resolve().parent.parent / "gnome-extension" / "bytey-ai-companion@c42759.github.com"
+        prefs_js = (ext_dir / "prefs.js").read_text(encoding="utf-8")
+        window_py = (SETTINGS_UI_DIR / "bytey_settings" / "window.py").read_text(encoding="utf-8")
+
+        self.assertGreaterEqual(prefs_js.count("dialog-information-symbolic"), 2)
+        self.assertIn("showMcpInfoDialog(null)", prefs_js)
+        self.assertIn("showMcpInfoDialog(name)", prefs_js)
+        self.assertIn("await httpJson('GET', '/api/v1/mcp/host')", prefs_js)
+
+        self.assertGreaterEqual(window_py.count("dialog-information-symbolic"), 2)
+        self.assertIn("self._open_mcp_info_dialog(None)", window_py)
+        self.assertIn("self._open_mcp_info_dialog(n)", window_py)
+        self.assertIn("self.client.get_mcp_host_info", window_py)
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/mcp/host":
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "title": "Bytey MCP Host",
+                        "description": "Built-in MCP host",
+                        "tools": [{"name": "bytey_workspace__read_file", "description": "Read a file"}],
+                    },
+                )
+            return httpx.Response(404, json={"error": "not found"})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dc = DaemonClient(base_url="http://127.0.0.1:8765", config_path=Path(tmp) / "cfg.json")
+            dc._client.close()
+            dc._client = httpx.Client(base_url="http://127.0.0.1:8765", transport=httpx.MockTransport(_handler))
+            try:
+                res = dc.get_mcp_host_info()
+                self.assertTrue(res.ok)
+                self.assertEqual(res.data["title"], "Bytey MCP Host")
+                self.assertEqual(res.data["tools"][0]["name"], "bytey_workspace__read_file")
+            finally:
+                dc.close()
 
 
 class TestSTTBackendPrecedence(unittest.IsolatedAsyncioTestCase):

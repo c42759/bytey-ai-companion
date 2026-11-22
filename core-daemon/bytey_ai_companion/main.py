@@ -1880,6 +1880,7 @@ class ByteyDaemon:
         self.ipc.register_route("PUT", "/api/v1/mcp/json", self._route_put_mcp_json)
         self.ipc.register_route("PUT", "/api/v1/mcp", self._route_put_mcp_json)
         self.ipc.register_route("POST", "/api/v1/mcp/test", self._route_test_mcp)
+        self.ipc.register_route("GET", "/api/v1/mcp/host", self._route_get_mcp_host)
         self.ipc.register_route("POST", "/api/v1/mcp/confirm", self._route_confirm_tool)
         self.ipc.register_route("POST", "/api/v1/tools/{call_id}/confirm", self._route_confirm_tool)
 
@@ -2102,6 +2103,27 @@ class ByteyDaemon:
         }
         norm_cfg = _normalize_mcp_entry(raw_cfg)
         return await self.mcp_manager.test_server(name, norm_cfg)
+
+    async def _route_get_mcp_host(self, _req: IPCRequest) -> dict[str, Any]:
+        """Return built-in Bytey MCP Host metadata and active built-in tools."""
+        cfg = self.config_manager.config
+        raw_tools: list[dict[str, Any]] = []
+        raw_tools.extend(self._build_workspace_tools())
+        if cfg.skills.enabled:
+            raw_tools.extend(self._build_skill_tools(cfg))
+        tools = [
+            {
+                "name": str((t.get("function") or {}).get("name") or t.get("tool") or ""),
+                "description": str((t.get("function") or {}).get("description") or ""),
+            }
+            for t in raw_tools
+        ]
+        return {
+            "ok": True,
+            "title": "Bytey MCP Host",
+            "description": "Built-in MCP host providing native Workspace and Skills tools for Bytey.",
+            "tools": tools,
+        }
 
     async def _route_confirm_tool(self, req: IPCRequest) -> dict[str, Any]:
         body = req.json()

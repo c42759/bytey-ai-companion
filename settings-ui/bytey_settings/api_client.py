@@ -539,6 +539,23 @@ class DaemonClient:
             status_code=resp.status_code,
         )
 
+    def get_mcp_host_info(self) -> ApiResult:
+        """Fetch built-in Bytey MCP Host metadata and tool descriptions."""
+        resp, err, offline = self._request("GET", "/api/v1/mcp/host", timeout=5.0)
+        if resp is None:
+            return ApiResult(
+                ok=False,
+                offline=offline,
+                error="Daemon offline: cannot inspect built-in MCP Host" if offline else err,
+            )
+        if resp.is_success:
+            return ApiResult(ok=True, data=resp.json(), status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
     def test_mcp_server(self, name: str, cfg: dict[str, Any]) -> ApiResult:
         """Test connectivity and discover tools for a single MCP server."""
         resp, err, offline = self._request(
