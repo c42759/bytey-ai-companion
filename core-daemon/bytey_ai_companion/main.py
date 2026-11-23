@@ -18,10 +18,12 @@ from pathlib import Path
 from collections import deque
 from datetime import datetime
 
+from .agents import AgentRegistry, AgentRunner
 from .audio import VoiceInputService
 from .config import (
     PIPER_VOICE_PRESETS,
     ConfigManager,
+    ExternalAgentOverride,
     MCPServerConfig,
     SecretStore,
     SkillOverrideConfig,
@@ -201,6 +203,9 @@ class ByteyDaemon:
         )
         self.skill_runner = SkillScriptRunner()
         self._rescan_skills()
+        self.agent_registry = AgentRegistry()
+        self.agent_runner = AgentRunner()
+        self._agent_sessions: dict[str, str] = {}
         self.kokoro_client = kokoro_client or KokoroTTSClient()
         self._owns_kokoro = kokoro_client is None
         self.elevenlabs_client = elevenlabs_client or ElevenLabsTTSClient()
@@ -548,6 +553,173 @@ class ByteyDaemon:
         return {"ok": False, "error": f"Unknown skill tool: {tool_name!r}"}
 
     @staticmethod
+    def _build_agent_tools() -> list[dict[str, Any]]:
+        """Build built-in pseudo-tool schema for delegating prompts to external AI CLIs."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_agent__run",
+                    "description": (
+                        "Run a prepared prompt non-interactively in an enabled external AI CLI agent "
+                        "(e.g. claude, copilot, agy, gemini, codex, opencode, aider) and return its output."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent": {
+                                "type": "string",
+                                "description": "Target CLI agent ID (e.g. 'claude', 'copilot').",
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "Complete self-contained prompt to execute non-interactively.",
+                            },
+                            "working_dir": {
+                                "type": "string",
+                                "description": "Optional working directory override; defaults to active workspace.",
+                            },
+                            "resume": {
+                                "type": "boolean",
+                                "description": "If true, resume previous CLI session when supported.",
+                            },
+                        },
+                        "required": ["agent", "prompt"],
+                    },
+                },
+            }
+        ]
+
+    async def _execute_agent_tool(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        cfg: Any,
+        confirm_cb: Any,
+        *,
+        call_id: str,
+        assistant_id: str,
+    ) -> dict[str, Any]:
+        """Execute bytey_agent__run with preflight validation, approval gate, and output capture."""
+        if tool_name != "run":
+            return {"ok": False, "error": f"Unknown agent tool: {tool_name!r}"}
+
+        agent_id = str(args.get("agent") or "").strip().lower()
+        prompt = str(args.get("prompt") or "").strip()
+        working_dir_arg = str(args.get("working_dir") or "").strip()
+        resume = bool(args.get("resume", False))
+
+        if not agent_id:
+            return {"ok": False, "error": "Missing required 'agent' argument."}
+        if not prompt:
+            return {"ok": False, "error": "Missing required 'prompt' argument."}
+
+        if not self.agent_registry.list_agents():
+            await self.agent_registry.detect_all(cfg.agents)
+        else:
+            self.agent_registry.sync_config(cfg.agents)
+
+        info = self.agent_registry.get_agent(agent_id)
+        if info is None:
+            return {"ok": False, "error": f"Unknown CLI agent: {agent_id!r}"}
+        if not info.installed:
+            return {"ok": False, "error": f"CLI agent '{agent_id}' is not installed on this machine."}
+        if not info.enabled:
+            return {"ok": False, "error": f"CLI agent '{agent_id}' is disabled in God Mode settings."}
+
+        cwd_str = working_dir_arg or (cfg.workspace.active_path or "").strip()
+        if not cwd_str:
+            return {
+                "ok": False,
+                "error": "No active workspace is set. Select a workspace folder or pass 'working_dir'.",
+            }
+        cwd = Path(cwd_str).expanduser().resolve()
+        if not cwd.is_dir():
+            return {"ok": False, "error": f"Working directory does not exist: {cwd_str!r}"}
+
+        resume_sid = self._agent_sessions.get(agent_id, "") if resume else ""
+        try:
+            argv = self.agent_registry.build_argv(
+                agent_id,
+                prompt,
+                cfg.agents,
+                resume_session_id=resume_sid,
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        auto_accept = (not cfg.workspace.require_write_approval) and (
+            not cfg.workspace.require_command_approval
+        )
+        if cfg.agents.require_run_approval and not auto_accept:
+            argv_preview = " ".join(
+                shlex.quote(a if a != prompt else "<prompt>") for a in argv
+            )
+            extra = {
+                "kind": "agent_run",
+                "agent": agent_id,
+                "model": info.model or "(default)",
+                "permission_mode": info.permission_mode,
+                "cwd": str(cwd),
+                "command": argv_preview,
+                "prompt": prompt,
+                "diff": (
+                    f"Agent: {info.display_name} ({agent_id})\n"
+                    f"Model: {info.model or 'CLI default'}\n"
+                    f"Permission Mode: {info.permission_mode}\n"
+                    f"CWD: {cwd}\n"
+                    f"Command: {argv_preview}\n\n"
+                    f"--- Prompt ---\n{prompt}"
+                ),
+            }
+            approved = await confirm_cb("bytey_agent", "run", args, extra)
+            if not approved:
+                return {"ok": False, "denied": True, "error": "User rejected external AI CLI execution."}
+
+        async def _on_tail(tail: str) -> None:
+            await self.ipc.connection_manager.broadcast(
+                {
+                    "type": "tool_call_status",
+                    "call_id": call_id,
+                    "message_id": assistant_id,
+                    "server": "bytey_agent",
+                    "tool": "run",
+                    "arguments": {"agent": agent_id},
+                    "status": "running",
+                    "summary": tail,
+                }
+            )
+
+        res = await self.agent_runner.run(
+            agent_id,
+            argv,
+            cwd,
+            timeout_seconds=cfg.agents.timeout_seconds,
+            max_output_chars=cfg.agents.max_output_chars,
+            on_output_tail=_on_tail,
+        )
+        if res.session_id:
+            self._agent_sessions[agent_id] = res.session_id
+
+        payload = {
+            "agent": res.agent,
+            "exit_code": res.exit_code,
+            "duration_ms": res.duration_ms,
+            "timed_out": res.timed_out,
+            "cancelled": res.cancelled,
+            "auth_hint": res.auth_hint,
+            "git_status": res.git_status,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+        }
+        ok = res.exit_code == 0 and not res.timed_out and not res.cancelled
+        return {
+            "ok": ok,
+            "content": json.dumps(payload, ensure_ascii=False),
+            "error": res.auth_hint or res.stderr or (f"exit_code={res.exit_code}" if not ok else ""),
+        }
+
+    @staticmethod
     def _build_workspace_tools() -> list[dict[str, Any]]:
         """Build OpenAI-style built-in pseudo-tool schemas for active workspace operations."""
         return [
@@ -654,7 +826,12 @@ class ByteyDaemon:
                 "type": "function",
                 "function": {
                     "name": "bytey_workspace__write_file",
-                    "description": "Create or overwrite a file inside the active workspace.",
+                    "description": (
+                        "Create a new file inside the active workspace, or completely replace an "
+                        "existing file when overwrite=true. Do NOT use for partial edits or "
+                        "appending to existing files—use bytey_workspace__propose_edit or "
+                        "bytey_workspace__append_file instead."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -666,12 +843,39 @@ class ByteyDaemon:
                                 "type": "string",
                                 "description": "Full file content to write.",
                             },
+                            "overwrite": {
+                                "type": "boolean",
+                                "description": "Set true only to completely replace an existing file. Default false.",
+                            },
                         },
                         "required": ["rel_path", "content"],
                     },
                 },
                 "server": "bytey_workspace",
                 "tool": "write_file",
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_workspace__append_file",
+                    "description": "Append content to the end of an existing workspace file (or create it if missing).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "rel_path": {
+                                "type": "string",
+                                "description": "Relative path to the file inside the workspace.",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content to append to the end of the file.",
+                            },
+                        },
+                        "required": ["rel_path", "content"],
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "append_file",
             },
             {
                 "type": "function",
@@ -812,7 +1016,8 @@ class ByteyDaemon:
             if tool_name == "write_file":
                 rel_path = str(args.get("rel_path") or "")
                 content = str(args.get("content") or "")
-                preview = toolchain.preview_write(rel_path, content)
+                overwrite = bool(args.get("overwrite", False))
+                preview = toolchain.preview_write(rel_path, content, overwrite=overwrite)
                 if not preview.get("ok"):
                     return {
                         "ok": False,
@@ -831,13 +1036,42 @@ class ByteyDaemon:
                             "denied": True,
                             "error": "User rejected the proposed change/command.",
                         }
-                res = toolchain.apply_write(rel_path, content)
+                res = toolchain.apply_write(rel_path, content, overwrite=overwrite)
                 if not res.get("ok"):
                     return {
                         "ok": False,
                         "error": str(res.get("error") or "Write failed"),
                     }
                 return {"ok": True, "content": res.get("diff") or f"Wrote {rel_path}"}
+            if tool_name == "append_file":
+                rel_path = str(args.get("rel_path") or "")
+                content = str(args.get("content") or "")
+                preview = toolchain.preview_append(rel_path, content)
+                if not preview.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(preview.get("error") or "Append preview failed"),
+                    }
+                if cfg.workspace.require_write_approval:
+                    approved = await confirm_cb(
+                        "bytey_workspace",
+                        "append_file",
+                        args,
+                        {"diff": preview["diff"], "rel_path": preview["rel_path"]},
+                    )
+                    if not approved:
+                        return {
+                            "ok": False,
+                            "denied": True,
+                            "error": "User rejected the proposed change/command.",
+                        }
+                res = toolchain.apply_append(rel_path, content)
+                if not res.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(res.get("error") or "Append failed"),
+                    }
+                return {"ok": True, "content": res.get("diff") or f"Appended to {rel_path}"}
             if tool_name == "delete_file":
                 rel_path = str(args.get("rel_path") or "")
                 preview = toolchain.preview_delete(rel_path)
@@ -990,6 +1224,7 @@ class ByteyDaemon:
             cfg,
             self._get_provider_api_key(cfg.provider.active_provider),
         )
+        await self.agent_registry.detect_all(cfg.agents)
 
         await self.ipc.start()
         if self.enable_voice_capture:
@@ -1028,6 +1263,7 @@ class ByteyDaemon:
 
         await self.voice_input.stop()
         await self.tts_player.stop()
+        await self.agent_runner.cancel()
         if self._owns_mcp_manager:
             await self.mcp_manager.close_all()
         if self._owns_llm_router:
@@ -1122,6 +1358,8 @@ class ByteyDaemon:
             merge_section("skills", raw_patch["skills"])
         if isinstance(raw_patch.get("workspace"), dict):
             merge_section("workspace", raw_patch["workspace"])
+        if isinstance(raw_patch.get("agents"), dict):
+            merge_section("agents", raw_patch["agents"])
 
         # settings-ui `llm` mirror
         if isinstance(raw_patch.get("llm"), dict):
@@ -1481,6 +1719,54 @@ class ByteyDaemon:
 
             ws_parts = text.split(None, 1)
             ws_cmd = ws_parts[0].lower()
+            if ws_cmd in ("/god", "/godmode"):
+                arg = ws_parts[1].strip().lower() if len(ws_parts) > 1 else ""
+                cur_god = bool(self.config_manager.config.agents.god_mode_enabled)
+                if not arg:
+                    next_god = not cur_god
+                elif arg in ("on", "true", "1", "enable"):
+                    next_god = True
+                elif arg in ("off", "false", "0", "disable"):
+                    next_god = False
+                else:
+                    next_god = cur_god
+                prev_muted = self.config_manager.config.voice_in.mic_muted
+                updated = self.config_manager.update_config(
+                    {"agents": {"god_mode_enabled": next_god}}
+                )
+                await self._finalize_config_change(
+                    updated,
+                    prev_muted,
+                    refresh_provider=False,
+                    broadcast_visuals=False,
+                    tools_hint=None,
+                )
+                reply_emotion = "happy" if next_god else "neutral"
+                reply_text = f"God Mode {'enabled' if next_god else 'disabled'}."
+                reply_msg = await self.storage.add_message(
+                    sid,
+                    role="assistant",
+                    content=reply_text,
+                    input_mode=input_mode,
+                    emotion=reply_emotion,
+                )
+                await self.ipc.connection_manager.broadcast(
+                    {
+                        "type": "transcript_delta",
+                        "session_id": sid,
+                        "message_id": reply_msg["id"],
+                        "role": "assistant",
+                        "source": input_mode,
+                        "text": reply_text,
+                        "emotion": reply_emotion,
+                        "is_final": True,
+                    }
+                )
+                return {
+                    "session_id": sid,
+                    "user_message": user_msg,
+                    "assistant_message": reply_msg,
+                }
             if ws_cmd in ("/workspace", "/cd"):
                 ws_arg = ws_parts[1].strip() if len(ws_parts) > 1 else ""
                 reply_emotion = "happy"
@@ -1586,10 +1872,31 @@ class ByteyDaemon:
                     tools = []
             active_ws = (cfg.workspace.active_path or "").strip()
             ws_valid = bool(active_ws and Path(active_ws).is_dir())
+            god_mode = bool(cfg.agents.god_mode_enabled)
             if supports_tools and cfg.skills.enabled:
                 tools.extend(self._build_skill_tools(cfg))
             if supports_tools and ws_valid:
-                tools.extend(self._build_workspace_tools())
+                ws_tools = self._build_workspace_tools()
+                if god_mode:
+                    _write_ws_tools = {
+                        "bytey_workspace__propose_edit",
+                        "bytey_workspace__write_file",
+                        "bytey_workspace__append_file",
+                        "bytey_workspace__delete_file",
+                        "bytey_workspace__rename_file",
+                    }
+                    ws_tools = [
+                        t
+                        for t in ws_tools
+                        if (t.get("function") or {}).get("name") not in _write_ws_tools
+                    ]
+                tools.extend(ws_tools)
+            if supports_tools and god_mode:
+                if not self.agent_registry.list_agents():
+                    await self.agent_registry.detect_all(cfg.agents)
+                else:
+                    self.agent_registry.sync_config(cfg.agents)
+                tools.extend(self._build_agent_tools())
 
             chunker = SentenceChunker()
             idle_before_s, recent_count = self._record_interaction()
@@ -1628,12 +1935,42 @@ class ByteyDaemon:
                     runtime_context_note += (
                         "\n[Workspace Tool Rule: When the user asks to create, write, edit, rename, "
                         "delete, inspect, or run files/scripts in the workspace, ALWAYS invoke "
-                        "bytey_workspace__write_file, bytey_workspace__propose_edit, "
-                        "bytey_workspace__rename_file, bytey_workspace__delete_file, "
-                        "bytey_workspace__list_files, bytey_workspace__read_file, or "
-                        "bytey_workspace__run_command instead of only pasting code in chat. "
-                        "The user will review and approve writes in the UI.]"
+                        "bytey_workspace__write_file, bytey_workspace__append_file, "
+                        "bytey_workspace__propose_edit, bytey_workspace__rename_file, "
+                        "bytey_workspace__delete_file, bytey_workspace__list_files, "
+                        "bytey_workspace__read_file, or bytey_workspace__run_command instead of "
+                        "only pasting code in chat. For existing files, ALWAYS call "
+                        "bytey_workspace__read_file first and use bytey_workspace__propose_edit "
+                        "for partial edits or bytey_workspace__append_file to append sections; "
+                        "use bytey_workspace__write_file only for new files or intentional full "
+                        "rewrites (overwrite=true). The user will review and approve writes in the UI.]"
                     )
+            if god_mode and supports_tools:
+                enabled_agents = [
+                    a for a in self.agent_registry.list_agents(cfg.agents) if a.installed and a.enabled
+                ]
+                agents_desc = (
+                    ", ".join(
+                        f"{a.id} ({a.display_name}, model={a.model or 'default'})"
+                        for a in enabled_agents
+                    )
+                    if enabled_agents
+                    else "none enabled"
+                )
+                runtime_context_note += (
+                    "\n[God Mode Active: Act as Prompt Architect & Orchestrator instead of editing "
+                    "workspace files directly. Collaborate with the user to craft a clear, "
+                    "self-contained prompt (you may use read-only workspace tools to inspect files). "
+                    f"Available enabled external CLIs: {agents_desc}. "
+                    "When the user asks to execute or send the prompt to a CLI, invoke "
+                    "bytey_agent__run(agent, prompt). "
+                    "CRITICAL: Inspect the returned stdout and git_status carefully before reporting. "
+                    "If the external CLI asked a question, requested approval, or git_status shows no "
+                    "expected file changes, NEVER claim files were created or modified—relay the CLI's "
+                    "exact question/blocker to the user instead, and use resume=True if the user confirms. "
+                    "Keep your spoken summary concise and TTS-friendly (do not read raw logs/diffs aloud); "
+                    "put file paths and details in chat text.]"
+                )
             if needs_auto_title:
                 runtime_context_note += (
                     "\n[Runtime Title Request: This is a new conversation. Begin your reply with "
@@ -1733,12 +2070,16 @@ class ByteyDaemon:
                         call_id = str(uuid.uuid4())
                         is_skill_tool = ns_name.startswith("bytey_skill__")
                         is_workspace_tool = ns_name.startswith("bytey_workspace__")
+                        is_agent_tool = ns_name.startswith("bytey_agent__")
                         if is_skill_tool:
                             srv_name = "bytey_skill"
                             tool_name = ns_name[len("bytey_skill__") :]
                         elif is_workspace_tool:
                             srv_name = "bytey_workspace"
                             tool_name = ns_name[len("bytey_workspace__") :]
+                        elif is_agent_tool:
+                            srv_name = "bytey_agent"
+                            tool_name = ns_name[len("bytey_agent__") :]
                         else:
                             split = self.mcp_manager._split_namespaced_tool(ns_name, cfg.mcp_servers)
                             srv_name, tool_name = split if split else ("mcp", ns_name)
@@ -1804,6 +2145,15 @@ class ByteyDaemon:
                                 args,
                                 cfg,
                                 confirm_cb,
+                            )
+                        elif is_agent_tool:
+                            tool_res = await self._execute_agent_tool(
+                                tool_name,
+                                args,
+                                cfg,
+                                confirm_cb,
+                                call_id=call_id,
+                                assistant_id=assistant_id,
                             )
                         else:
                             tool_res = await self.mcp_manager.execute_tool_call(
@@ -2001,6 +2351,10 @@ class ByteyDaemon:
         self.ipc.register_route("GET", "/api/v1/skills", self._route_list_skills)
         self.ipc.register_route("GET", "/api/v1/workspace", self._route_get_workspace)
         self.ipc.register_route("PUT", "/api/v1/workspace", self._route_put_workspace)
+        self.ipc.register_route("GET", "/api/v1/agents", self._route_list_agents)
+        self.ipc.register_route("POST", "/api/v1/agents/detect", self._route_detect_agents)
+        self.ipc.register_route("POST", "/api/v1/agents/cancel", self._route_cancel_agent)
+        self.ipc.register_route("PATCH", "/api/v1/agents/{agent_id}", self._route_patch_agent)
         self.ipc.register_route("POST", "/api/v1/skills/rescan", self._route_rescan_skills)
         self.ipc.register_route("POST", "/api/v1/skills/import", self._route_import_skill)
         self.ipc.register_route("POST", "/api/v1/skills", self._route_create_skill)
@@ -2225,6 +2579,8 @@ class ByteyDaemon:
         raw_tools.extend(self._build_workspace_tools())
         if cfg.skills.enabled:
             raw_tools.extend(self._build_skill_tools(cfg))
+        if cfg.agents.god_mode_enabled:
+            raw_tools.extend(self._build_agent_tools())
         tools = [
             {
                 "name": str((t.get("function") or {}).get("name") or t.get("tool") or ""),
@@ -2251,6 +2607,93 @@ class ByteyDaemon:
             )
         fut.set_result(approved)
         return {"ok": True, "call_id": call_id, "approved": approved}
+
+    async def _route_list_agents(self, _req: IPCRequest) -> dict[str, Any]:
+        """Return all supported CLI agents with installation status and per-agent config."""
+        cfg = self.config_manager.config
+        if not self.agent_registry.list_agents():
+            await self.agent_registry.detect_all(cfg.agents)
+        else:
+            self.agent_registry.sync_config(cfg.agents)
+        agents = [a.to_dict() for a in self.agent_registry.list_agents(cfg.agents)]
+        return {
+            "ok": True,
+            "god_mode_enabled": bool(cfg.agents.god_mode_enabled),
+            "agents": agents,
+        }
+
+    async def _route_detect_agents(self, _req: IPCRequest) -> dict[str, Any]:
+        """Re-scan installed external CLI agents and broadcast agents_updated."""
+        cfg = self.config_manager.config
+        detected = await self.agent_registry.detect_all(cfg.agents)
+        agents = [a.to_dict() for a in detected]
+        await self.ipc.connection_manager.broadcast(
+            {
+                "type": "agents_updated",
+                "god_mode_enabled": bool(cfg.agents.god_mode_enabled),
+                "agents": agents,
+            }
+        )
+        return {
+            "ok": True,
+            "god_mode_enabled": bool(cfg.agents.god_mode_enabled),
+            "agents": agents,
+        }
+
+    async def _route_cancel_agent(self, _req: IPCRequest) -> dict[str, Any]:
+        """Cancel any active external CLI subprocess."""
+        cancelled = await self.agent_runner.cancel()
+        return {"ok": True, "cancelled": cancelled}
+
+    async def _route_patch_agent(self, req: IPCRequest) -> dict[str, Any]:
+        """Update per-CLI agent override settings (enabled, model, permission_mode, etc.)."""
+        agent_id = str(req.path_params.get("agent_id") or "").strip().lower()
+        body = req.json()
+        cfg = self.config_manager.config
+        if not self.agent_registry.list_agents():
+            await self.agent_registry.detect_all(cfg.agents)
+        info = self.agent_registry.get_agent(agent_id)
+        if info is None:
+            return IPCResponse(
+                status=404,
+                body={"ok": False, "error": f"Unknown agent {agent_id!r}"},
+            )
+        if "enabled" in body and bool(body["enabled"]) and not info.installed:
+            return IPCResponse(
+                status=400,
+                body={"ok": False, "error": f"Cannot enable '{agent_id}': CLI is not installed"},
+            )
+
+        current_ov = cfg.agents.overrides.get(agent_id, ExternalAgentOverride()).model_dump()
+        for key in ("enabled", "model", "permission_mode", "custom_path", "extra_args", "allow_autonomous_flags"):
+            if key in body:
+                current_ov[key] = body[key]
+
+        prev_muted = self.config_manager.config.voice_in.mic_muted
+        updated_cfg = self.config_manager.update_config(
+            {"agents": {"overrides": {agent_id: current_ov}}}
+        )
+        await self._finalize_config_change(
+            updated_cfg,
+            prev_muted,
+            refresh_provider=False,
+            broadcast_visuals=False,
+            tools_hint=None,
+        )
+        agents = [a.to_dict() for a in self.agent_registry.sync_config(updated_cfg.agents)]
+        await self.ipc.connection_manager.broadcast(
+            {
+                "type": "agents_updated",
+                "god_mode_enabled": bool(updated_cfg.agents.god_mode_enabled),
+                "agents": agents,
+            }
+        )
+        updated_agent = self.agent_registry.get_agent(agent_id)
+        return {
+            "ok": True,
+            "agent": updated_agent.to_dict() if updated_agent else None,
+            "agents": agents,
+        }
 
     async def _route_get_workspace(self, _req: IPCRequest) -> dict[str, Any]:
         return self._build_workspace_payload()

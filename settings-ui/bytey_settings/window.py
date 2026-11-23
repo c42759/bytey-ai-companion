@@ -782,12 +782,15 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._mcp_rows: list[Gtk.Widget] = []
         self._skills: list[dict[str, Any]] = []
         self._skill_rows: list[Gtk.Widget] = []
+        self._agents: list[dict[str, Any]] = []
+        self._agent_rows: list[Gtk.Widget] = []
         self._workspace_recent_paths: list[str] = []
         self._workspace_updating = False
         self._color_controls: dict[str, tuple[Adw.ActionRow, Gtk.ColorDialogButton, str]] = {}
 
         self._build_general_page()
         self._build_ai_mcp_page()
+        self._build_god_mode_page()
         self._build_skills_page()
         self._build_workspace_page()
         self._build_voice_input_page()
@@ -1682,6 +1685,216 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self._toast(f"Applied mcpServers JSON ({len(servers)} server(s)){suffix}")
 
         self._run_async(lambda: self.client.put_mcp_json(raw), on_done)
+
+    # ------------------------------------------------------------------
+    # Page: God Mode
+    # ------------------------------------------------------------------
+
+    def _build_god_mode_page(self) -> None:
+        page = Adw.PreferencesPage(
+            title="God Mode", icon_name="applications-engineering-symbolic"
+        )
+        page.set_name("god-mode")
+
+        banner_group = Adw.PreferencesGroup()
+        banner_group.add(self._create_offline_banner())
+        page.add(banner_group)
+
+        god_group = Adw.PreferencesGroup(
+            title="God Mode",
+            description=(
+                "When enabled, Bytey acts as Prompt Architect and delegates implementation "
+                "non-interactively to an enabled external AI CLI."
+            ),
+        )
+
+        self.god_mode_enabled_row = Adw.SwitchRow(
+            title="Enable God Mode",
+            subtitle="Use external AI CLIs instead of direct workspace edits",
+        )
+        self.god_mode_enabled_row.connect(
+            "notify::active",
+            lambda *_: self._patch_fields(
+                {"agents": {"god_mode_enabled": self.god_mode_enabled_row.get_active()}},
+                "Saved",
+            ),
+        )
+        god_group.add(self.god_mode_enabled_row)
+
+        self.god_mode_approval_row = Adw.SwitchRow(
+            title="Require Approval Before Running CLI",
+            subtitle="Preview target CLI, command, and prepared prompt before execution",
+        )
+        self.god_mode_approval_row.connect(
+            "notify::active",
+            lambda *_: self._patch_fields(
+                {"agents": {"require_run_approval": self.god_mode_approval_row.get_active()}},
+                "Saved",
+            ),
+        )
+        god_group.add(self.god_mode_approval_row)
+
+        self.god_mode_timeout_row = Adw.SpinRow(
+            title="Inactivity Timeout (seconds)",
+            subtitle="Kill CLI only if idle with no output for this many seconds (10–1800s)",
+            adjustment=Gtk.Adjustment(
+                lower=10, upper=1800, step_increment=10, page_increment=60, value=300
+            ),
+        )
+        self.god_mode_timeout_row.connect(
+            "notify::value",
+            lambda *_: self._patch_fields(
+                {"agents": {"timeout_seconds": int(self.god_mode_timeout_row.get_value())}},
+                "Saved",
+            ),
+        )
+        god_group.add(self.god_mode_timeout_row)
+        page.add(god_group)
+
+        self.agents_group = Adw.PreferencesGroup(
+            title="Supported CLI Agents",
+            description=(
+                "Detected external AI CLIs can be toggled individually and assigned a model. "
+                "Missing CLIs remain disabled."
+            ),
+        )
+        detect_btn = Gtk.Button(label="Detect CLIs", valign=Gtk.Align.CENTER)
+        detect_btn.connect("clicked", self._on_detect_agents_clicked)
+        self.agents_group.set_header_suffix(detect_btn)
+        page.add(self.agents_group)
+
+        self.add(page)
+
+    def _on_detect_agents_clicked(self, *_: object) -> None:
+        self._run_async(self.client.detect_agents, self._on_agents_detected)
+
+    def _on_agents_detected(self, res: ApiResult) -> None:
+        self._set_offline(res.offline)
+        if res.ok and isinstance(res.data, dict):
+            self._agents = list(res.data.get("agents") or [])
+            self._rebuild_agents_list()
+            self._toast("CLI agents scanned")
+        else:
+            self._toast(f"Failed to detect CLI agents: {res.error}")
+
+    def _on_agents_loaded(self, res: ApiResult) -> None:
+        self._set_offline(res.offline)
+        if res.ok and isinstance(res.data, dict):
+            self._agents = list(res.data.get("agents") or [])
+            self._rebuild_agents_list()
+
+    def _patch_single_agent(self, agent_id: str, patch: dict[str, Any], toast_msg: str = "") -> None:
+        def _done(res: ApiResult) -> None:
+            if res.ok and isinstance(res.data, dict):
+                if isinstance(res.data.get("agents"), list):
+                    self._agents = list(res.data["agents"])
+                    self._rebuild_agents_list()
+                if toast_msg:
+                    self._toast(toast_msg)
+            elif not res.ok:
+                self._toast(f"Failed to update agent: {res.error}")
+
+        self._run_async(lambda: self.client.patch_agent(agent_id, patch), _done)
+
+    def _rebuild_agents_list(self) -> None:
+        for row in self._agent_rows:
+            self.agents_group.remove(row)
+        self._agent_rows.clear()
+
+        if not self._agents:
+            empty = Adw.ActionRow(
+                title="No CLI agents detected yet",
+                subtitle="Click Detect CLIs to scan your system PATH.",
+            )
+            self.agents_group.add(empty)
+            self._agent_rows.append(empty)
+            return
+
+        perm_modes = ["default", "accept_edits", "autonomous"]
+        for agent in self._agents:
+            agent_id = str(agent.get("id") or "")
+            display_name = str(agent.get("display_name") or agent_id)
+            installed = bool(agent.get("installed", False))
+            enabled = bool(agent.get("enabled", False) and installed)
+
+            if not installed:
+                row = Adw.ActionRow(
+                    title=display_name,
+                    subtitle=f"Not Found ({agent.get('binary') or agent_id})",
+                )
+                sw = Gtk.Switch(active=False, sensitive=False, valign=Gtk.Align.CENTER)
+                row.add_suffix(sw)
+                self.agents_group.add(row)
+                self._agent_rows.append(row)
+                continue
+
+            ver = str(agent.get("version") or "").strip()
+            ver_part = f"{ver} • " if ver else ""
+            row = Adw.ExpanderRow(
+                title=display_name,
+                subtitle=f"Installed • {ver_part}{agent.get('resolved_path') or agent.get('binary')}",
+            )
+
+            sw = Gtk.Switch(active=enabled, valign=Gtk.Align.CENTER)
+            sw.connect(
+                "notify::active",
+                lambda s, _p, aid=agent_id: self._patch_single_agent(
+                    aid, {"enabled": s.get_active()}
+                ),
+            )
+            row.add_suffix(sw)
+
+            defaults = agent.get("default_models") or []
+            presets = (
+                f"Presets: {', '.join(str(m) for m in defaults)}"
+                if defaults
+                else "Leave empty to use CLI default model"
+            )
+            model_row = Adw.EntryRow(
+                title=f"Model ({agent.get('model_flag') or '--model'})",
+                text=str(agent.get("model") or ""),
+            )
+            model_row.set_tooltip_text(presets)
+            apply_btn = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)
+            apply_btn.connect(
+                "clicked",
+                lambda _b, aid=agent_id, mr=model_row, dn=display_name: self._patch_single_agent(
+                    aid, {"model": mr.get_text().strip()}, f"{dn} model saved"
+                ),
+            )
+            model_row.add_suffix(apply_btn)
+            row.add_row(model_row)
+
+            perm_row = Adw.ComboRow(
+                title="Permission Mode",
+                subtitle=presets,
+                model=Gtk.StringList.new(perm_modes),
+            )
+            cur_perm = str(agent.get("permission_mode") or "accept_edits")
+            perm_row.set_selected(perm_modes.index(cur_perm) if cur_perm in perm_modes else 1)
+            perm_row.connect(
+                "notify::selected",
+                lambda pr, _p, aid=agent_id: self._patch_single_agent(
+                    aid, {"permission_mode": perm_modes[pr.get_selected()]}
+                ),
+            )
+            row.add_row(perm_row)
+
+            auto_flags_row = Adw.SwitchRow(
+                title="Allow Autonomous Flags",
+                subtitle="Opt-in for --dangerously-skip-permissions / --allow-all-tools",
+                active=bool(agent.get("allow_autonomous_flags", False)),
+            )
+            auto_flags_row.connect(
+                "notify::active",
+                lambda sr, _p, aid=agent_id: self._patch_single_agent(
+                    aid, {"allow_autonomous_flags": sr.get_active()}
+                ),
+            )
+            row.add_row(auto_flags_row)
+
+            self.agents_group.add(row)
+            self._agent_rows.append(row)
 
     # ------------------------------------------------------------------
     # Page: Skills
@@ -3560,6 +3773,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._run_async(self.client.get_config, self._on_config_loaded)
         self._run_async(self.client.get_mcp_json, self._on_mcp_loaded)
         self._run_async(self.client.list_skills, self._on_skills_loaded)
+        self._run_async(self.client.list_agents, self._on_agents_loaded)
 
     def _on_config_loaded(self, res: ApiResult) -> None:
         self._set_offline(res.offline)
@@ -3720,6 +3934,12 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self.offset_y_row.set_value(float(self._read_field("offset_y", 12)))
             self.float_x_row.set_value(float(self._read_field("float_x", 100)))
             self.float_y_row.set_value(float(self._read_field("float_y", 80)))
+
+            # God Mode
+            agents_cfg = self._config.get("agents") if isinstance(self._config.get("agents"), dict) else {}
+            self.god_mode_enabled_row.set_active(bool(agents_cfg.get("god_mode_enabled", False)))
+            self.god_mode_approval_row.set_active(bool(agents_cfg.get("require_run_approval", True)))
+            self.god_mode_timeout_row.set_value(float(agents_cfg.get("timeout_seconds", 300)))
 
             # Skills
             self.skills_enabled_row.set_active(bool(self._read_field("skills_enabled", True)))

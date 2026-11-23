@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _KEY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MERGE_SECTIONS = ("general", "provider", "voice_in", "voice_out", "visuals", "skills", "workspace")
+_MERGE_SECTIONS = ("general", "provider", "voice_in", "voice_out", "visuals", "skills", "workspace", "agents")
 
 DEFAULT_EYE_COLOR = "#F7FAFF"
 DEFAULT_BG_COLOR = "#0A0A0C"
@@ -42,6 +42,7 @@ _VISUAL_COLOR_DEFAULTS: dict[str, str] = {
 }
 VALID_POSITION_MODES: tuple[str, ...] = ("fixed", "floating", "notch")
 VALID_TTS_PROVIDERS: tuple[str, ...] = ("kokoro", "piper", "elevenlabs", "disabled")
+VALID_AGENT_PERMISSION_MODES: tuple[str, ...] = ("default", "accept_edits", "autonomous")
 PIPER_SPEED_RANGE: tuple[float, float] = (0.4, 2.5)
 PIPER_PITCH_RANGE: tuple[float, float] = (-12.0, 12.0)
 PIPER_NOISE_SCALE_RANGE: tuple[float, float] = (0.0, 1.5)
@@ -395,6 +396,79 @@ class WorkspaceConfig(BaseModel):
         return result
 
 
+class ExternalAgentOverride(BaseModel):
+    """Per-CLI agent configuration overrides and opt-in permission settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    model: str = ""
+    permission_mode: str = "accept_edits"
+    custom_path: str = ""
+    extra_args: list[str] = Field(default_factory=list)
+    allow_autonomous_flags: bool = False
+
+    @field_validator("permission_mode", mode="before")
+    @classmethod
+    def _validate_permission_mode(cls, value: Any) -> str:
+        cleaned = str(value or "accept_edits").strip().lower()
+        if cleaned not in VALID_AGENT_PERMISSION_MODES:
+            return "accept_edits"
+        return cleaned
+
+    @field_validator("extra_args", mode="before")
+    @classmethod
+    def _validate_extra_args(cls, value: Any) -> list[str]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+
+class CustomCLIAgentConfig(BaseModel):
+    """User-defined external AI CLI adapter configuration."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    display_name: str
+    command: str
+    non_interactive_args: list[str] = Field(default_factory=lambda: ["-p", "{prompt}"])
+    model_flag: str = "--model"
+    enabled: bool = True
+
+
+class AgentsConfig(BaseModel):
+    """God Mode and external AI CLI delegation settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    god_mode_enabled: bool = False
+    require_run_approval: bool = True
+    timeout_seconds: int = 300
+    max_output_chars: int = 32768
+    pass_workspace_cwd: bool = True
+    overrides: dict[str, ExternalAgentOverride] = Field(default_factory=dict)
+    custom_agents: list[CustomCLIAgentConfig] = Field(default_factory=list)
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _clamp_timeout_seconds(cls, value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 300
+        return max(10, min(1800, parsed))
+
+    @field_validator("max_output_chars", mode="before")
+    @classmethod
+    def _clamp_max_output_chars(cls, value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 32768
+        return max(1024, min(262144, parsed))
+
+
 class ByteyConfig(BaseModel):
     """Root non-secret configuration schema persisted to config.json."""
 
@@ -408,6 +482,7 @@ class ByteyConfig(BaseModel):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
 
 
 class SecretStore:

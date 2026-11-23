@@ -236,6 +236,7 @@
 }
 
 .bytey-sidebar-toggle-btn,
+.bytey-god-mode-btn,
 .bytey-auto-accept-btn,
 .bytey-clear-btn,
 .bytey-close-btn {
@@ -251,10 +252,21 @@
 }
 
 .bytey-sidebar-toggle-btn:hover,
+.bytey-god-mode-btn:hover,
 .bytey-auto-accept-btn:hover,
 .bytey-clear-btn:hover,
 .bytey-close-btn:hover {
   background-color: rgba(255, 255, 255, 0.16);
+}
+
+.bytey-god-mode-active {
+  background-color: rgba(250, 204, 21, 0.22);
+  border-color: rgba(250, 204, 21, 0.62);
+  color: #fef08a;
+}
+
+.bytey-god-mode-active:hover {
+  background-color: rgba(250, 204, 21, 0.34);
 }
 
 .bytey-auto-accept-active {
@@ -842,6 +854,7 @@
 .bytey-density-compact .bytey-provider-pill,
 .bytey-density-compact .bytey-workspace-pill,
 .bytey-density-compact .bytey-sidebar-toggle-btn,
+.bytey-density-compact .bytey-god-mode-btn,
 .bytey-density-compact .bytey-auto-accept-btn,
 .bytey-density-compact .bytey-clear-btn,
 .bytey-density-compact .bytey-close-btn {
@@ -950,6 +963,7 @@
 .bytey-density-spacious .bytey-provider-pill,
 .bytey-density-spacious .bytey-workspace-pill,
 .bytey-density-spacious .bytey-sidebar-toggle-btn,
+.bytey-density-spacious .bytey-god-mode-btn,
 .bytey-density-spacious .bytey-auto-accept-btn,
 .bytey-density-spacious .bytey-clear-btn,
 .bytey-density-spacious .bytey-close-btn {

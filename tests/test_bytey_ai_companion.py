@@ -5446,6 +5446,27 @@ class TestWorkspaceToolchain(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(w_app["is_new"])
             self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "line1\n")
 
+            w_rej = tc.preview_write("nested/new.txt", "replaced\n")
+            self.assertFalse(w_rej["ok"])
+            self.assertIn("already exists", w_rej["error"].lower())
+            w_rej_app = tc.apply_write("nested/new.txt", "replaced\n")
+            self.assertFalse(w_rej_app["ok"])
+            self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "line1\n")
+
+            w_ow = tc.apply_write("nested/new.txt", "replaced", overwrite=True)
+            self.assertTrue(w_ow["ok"])
+            self.assertFalse(w_ow["is_new"])
+            self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "replaced")
+
+            a_prev = tc.preview_append("nested/new.txt", "line2\n")
+            self.assertTrue(a_prev["ok"])
+            self.assertIn("+line2", a_prev["diff"])
+            self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "replaced")
+
+            a_app = tc.apply_append("nested/new.txt", "line2\n")
+            self.assertTrue(a_app["ok"])
+            self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "replaced\nline2\n")
+
             cmd_ok = await tc.run_command("pwd")
             self.assertTrue(cmd_ok["ok"])
             self.assertEqual(cmd_ok["returncode"], 0)
@@ -5582,6 +5603,215 @@ class TestWorkspaceToolchain(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(client2._args, ["/tmp/ws_beta/server.py"])  # type: ignore[attr-defined]
             self.assertEqual(client2._env["PROJECT_DIR"], "/tmp/ws_beta")  # type: ignore[attr-defined]
+
+
+class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
+    """Tests for AgentRegistry, AgentRunner, God Mode API, and bytey_agent__run."""
+
+    async def test_registry_detect_build_argv_and_runner(self) -> None:
+        from bytey_ai_companion.agents import AgentRegistry, AgentRunner
+        from bytey_ai_companion.config import AgentsConfig, ExternalAgentOverride
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_claude = root / "claude"
+            fake_claude.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('claude 1.2.3')\n"
+                "    sys.exit(0)\n"
+                "print('ARGS:' + '|'.join(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+
+            cfg = AgentsConfig(
+                overrides={
+                    "claude": ExternalAgentOverride(
+                        enabled=True,
+                        model="sonnet",
+                        permission_mode="accept_edits",
+                        custom_path=str(fake_claude),
+                    )
+                }
+            )
+            reg = AgentRegistry()
+            with patch("bytey_ai_companion.agents.registry._resolve_binary", side_effect=lambda b, c="": c if c else ""):
+                agents = await reg.detect_all(cfg)
+
+            by_id = {a.id: a for a in agents}
+            self.assertTrue(by_id["claude"].installed)
+            self.assertEqual(by_id["claude"].version, "claude 1.2.3")
+            self.assertTrue(by_id["claude"].enabled)
+            self.assertFalse(by_id["copilot"].installed)
+            self.assertFalse(by_id["copilot"].enabled)
+
+            argv = reg.build_argv("claude", "build feature x", cfg)
+            self.assertIn("--model", argv)
+            self.assertIn("sonnet", argv)
+            self.assertIn("--permission-mode", argv)
+            self.assertIn("acceptEdits", argv)
+            self.assertIn("build feature x", argv)
+
+            # autonomous mode without allow_autonomous_flags=True must raise
+            cfg_auto = AgentsConfig(
+                overrides={
+                    "claude": ExternalAgentOverride(
+                        enabled=True,
+                        permission_mode="autonomous",
+                        allow_autonomous_flags=False,
+                        custom_path=str(fake_claude),
+                    )
+                }
+            )
+            reg.sync_config(cfg_auto)
+            with self.assertRaises(ValueError):
+                reg.build_argv("claude", "hi", cfg_auto)
+
+            runner = AgentRunner()
+            res = await runner.run("claude", argv, root, timeout_seconds=10)
+            self.assertEqual(res.exit_code, 0)
+            self.assertIn("ARGS:-p|build feature x|--output-format|text|--model|sonnet", res.stdout)
+
+            # Active output resets inactivity timer (total runtime > timeout_seconds does not time out)
+            active_cli = root / "active_cli.py"
+            active_cli.write_text(
+                "import sys, time\n"
+                "for i in range(4):\n"
+                "    print(f'step {i}', flush=True)\n"
+                "    time.sleep(0.25)\n",
+                encoding="utf-8",
+            )
+            res_active = await runner.run(
+                "claude", [sys.executable, str(active_cli)], root, timeout_seconds=0.6
+            )
+            self.assertFalse(res_active.timed_out)
+            self.assertEqual(res_active.exit_code, 0)
+            self.assertIn("step 3", res_active.stdout)
+
+            # Silent/hung CLI does time out after inactivity limit
+            silent_cli = root / "silent_cli.py"
+            silent_cli.write_text("import time\ntime.sleep(5)\n", encoding="utf-8")
+            res_silent = await runner.run(
+                "claude", [sys.executable, str(silent_cli)], root, timeout_seconds=0.4
+            )
+            self.assertTrue(res_silent.timed_out)
+
+    async def test_daemon_god_mode_routes_slash_command_and_run_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            fake_claude = root / "claude"
+            fake_claude.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('claude 9.9.9')\n"
+                "    sys.exit(0)\n"
+                "print('CLAUDE_DONE:' + ' '.join(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+
+            mock_llm = _MockLLMRouter()
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=root / "cfg",
+                data_dir=root / "data",
+                enable_voice_capture=False,
+                llm_router=mock_llm,  # type: ignore[arg-type]
+            )
+            daemon.config_manager.update_config(
+                {
+                    "voice_out": {"tts_muted": True, "tts_provider": "disabled"},
+                    "workspace": {"active_path": str(ws)},
+                    "agents": {
+                        "require_run_approval": False,
+                        "overrides": {
+                            "claude": {
+                                "enabled": True,
+                                "model": "opus",
+                                "custom_path": str(fake_claude),
+                            }
+                        },
+                    },
+                }
+            )
+            await daemon.start()
+            base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+            try:
+                async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
+                    # 1. /api/v1/agents lists all supported CLIs
+                    r_list = await client.get("/api/v1/agents")
+                    self.assertEqual(r_list.status_code, 200)
+                    agents_data = {a["id"]: a for a in r_list.json()["agents"]}
+                    self.assertIn("claude", agents_data)
+                    self.assertIn("copilot", agents_data)
+                    self.assertTrue(agents_data["claude"]["installed"])
+                    self.assertEqual(agents_data["claude"]["model"], "opus")
+
+                    # 2. Cannot enable a non-installed CLI
+                    if not agents_data["agy"]["installed"]:
+                        r_bad = await client.patch("/api/v1/agents/agy", json={"enabled": True})
+                        self.assertEqual(r_bad.status_code, 400)
+
+                    # 3. PATCH model update works
+                    r_patch = await client.patch("/api/v1/agents/claude", json={"model": "sonnet"})
+                    self.assertEqual(r_patch.status_code, 200)
+                    self.assertEqual(r_patch.json()["agent"]["model"], "sonnet")
+
+                # 4. /god toggles God Mode
+                res_cmd = await daemon.handle_user_prompt("/god on", input_mode="text")
+                self.assertIn("God Mode enabled", res_cmd["assistant_message"]["content"])
+                self.assertTrue(daemon.config_manager.config.agents.god_mode_enabled)
+
+                # 5. bytey_agent__run executes non-interactively
+                tool_res = await daemon._execute_agent_tool(
+                    "run",
+                    {"agent": "claude", "prompt": "implement ping"},
+                    daemon.config_manager.config,
+                    confirm_cb=None,
+                    call_id="c1",
+                    assistant_id="a1",
+                )
+                self.assertTrue(tool_res["ok"])
+                payload = json.loads(tool_res["content"])
+                self.assertEqual(payload["exit_code"], 0)
+                self.assertIn("CLAUDE_DONE:", payload["stdout"])
+                self.assertIn("sonnet", payload["stdout"])
+
+                # 6. Auto-Accept bypasses require_run_approval in God Mode
+                daemon.config_manager.update_config(
+                    {
+                        "agents": {"require_run_approval": True},
+                        "workspace": {
+                            "require_write_approval": False,
+                            "require_command_approval": False,
+                        },
+                    }
+                )
+                confirm_called = False
+
+                async def _should_not_confirm(*_args: Any, **_kwargs: Any) -> bool:
+                    nonlocal confirm_called
+                    confirm_called = True
+                    return False
+
+                tool_res_auto = await daemon._execute_agent_tool(
+                    "run",
+                    {"agent": "claude", "prompt": "auto accept run"},
+                    daemon.config_manager.config,
+                    confirm_cb=_should_not_confirm,
+                    call_id="c2",
+                    assistant_id="a2",
+                )
+                self.assertFalse(confirm_called)
+                self.assertTrue(tool_res_auto["ok"])
+            finally:
+                await daemon.stop()
 
 
 if __name__ == "__main__":

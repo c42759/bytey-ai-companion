@@ -72,6 +72,7 @@ export class TranscriptDrawer {
         this._drawerHeight = DRAWER_HEIGHT_FALLBACK;
         this._density = 'comfortable';
         this._autoAccept = false;
+        this._godMode = false;
         this._lastIslandBounds = {x: 500, y: 12, width: 112, height: 38};
 
         this._resizing = false;
@@ -317,6 +318,19 @@ export class TranscriptDrawer {
         header.add_child(this._statusIndicator);
 
         header.add_child(new St.Widget({x_expand: true}));
+
+        this._godModeBtn = new St.Button({
+            style_class: 'bytey-god-mode-btn',
+            label: 'God Mode',
+            toggle_mode: true,
+            can_focus: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            accessible_name: 'Toggle God Mode multi-CLI prompt delegation',
+        });
+        this._connect(this._godModeBtn, 'clicked', () => {
+            this._toggleGodMode();
+        });
+        header.add_child(this._godModeBtn);
 
         this._autoAcceptBtn = new St.Button({
             style_class: 'bytey-auto-accept-btn',
@@ -927,6 +941,26 @@ export class TranscriptDrawer {
         const requireWrite = wsCfg.require_write_approval ?? true;
         const requireCmd = wsCfg.require_command_approval ?? true;
         this._syncAutoAccept(!requireWrite && !requireCmd);
+
+        const agentsCfg = config.agents ?? {};
+        this._syncGodMode(Boolean(agentsCfg.god_mode_enabled));
+    }
+
+    _toggleGodMode() {
+        const next = !this._godMode;
+        this._syncGodMode(next);
+        this._callbacks.onGodModeChange?.(next);
+    }
+
+    _syncGodMode(enabled) {
+        this._godMode = Boolean(enabled);
+        if (!this._godModeBtn || this._destroyed)
+            return;
+        this._godModeBtn.set_checked(this._godMode);
+        if (this._godMode)
+            this._godModeBtn.add_style_class_name('bytey-god-mode-active');
+        else
+            this._godModeBtn.remove_style_class_name('bytey-god-mode-active');
     }
 
     _toggleAutoAccept() {
@@ -1937,6 +1971,7 @@ export class TranscriptDrawer {
         this._sendIcon = null;
         this._providerLabel = null;
         this._autoAcceptBtn = null;
+        this._godModeBtn = null;
         this._closeIcon = null;
         this._micBtn = null;
         this._micIcon = null;
