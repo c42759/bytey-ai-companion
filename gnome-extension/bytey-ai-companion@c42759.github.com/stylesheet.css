@@ -620,7 +620,8 @@
 
 .bytey-tool-list {
   spacing: 0.35em;
-  margin-top: 0.15em;
+  margin-top: 0.45em;
+  margin-bottom: 0.45em;
 }
 
 .bytey-tool-badge {

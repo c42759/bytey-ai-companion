@@ -2435,6 +2435,7 @@ class ByteyDaemon:
 
             final_emotion = "neutral"
             accumulated_parts: list[str] = []
+            message_parts: list[dict[str, Any]] = []
             last_result: dict[str, Any] | None = None
 
             async def on_emotion(tag: str) -> None:
@@ -2447,6 +2448,10 @@ class ByteyDaemon:
                 if not delta:
                     return
                 accumulated_parts.append(delta)
+                if message_parts and message_parts[-1].get("type") == "text":
+                    message_parts[-1]["text"] += delta
+                else:
+                    message_parts.append({"type": "text", "text": delta})
                 await self.ipc.connection_manager.broadcast(
                     {
                         "type": "transcript_delta",
@@ -2556,6 +2561,7 @@ class ByteyDaemon:
                             status="running",
                             call_id=call_id,
                         )
+                        message_parts.append({"type": "tool_call", "call_id": call_id})
                         await self._set_state("TOOL_CALLING", emotion=final_emotion, label=tool_name)
                         await self.ipc.connection_manager.broadcast(
                             {
@@ -2694,7 +2700,12 @@ class ByteyDaemon:
                     await self._set_state("THINKING", emotion=final_emotion)
 
                 if cancelled:
-                    accumulated_parts.append("\n\n[Stopped by user.]")
+                    stop_note = "\n\n[Stopped by user.]"
+                    accumulated_parts.append(stop_note)
+                    if message_parts and message_parts[-1].get("type") == "text":
+                        message_parts[-1]["text"] += stop_note
+                    else:
+                        message_parts.append({"type": "text", "text": stop_note})
                 elif hit_round_cap:
                     await self._set_state("THINKING", emotion=final_emotion)
                     _compact_older_tool_messages(llm_messages)
@@ -2749,8 +2760,25 @@ class ByteyDaemon:
                 raw_content = "".join(accumulated_parts).strip()
                 _, parsed_title, clean_reply = parse_reply_tags(raw_content)
                 clean_reply = clean_reply.strip()
+                cleaned_parts: list[dict[str, Any]] = []
+                for part in message_parts:
+                    if part.get("type") == "text":
+                        _, _, cleaned_seg = parse_reply_tags(str(part.get("text") or ""))
+                        cleaned_seg = cleaned_seg.strip()
+                        if cleaned_seg:
+                            if cleaned_parts and cleaned_parts[-1].get("type") == "text":
+                                cleaned_parts[-1]["text"] += f"\n\n{cleaned_seg}"
+                            else:
+                                cleaned_parts.append({"type": "text", "text": cleaned_seg})
+                    elif part.get("type") == "tool_call" and part.get("call_id"):
+                        cleaned_parts.append(
+                            {"type": "tool_call", "call_id": str(part["call_id"])}
+                        )
                 updated_msg = await self.storage.update_message(
-                    assistant_id, content=clean_reply, emotion=final_emotion
+                    assistant_id,
+                    content=clean_reply,
+                    emotion=final_emotion,
+                    parts=cleaned_parts,
                 )
                 if needs_auto_title:
                     captured_title = (
@@ -2769,6 +2797,7 @@ class ByteyDaemon:
                         "role": "assistant",
                         "source": input_mode,
                         "text": clean_reply,
+                        "parts": cleaned_parts,
                         "emotion": final_emotion,
                         "is_final": True,
                     }

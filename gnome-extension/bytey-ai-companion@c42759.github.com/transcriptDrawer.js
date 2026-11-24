@@ -1584,6 +1584,7 @@ export class TranscriptDrawer {
                 role,
                 input_mode: source,
                 content: initialText,
+                parts: Array.isArray(event.parts) ? event.parts : undefined,
                 emotion: emotion ?? 'neutral',
                 tool_calls: event.tool_calls ?? [],
             });
@@ -1595,6 +1596,25 @@ export class TranscriptDrawer {
 
             if (incomingDelta !== null) {
                 nextContent = existing + incomingDelta;
+                const lastPart = record.msg.parts[record.msg.parts.length - 1];
+                if (lastPart && lastPart.type === 'text') {
+                    lastPart.text += incomingDelta;
+                    const lastSeg = record.segments[record.segments.length - 1];
+                    if (lastSeg && lastSeg.type === 'text') {
+                        this._renderMessageBody(lastSeg.bodyBox, lastPart.text);
+                    } else {
+                        const bodyBox = this._createBodyBox();
+                        record.contentBox.add_child(bodyBox);
+                        this._renderMessageBody(bodyBox, lastPart.text);
+                        record.segments.push({type: 'text', bodyBox});
+                    }
+                } else {
+                    record.msg.parts.push({type: 'text', text: incomingDelta});
+                    const bodyBox = this._createBodyBox();
+                    record.contentBox.add_child(bodyBox);
+                    this._renderMessageBody(bodyBox, incomingDelta);
+                    record.segments.push({type: 'text', bodyBox});
+                }
             } else if (isFinal) {
                 if (incomingText.length > 0) {
                     const looksLikeShortTail = existing.length > 16 &&
@@ -1602,21 +1622,41 @@ export class TranscriptDrawer {
                         !incomingText.startsWith(existing.slice(0, Math.min(8, existing.length)));
                     nextContent = looksLikeShortTail ? (existing + incomingText) : incomingText;
                 }
+                if (Array.isArray(event.parts)) {
+                    record.msg.parts = this._normalizeParts(
+                        event.parts,
+                        nextContent,
+                        record.msg.tool_calls
+                    );
+                } else {
+                    record.msg.parts = this._normalizeParts(
+                        null,
+                        nextContent,
+                        record.msg.tool_calls
+                    );
+                }
+                this._rebuildMessageContent(record);
             } else if (incomingText.length > 0) {
                 if (existing.length >= 2 && incomingText.startsWith(existing))
                     nextContent = incomingText;
                 else
                     nextContent = existing + incomingText;
+                record.msg.parts = this._normalizeParts(
+                    null,
+                    nextContent,
+                    record.msg.tool_calls
+                );
+                this._rebuildMessageContent(record);
             }
 
             record.msg.content = nextContent;
-            this._renderMessageBody(record.bodyBox, nextContent);
             if (emotion)
                 this._updateEmotionBadge(record, emotion);
+            const hasText = this._getMessageText(record.msg).trim().length > 0;
             if (record.replayBtn)
-                record.replayBtn.visible = nextContent.trim().length > 0;
+                record.replayBtn.visible = hasText;
             if (record.copyBtn)
-                record.copyBtn.visible = nextContent.trim().length > 0;
+                record.copyBtn.visible = hasText;
         }
 
         this._scheduleScrollToBottom();
@@ -1785,7 +1825,20 @@ export class TranscriptDrawer {
 
         if (msgRecord) {
             msgRecord.msg.tool_calls.push(tool);
-            this._appendToolWidget(msgRecord.toolBox, tool);
+            const hasPart = msgRecord.msg.parts.some(
+                p => p.type === 'tool_call' && p.call_id === tool.id
+            );
+            if (!hasPart)
+                msgRecord.msg.parts.push({type: 'tool_call', call_id: tool.id});
+
+            const lastSeg = msgRecord.segments[msgRecord.segments.length - 1];
+            let targetToolBox = lastSeg && lastSeg.type === 'tool_group' ? lastSeg.toolBox : null;
+            if (!targetToolBox) {
+                targetToolBox = this._createToolBox();
+                msgRecord.contentBox.add_child(targetToolBox);
+                msgRecord.segments.push({type: 'tool_group', toolBox: targetToolBox});
+            }
+            this._appendToolWidget(targetToolBox, tool);
             this._scheduleScrollToBottom();
         }
     }
@@ -2059,6 +2112,47 @@ export class TranscriptDrawer {
         this._messagesBox.add_child(emptyLabel);
     }
 
+    _normalizeParts(rawParts, content, toolCalls) {
+        const parts = [];
+        if (Array.isArray(rawParts) && rawParts.length > 0) {
+            for (const item of rawParts) {
+                if (!item || typeof item !== 'object')
+                    continue;
+                if (item.type === 'text') {
+                    const text = String(item.text ?? '');
+                    if (text)
+                        parts.push({type: 'text', text});
+                } else if (item.type === 'tool_call') {
+                    const callId = String(item.call_id ?? '').trim();
+                    if (callId)
+                        parts.push({type: 'tool_call', call_id: callId});
+                }
+            }
+        }
+        if (parts.length > 0)
+            return parts;
+        if (content)
+            parts.push({type: 'text', text: content});
+        for (const tc of toolCalls) {
+            if (tc && tc.id)
+                parts.push({type: 'tool_call', call_id: tc.id});
+        }
+        return parts;
+    }
+
+    _getMessageText(msg) {
+        if (!msg)
+            return '';
+        if (Array.isArray(msg.parts) && msg.parts.length > 0) {
+            const textSegments = msg.parts
+                .filter(p => p && p.type === 'text' && String(p.text ?? '').length > 0)
+                .map(p => String(p.text));
+            if (textSegments.length > 0)
+                return textSegments.join('\n\n');
+        }
+        return String(msg.content ?? '');
+    }
+
     _normalizeMessage(raw) {
         const id = String(raw.id ?? raw.message_id ?? `msg-${Date.now()}-${Math.random()}`);
         const role = String(raw.role ?? 'assistant').toLowerCase() === 'user' ? 'user' : 'assistant';
@@ -2067,7 +2161,8 @@ export class TranscriptDrawer {
         const emotion = String(raw.emotion ?? 'neutral').toLowerCase();
         const rawTools = Array.isArray(raw.tool_calls) ? raw.tool_calls : [];
         const toolCalls = rawTools.map(t => this._normalizeTool({...t, message_id: id}));
-        return {id, role, input_mode: inputMode, content, emotion, tool_calls: toolCalls};
+        const parts = this._normalizeParts(raw.parts, content, toolCalls);
+        return {id, role, input_mode: inputMode, content, parts, emotion, tool_calls: toolCalls};
     }
 
     _normalizeTool(raw) {
@@ -2179,7 +2274,7 @@ export class TranscriptDrawer {
                     (this._speakingStatus === 'playing' || this._speakingStatus === 'paused')) {
                     this._callbacks.onTogglePauseTts?.();
                 } else {
-                    const text = (msg.content ?? '').trim();
+                    const text = this._getMessageText(msg).trim();
                     if (text)
                         this._callbacks.onReplayTts?.(msg.id, text);
                 }
@@ -2195,14 +2290,14 @@ export class TranscriptDrawer {
             style_class: 'bytey-copy-btn',
             can_focus: true,
             accessible_name: 'Copy markdown',
-            visible: (msg.content ?? '').trim().length > 0,
+            visible: this._getMessageText(msg).trim().length > 0,
             y_align: Clutter.ActorAlign.CENTER,
             child: copyIcon,
         });
         copyBtn.connect('clicked', () => {
             St.Clipboard.get_default().set_text(
                 St.ClipboardType.CLIPBOARD,
-                String(msg.content ?? '')
+                this._getMessageText(msg)
             );
             copyIcon.icon_name = 'emblem-ok-symbolic';
             this._copyResetTimers ??= new Set();
@@ -2272,33 +2367,21 @@ export class TranscriptDrawer {
 
         bubble.add_child(metaRow);
 
-        const bodyBox = new St.BoxLayout({
-            style_class: 'bytey-msg-body',
+        const contentBox = new St.BoxLayout({
+            style_class: 'bytey-msg-content',
             orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
-        this._renderMessageBody(bodyBox, msg.content);
-        bubble.add_child(bodyBox);
-
-        const toolBox = new St.BoxLayout({
-            style_class: 'bytey-tool-list',
-            orientation: Clutter.Orientation.VERTICAL,
-            x_expand: true,
-            visible: msg.tool_calls.length > 0,
-        });
-        bubble.add_child(toolBox);
-
-        for (const tool of msg.tool_calls)
-            this._appendToolWidget(toolBox, tool);
+        bubble.add_child(contentBox);
 
         this._messagesBox.add_child(bubble);
 
         const record = {
             msg,
             box: bubble,
-            bodyBox,
+            contentBox,
+            segments: [],
             emotionLabel,
-            toolBox,
             replayBtn,
             replayIcon,
             copyBtn,
@@ -2310,8 +2393,71 @@ export class TranscriptDrawer {
             cancelDeleteBtn,
             cancelDeleteIcon,
         };
+        this._rebuildMessageContent(record);
         this._messageWidgets.set(msg.id, record);
         return record;
+    }
+
+    _createBodyBox() {
+        return new St.BoxLayout({
+            style_class: 'bytey-msg-body',
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+        });
+    }
+
+    _createToolBox() {
+        return new St.BoxLayout({
+            style_class: 'bytey-tool-list',
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+            visible: true,
+        });
+    }
+
+    _rebuildMessageContent(record) {
+        if (!record || !record.contentBox)
+            return;
+        for (const tool of record.msg.tool_calls) {
+            if (tool?.id)
+                this._toolWidgets.delete(tool.id);
+        }
+        record.contentBox.destroy_all_children();
+        record.segments = [];
+
+        const toolsById = new Map();
+        for (const tool of record.msg.tool_calls) {
+            if (tool?.id)
+                toolsById.set(tool.id, tool);
+        }
+
+        const parts = this._normalizeParts(
+            record.msg.parts,
+            record.msg.content,
+            record.msg.tool_calls
+        );
+        record.msg.parts = parts;
+
+        for (const part of parts) {
+            if (part.type === 'text') {
+                const bodyBox = this._createBodyBox();
+                record.contentBox.add_child(bodyBox);
+                this._renderMessageBody(bodyBox, part.text);
+                record.segments.push({type: 'text', bodyBox});
+            } else if (part.type === 'tool_call') {
+                const tool = toolsById.get(part.call_id);
+                if (!tool)
+                    continue;
+                const lastSeg = record.segments[record.segments.length - 1];
+                let targetToolBox = lastSeg && lastSeg.type === 'tool_group' ? lastSeg.toolBox : null;
+                if (!targetToolBox) {
+                    targetToolBox = this._createToolBox();
+                    record.contentBox.add_child(targetToolBox);
+                    record.segments.push({type: 'tool_group', toolBox: targetToolBox});
+                }
+                this._appendToolWidget(targetToolBox, tool);
+            }
+        }
     }
 
     _syncDeleteMessageConfirm() {
