@@ -2616,6 +2616,98 @@ asyncio.run(main())
             self.assertIn("bytey_skill__load", tools_by_name)
             self.assertTrue(all(bool(desc) for desc in tools_by_name.values()))
 
+    async def test_multi_round_tool_loop_wrapup_and_cancel(self) -> None:
+        from bytey_ai_companion.config import ProviderConfig
+
+        self.assertEqual(ProviderConfig().max_tool_rounds, 25)
+        self.assertEqual(ProviderConfig(max_tool_rounds=0).max_tool_rounds, 1)
+        self.assertEqual(ProviderConfig(max_tool_rounds=999).max_tool_rounds, 100)
+
+        with tempfile.TemporaryDirectory() as ws_tmp:
+            Path(ws_tmp, "a.txt").write_text("hi\n", encoding="utf-8")
+            orig_generate = self.daemon.llm_router.generate_chat
+            try:
+                async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+                    await client.put("/api/v1/workspace", json={"active_path": ws_tmp})
+                    r_cfg = await client.patch(
+                        "/api/v1/config",
+                        json={
+                            "llm": {"max_tool_rounds": 8, "supports_tools": True, "force_enable_tools": True},
+                        },
+                    )
+                    self.assertEqual(r_cfg.status_code, 200)
+                    self.assertEqual(r_cfg.json()["llm"]["max_tool_rounds"], 8)
+
+                    calls_8 = {"n": 0}
+
+                    async def mock_eight_rounds(**kwargs):
+                        calls_8["n"] += 1
+                        if calls_8["n"] <= 7:
+                            return {
+                                "content": "",
+                                "emotion": "focus",
+                                "tool_calls": [
+                                    {
+                                        "id": f"c_{calls_8['n']}",
+                                        "name": "bytey_workspace__list_files",
+                                        "arguments": {},
+                                    }
+                                ],
+                                "raw_assistant_message": {"role": "assistant", "content": ""},
+                            }
+                        if kwargs.get("on_text_chunk"):
+                            await kwargs["on_text_chunk"]("Finished 8 rounds!")
+                        return {"content": "Finished 8 rounds!", "emotion": "happy", "tool_calls": []}
+
+                    self.daemon.llm_router.generate_chat = mock_eight_rounds
+                    r_chat = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Do 8 rounds", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_chat.status_code, 200)
+                    self.assertEqual(calls_8["n"], 8)
+                    self.assertIn("Finished 8 rounds!", r_chat.json()["assistant_message"]["content"])
+
+                    # Now test round cap wrap-up (max_tool_rounds=2)
+                    await client.patch("/api/v1/config", json={"llm": {"max_tool_rounds": 2}})
+                    wrap_calls = {"n": 0, "wrap_tools_none": False}
+
+                    async def mock_cap_hit(**kwargs):
+                        wrap_calls["n"] += 1
+                        if kwargs.get("tools") is None:
+                            wrap_calls["wrap_tools_none"] = True
+                            if kwargs.get("on_text_chunk"):
+                                await kwargs["on_text_chunk"]("Wrap-up summary.")
+                            return {"content": "Wrap-up summary.", "emotion": "neutral", "tool_calls": []}
+                        return {
+                            "content": "",
+                            "emotion": "focus",
+                            "tool_calls": [
+                                {
+                                    "id": f"cap_{wrap_calls['n']}",
+                                    "name": "bytey_workspace__list_files",
+                                    "arguments": {},
+                                }
+                            ],
+                            "raw_assistant_message": {"role": "assistant", "content": ""},
+                        }
+
+                    self.daemon.llm_router.generate_chat = mock_cap_hit
+                    r_cap = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Loop forever", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_cap.status_code, 200)
+                    self.assertEqual(wrap_calls["n"], 3)
+                    self.assertTrue(wrap_calls["wrap_tools_none"])
+                    self.assertIn("Wrap-up summary.", r_cap.json()["assistant_message"]["content"])
+
+                    r_cancel = await client.post("/api/v1/prompt/cancel")
+                    self.assertEqual(r_cancel.status_code, 200)
+                    self.assertTrue(r_cancel.json()["ok"])
+            finally:
+                self.daemon.llm_router.generate_chat = orig_generate
+
 
 class TestSettingsClientAndSyntax(unittest.TestCase):
     """Test DaemonClient offline fallback + secret stripping and static syntax checks."""
@@ -4009,6 +4101,21 @@ assert.strictEqual(elevenlabsApiKeyRow.visible, false);
             win_block.index('title="Bytey MCP Host"'),
             win_block.index("No external MCP servers configured"),
         )
+
+    def test_max_tool_rounds_ui_parity(self) -> None:
+        from bytey_settings.api_client import DEFAULT_CONFIG
+
+        self.assertEqual(DEFAULT_CONFIG["llm"]["max_tool_rounds"], 25)
+        prefs_js = (
+            REPO_ROOT / "gnome-extension" / "bytey-ai-companion@c42759.github.com" / "prefs.js"
+        ).read_text(encoding="utf-8")
+        window_py = (REPO_ROOT / "settings-ui" / "bytey_settings" / "window.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("title: 'Max Tool Loops'", prefs_js)
+        self.assertIn("max_tool_rounds", prefs_js)
+        self.assertIn("self.max_tool_rounds_row", window_py)
+        self.assertIn("llm_max_tool_rounds", window_py)
 
     def test_mcp_info_icon_and_dialog_parity(self) -> None:
         ext_dir = Path(__file__).resolve().parent.parent / "gnome-extension" / "bytey-ai-companion@c42759.github.com"

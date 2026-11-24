@@ -136,6 +136,7 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "llm_force_tools": (("llm", "force_enable_tools"), ("force_enable_tools", "force_tools")),
     "llm_context_size": (("llm", "context_size"), ("llm_context_size", "context_size")),
     "llm_max_context_size": (("llm", "max_context_size"), ("max_context_size",)),
+    "llm_max_tool_rounds": (("llm", "max_tool_rounds"), ("llm_max_tool_rounds", "max_tool_rounds")),
     "mic_muted": (("voice_input", "mic_muted"), ("mic_muted",)),
     "wake_sensitivity": (("voice_input", "wake_sensitivity"), ("wake_sensitivity",)),
     "vad_silence_timeout_ms": (
@@ -1119,6 +1120,21 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         )
         self.context_size_row.connect("notify::selected", self._on_context_size_selected)
         ai_group.add(self.context_size_row)
+
+        self.max_tool_rounds_row = Adw.SpinRow.new_with_range(1, 100, 1)
+        self.max_tool_rounds_row.set_title("Max Tool Loops")
+        self.max_tool_rounds_row.set_subtitle(
+            "Max tool-call rounds per request before wrapping up (1-100)"
+        )
+        self.max_tool_rounds_row.set_digits(0)
+        self.max_tool_rounds_row.connect(
+            "notify::value",
+            lambda *_: self._patch_fields(
+                {"llm_max_tool_rounds": int(self.max_tool_rounds_row.get_value())},
+                "Max tool loops updated",
+            ),
+        )
+        ai_group.add(self.max_tool_rounds_row)
 
         self.tools_status_row = Adw.ActionRow(
             title="Tools Support",
@@ -3806,6 +3822,15 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             and not (isinstance(raw_cfg.get("llm"), dict) and "context_size" in raw_cfg["llm"])
         ):
             self._config.setdefault("llm", {})["context_size"] = raw_cfg["provider"]["context_size"]
+        if (
+            res.offline
+            and isinstance(raw_cfg.get("provider"), dict)
+            and raw_cfg["provider"].get("max_tool_rounds") is not None
+            and not (isinstance(raw_cfg.get("llm"), dict) and "max_tool_rounds" in raw_cfg["llm"])
+        ):
+            self._config.setdefault("llm", {})["max_tool_rounds"] = raw_cfg["provider"][
+                "max_tool_rounds"
+            ]
         self._secrets_configured = (
             {str(k): bool(v) for k, v in secrets_meta.items()} if isinstance(secrets_meta, dict) else {}
         )
@@ -3858,6 +3883,12 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self._refresh_llm_secret_indicator()
             self._update_tools_sensitivity()
             self._refresh_context_size_row()
+            raw_rounds = self._read_field("llm_max_tool_rounds", 25)
+            try:
+                rounds_val = max(1, min(100, int(raw_rounds if raw_rounds is not None else 25)))
+            except (TypeError, ValueError):
+                rounds_val = 25
+            self.max_tool_rounds_row.set_value(float(rounds_val))
 
             # Voice Input
             self.mic_muted_row.set_active(bool(self._read_field("mic_muted", False)))

@@ -165,6 +165,22 @@ class ProviderConfig(BaseModel):
     supports_tools_override: bool | None = None
     temperature: float = 0.7
     context_size: int | None = None
+    max_tool_rounds: int = 25
+
+    @field_validator("max_tool_rounds", mode="before")
+    @classmethod
+    def _validate_max_tool_rounds(cls, value: Any) -> int:
+        """Clamp max_tool_rounds to [1, 100], defaulting to 25 on blank/None."""
+        if value is None or isinstance(value, bool):
+            return 25
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return 25
+            value = int(cleaned)
+        if isinstance(value, (int, float)):
+            return max(1, min(100, int(value)))
+        raise ValueError(f"Invalid max_tool_rounds: {value!r}")
 
     @field_validator("context_size", mode="before")
     @classmethod

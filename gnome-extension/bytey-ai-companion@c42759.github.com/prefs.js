@@ -987,11 +987,24 @@ export default class ByteyPreferences extends ExtensionPreferences {
             subtitle: 'Context window tokens (Auto uses provider default)',
             model: Gtk.StringList.new(contextPresetOptions.map(o => o.label)),
         });
+        const maxToolRoundsRow = new Adw.SpinRow({
+            title: 'Max Tool Loops',
+            subtitle: 'Max tool-call rounds per request before wrapping up (1-100)',
+            adjustment: new Gtk.Adjustment({
+                lower: 1,
+                upper: 100,
+                step_increment: 1,
+                page_increment: 5,
+                value: 25,
+            }),
+            digits: 0,
+        });
         aiGroup.add(providerRow);
         aiGroup.add(baseUrlRow);
         aiGroup.add(aiApiKeyRow);
         aiGroup.add(modelRow);
         aiGroup.add(contextSizeRow);
+        aiGroup.add(maxToolRoundsRow);
 
         const toolsStatusRow = new Adw.ActionRow({
             title: 'Tools Support',
@@ -2520,6 +2533,12 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 ));
                 currentContextSize = normalizePositiveInt(provider.context_size ?? llm.context_size);
                 detectedMaxContext = normalizePositiveInt(llm.max_context_size);
+                const rawMaxRounds = Number(provider.max_tool_rounds ?? llm.max_tool_rounds ?? 25);
+                maxToolRoundsRow.set_value(
+                    Number.isFinite(rawMaxRounds)
+                        ? Math.max(1, Math.min(100, Math.round(rawMaxRounds)))
+                        : 25
+                );
                 mcpServers = normalizeMcpMap(cfg.mcpServers ?? cfg.mcp_servers ?? {});
 
                 const skillsCfg = cfg.skills && typeof cfg.skills === 'object' ? cfg.skills : {};
@@ -3414,6 +3433,14 @@ export default class ByteyPreferences extends ExtensionPreferences {
             patchConfig(
                 {provider: {context_size: currentContextSize}},
                 currentContextSize ? `Saved context size: ${opt.label}` : 'Context size set to Auto'
+            );
+        }));
+
+        maxToolRoundsRow.connect('notify::value', () => onUserChange(() => {
+            const rounds = Math.max(1, Math.min(100, Math.round(maxToolRoundsRow.get_value())));
+            patchConfig(
+                {provider: {max_tool_rounds: rounds}},
+                `Saved max tool loops: ${rounds}`
             );
         }));
 

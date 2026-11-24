@@ -70,6 +70,8 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "model": ("provider", "model"),
     "llm_context_size": ("provider", "context_size"),
     "context_size": ("provider", "context_size"),
+    "max_tool_rounds": ("provider", "max_tool_rounds"),
+    "llm_max_tool_rounds": ("provider", "max_tool_rounds"),
     "mic_muted": ("voice_in", "mic_muted"),
     "wake_sensitivity": ("voice_in", "wake_sensitivity"),
     "vad_silence_timeout_ms": ("voice_in", "silence_timeout_ms"),
@@ -168,6 +170,26 @@ def _auto_title_from_prompt(text: str, max_len: int = 48) -> str:
     return snippet.rstrip() + "..."
 
 
+def _compact_older_tool_messages(
+    messages: list[dict[str, Any]],
+    *,
+    keep_recent: int = 4,
+    max_chars: int = 800,
+) -> None:
+    """Truncate older `role='tool'` outputs in place so long multi-round loops fit context."""
+    tool_indices = [
+        idx for idx, msg in enumerate(messages) if isinstance(msg, dict) and msg.get("role") == "tool"
+    ]
+    if len(tool_indices) <= keep_recent:
+        return
+    for idx in tool_indices[:-keep_recent]:
+        content = str(messages[idx].get("content") or "")
+        if len(content) > max_chars:
+            messages[idx]["content"] = (
+                content[:max_chars].rstrip() + "\n...[older tool output compacted]"
+            )
+
+
 class ByteyDaemon:
     """Orchestrates IPC, storage, voice pipeline, LLM router, MCP host, and TTS."""
 
@@ -254,6 +276,7 @@ class ByteyDaemon:
         self._detected_context_length: int | None = None
         self._pending_confirmations: dict[str, asyncio.Future[bool]] = {}
         self._chat_lock = asyncio.Lock()
+        self._prompt_cancel_event = asyncio.Event()
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._stop_event = asyncio.Event()
         self._started = False
@@ -1302,6 +1325,7 @@ class ByteyDaemon:
             "temperature": cfg.provider.temperature,
             "context_size": cfg.provider.context_size,
             "max_context_size": self._detected_context_length,
+            "max_tool_rounds": cfg.provider.max_tool_rounds,
         }
         data["voice_input"] = {
             "mic_muted": cfg.voice_in.mic_muted,
@@ -1377,6 +1401,8 @@ class ByteyDaemon:
                 mapped["temperature"] = llm["temperature"]
             if "context_size" in llm:
                 mapped["context_size"] = llm["context_size"]
+            if "max_tool_rounds" in llm:
+                mapped["max_tool_rounds"] = llm["max_tool_rounds"]
             if "supports_tools" in llm and isinstance(llm["supports_tools"], bool):
                 tools_hint = llm["supports_tools"]
             if "force_enable_tools" in llm:
@@ -2035,8 +2061,19 @@ class ByteyDaemon:
                 for sentence in chunker.feed(delta):
                     await self.tts_player.enqueue_sentence(sentence)
 
+            self._prompt_cancel_event.clear()
             try:
-                for _round in range(6):
+                max_rounds = max(1, int(cfg.provider.max_tool_rounds))
+                last_tc_sig: tuple[tuple[str, str], ...] | None = None
+                repeat_sig_count = 0
+                hit_round_cap = False
+                cancelled = False
+                for _round in range(max_rounds):
+                    if self._prompt_cancel_event.is_set():
+                        cancelled = True
+                        break
+                    if _round > 0:
+                        _compact_older_tool_messages(llm_messages)
                     chat_kwargs: dict[str, Any] = {
                         "messages": llm_messages,
                         "system_prompt": effective_system_prompt,
@@ -2058,13 +2095,35 @@ class ByteyDaemon:
                     tool_calls = result.get("tool_calls") or []
                     if not tool_calls:
                         break
+                    if _round == max_rounds - 1:
+                        hit_round_cap = True
 
                     llm_messages.append(
                         result.get("raw_assistant_message")
                         or {"role": "assistant", "content": result.get("content", "")}
                     )
 
+                    tc_sig = tuple(
+                        (
+                            str(tc.get("name") or ""),
+                            json.dumps(
+                                tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {},
+                                sort_keys=True,
+                                ensure_ascii=False,
+                            ),
+                        )
+                        for tc in tool_calls
+                    )
+                    if tc_sig == last_tc_sig:
+                        repeat_sig_count += 1
+                    else:
+                        last_tc_sig = tc_sig
+                        repeat_sig_count = 1
+
                     for tc in tool_calls:
+                        if self._prompt_cancel_event.is_set():
+                            cancelled = True
+                            break
                         ns_name = str(tc.get("name") or "")
                         args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
                         call_id = str(uuid.uuid4())
@@ -2201,7 +2260,57 @@ class ByteyDaemon:
                             }
                         )
 
+                    if cancelled:
+                        break
+                    if repeat_sig_count >= 3:
+                        llm_messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "[Loop Guard: You repeated the exact same tool call multiple "
+                                    "times. Try a different approach or summarize what you have "
+                                    "completed so far without repeating the call.]"
+                                ),
+                            }
+                        )
+                    if hit_round_cap:
+                        break
+
                     await self._set_state("THINKING", emotion=final_emotion)
+
+                if cancelled:
+                    accumulated_parts.append("\n\n[Stopped by user.]")
+                elif hit_round_cap:
+                    await self._set_state("THINKING", emotion=final_emotion)
+                    _compact_older_tool_messages(llm_messages)
+                    llm_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "[System: Maximum tool-call rounds reached for this turn. "
+                                "Summarize what you completed so far and what remains next "
+                                "without calling any tools.]"
+                            ),
+                        }
+                    )
+                    wrapup_kwargs: dict[str, Any] = {
+                        "messages": llm_messages,
+                        "system_prompt": effective_system_prompt,
+                        "provider": cfg.provider.active_provider,
+                        "model": cfg.provider.model,
+                        "base_url": cfg.provider.base_url,
+                        "api_key": api_key,
+                        "temperature": cfg.provider.temperature,
+                        "tools": None,
+                        "on_text_chunk": on_text_chunk,
+                        "on_emotion": on_emotion,
+                    }
+                    if _accepts_kwarg(self.llm_router.generate_chat, "context_size"):
+                        wrapup_kwargs["context_size"] = effective_context_size
+                    wrapup_res = await self.llm_router.generate_chat(**wrapup_kwargs)
+                    last_result = wrapup_res
+                    if wrapup_res.get("emotion"):
+                        final_emotion = str(wrapup_res["emotion"])
 
                 if final_emotion == "neutral":
                     if data_volume_chars >= self.astonished_data_threshold_chars:
@@ -2391,6 +2500,7 @@ class ByteyDaemon:
         )
         self.ipc.register_route("DELETE", "/api/v1/sessions/{session_id}", self._route_delete_session)
         self.ipc.register_route("POST", "/api/v1/chat", self._route_chat)
+        self.ipc.register_route("POST", "/api/v1/prompt/cancel", self._route_cancel_prompt)
 
         self.ipc.register_route("POST", "/api/v1/voice/trigger", self._route_voice_trigger)
         self.ipc.register_route("POST", "/api/v1/voice/barge-in", self._route_voice_barge_in)
@@ -2942,6 +3052,11 @@ class ByteyDaemon:
             await self._set_state(self.state, emotion=replay_emotion)
         await self.tts_player.speak_text(text)
         return {"ok": True}
+
+    async def _route_cancel_prompt(self, _req: IPCRequest) -> dict[str, Any]:
+        """Signal any active multi-round prompt loop to stop cleanly."""
+        self._prompt_cancel_event.set()
+        return {"ok": True, "cancelling": self._chat_lock.locked()}
 
     async def _route_pause_tts(self, req: IPCRequest) -> dict[str, Any]:
         body = req.json()

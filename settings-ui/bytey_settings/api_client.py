@@ -94,6 +94,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "force_enable_tools": False,
         "context_size": None,
         "max_context_size": None,
+        "max_tool_rounds": 25,
     },
     "voice_input": {
         "mic_muted": False,
