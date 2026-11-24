@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ class CLIAgentSpec:
     autonomous_args: tuple[str, ...] = ()
     resume_args: tuple[str, ...] = ()
     version_args: tuple[str, ...] = ("--version",)
+    default_enabled: bool = True
 
 
 BUILTIN_CLI_AGENTS: tuple[CLIAgentSpec, ...] = (
@@ -172,10 +174,47 @@ def _resolve_binary(binary: str, custom_path: str = "") -> str:
     return shutil.which(binary, path=_augmented_search_path()) or ""
 
 
+async def _terminate_and_reap(
+    proc: asyncio.subprocess.Process | None,
+    pgid: int | None = None,
+) -> None:
+    """Terminate/kill the probe process group, close pipes, and reap with bounded wait."""
+    if proc is None and pgid is None:
+        return
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
+    if proc is not None:
+        for stream in (proc.stdout, proc.stderr):
+            transport = getattr(stream, "_transport", None)
+            if transport is not None:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        except Exception:
+            pass
+
+
 async def _probe_version(binary_path: str, version_args: tuple[str, ...]) -> str:
     """Run a quick non-blocking version probe with 2s timeout."""
     if not binary_path:
         return ""
+    proc: asyncio.subprocess.Process | None = None
+    pgid: int | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             binary_path,
@@ -183,14 +222,26 @@ async def _probe_version(binary_path: str, version_args: tuple[str, ...]) -> str
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
+        try:
+            pgid = os.getpgid(proc.pid)
+        except Exception:
+            pgid = proc.pid
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=2.0)
         raw = (stdout or stderr or b"").decode("utf-8", errors="replace").strip()
         if not raw:
             return ""
         first_line = raw.splitlines()[0].strip()
         return first_line[:120]
+    except asyncio.TimeoutError:
+        await _terminate_and_reap(proc, pgid)
+        return ""
+    except asyncio.CancelledError:
+        await _terminate_and_reap(proc, pgid)
+        raise
     except Exception:
+        await _terminate_and_reap(proc, pgid)
         return ""
 
 
@@ -218,6 +269,7 @@ class AgentRegistry:
                         binary=custom.command.strip(),
                         non_interactive_args=tuple(custom.non_interactive_args or ["-p", "{prompt}"]),
                         model_flag=custom.model_flag.strip() or "--model",
+                        default_enabled=bool(custom.enabled),
                     ),
                     True,
                 )
@@ -230,11 +282,13 @@ class AgentRegistry:
         self._specs = {spec.id: spec for spec, _ in specs}
 
         async def _inspect(spec: CLIAgentSpec, is_custom: bool) -> AgentInfo:
+            has_override = spec.id in cfg.overrides
             ov = cfg.overrides.get(spec.id, ExternalAgentOverride())
             resolved = _resolve_binary(spec.binary, ov.custom_path)
             installed = bool(resolved)
             version = await _probe_version(resolved, spec.version_args) if installed else ""
-            enabled = bool(ov.enabled) if installed else False
+            raw_enabled = ov.enabled if has_override else spec.default_enabled
+            enabled = bool(raw_enabled) if installed else False
             return AgentInfo(
                 id=spec.id,
                 display_name=spec.display_name,
@@ -265,19 +319,24 @@ class AgentRegistry:
         for spec, is_custom in self._all_specs(cfg):
             self._specs[spec.id] = spec
             prev = self._detected.get(spec.id)
+            has_override = spec.id in cfg.overrides
             ov = cfg.overrides.get(spec.id, ExternalAgentOverride())
-            resolved = prev.resolved_path if prev else _resolve_binary(spec.binary, ov.custom_path)
-            if ov.custom_path.strip() and (not prev or ov.custom_path.strip() != prev.custom_path):
-                resolved = _resolve_binary(spec.binary, ov.custom_path)
+            new_custom_path = ov.custom_path.strip()
+            if not prev or new_custom_path != prev.custom_path or spec.binary != prev.binary:
+                resolved = _resolve_binary(spec.binary, new_custom_path)
+            else:
+                resolved = prev.resolved_path
             installed = bool(resolved)
+            version = prev.version if prev and installed and resolved == prev.resolved_path else ""
+            raw_enabled = ov.enabled if has_override else spec.default_enabled
             updated[spec.id] = AgentInfo(
                 id=spec.id,
                 display_name=spec.display_name,
                 binary=spec.binary,
                 installed=installed,
                 resolved_path=resolved,
-                version=prev.version if prev and installed else "",
-                enabled=bool(ov.enabled) if installed else False,
+                version=version,
+                enabled=bool(raw_enabled) if installed else False,
                 model=ov.model.strip(),
                 model_flag=spec.model_flag,
                 default_models=list(spec.default_models),

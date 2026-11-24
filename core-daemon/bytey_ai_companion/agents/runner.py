@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import os
 import re
 import signal
@@ -49,8 +50,25 @@ def _detect_auth_hint(agent_id: str, stderr_text: str, stdout_text: str) -> str:
     return ""
 
 
-async def _collect_git_status(cwd: Path) -> str:
+async def _kill_and_reap(proc: asyncio.subprocess.Process | None) -> None:
+    """Kill and reap a subprocess if still running."""
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    except Exception:
+        pass
+    try:
+        await proc.wait()
+    except Exception:
+        pass
+
+
+async def _collect_git_status(cwd: Path, *, timeout_s: float = 3.0) -> str:
     """Return short git status if cwd is inside a git repository."""
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "git",
@@ -61,11 +79,16 @@ async def _collect_git_status(cwd: Path) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         if proc.returncode == 0:
             return stdout.decode("utf-8", errors="replace").strip()[:4000]
+    except asyncio.TimeoutError:
+        await _kill_and_reap(proc)
+    except asyncio.CancelledError:
+        await _kill_and_reap(proc)
+        raise
     except Exception:
-        pass
+        await _kill_and_reap(proc)
     return ""
 
 
@@ -74,6 +97,7 @@ class AgentRunner:
 
     def __init__(self) -> None:
         self._active_proc: asyncio.subprocess.Process | None = None
+        self._active_pgid: int | None = None
         self._cancelled: bool = False
 
     @property
@@ -82,32 +106,63 @@ class AgentRunner:
         return self._active_proc is not None and self._active_proc.returncode is None
 
     async def cancel(self) -> bool:
-        """Terminate the active CLI process group cleanly."""
+        """Terminate the active CLI process group cleanly, even if leader already exited."""
         proc = self._active_proc
-        if proc is None or proc.returncode is not None:
+        pgid = self._active_pgid
+        if pgid is None and proc is not None and proc.returncode is None:
+            try:
+                pgid = os.getpgid(proc.pid)
+            except Exception:
+                pgid = proc.pid
+        if (proc is None or proc.returncode is not None) and pgid is None:
             return False
         self._cancelled = True
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            return False
-        except Exception:
+        signalled = False
+        if pgid is not None:
             try:
-                proc.terminate()
+                os.killpg(pgid, signal.SIGTERM)
+                signalled = True
+            except ProcessLookupError:
+                self._active_pgid = None
+                if proc is None or proc.returncode is not None:
+                    return False
             except Exception:
                 pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
+        if not signalled and proc is not None and proc.returncode is None:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.terminate()
+                signalled = True
             except Exception:
+                pass
+        if proc is not None and proc.returncode is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                if pgid is not None:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        pass
                 try:
                     proc.kill()
                 except Exception:
                     pass
-        return True
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except Exception:
+                    pass
+        elif pgid is not None and signalled:
+            # Leader exited, but descendants in pgid may still hold pipes open; escalate to SIGKILL if still alive.
+            await asyncio.sleep(0.05)
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+        return signalled
 
     async def run(
         self,
@@ -135,30 +190,57 @@ class AgentRunner:
             start_new_session=True,
         )
         self._active_proc = proc
+        try:
+            self._active_pgid = os.getpgid(proc.pid)
+        except Exception:
+            self._active_pgid = proc.pid
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         last_emit = 0.0
+        capture_limit = max(0, int(max_output_chars))
 
         async def _read_stream(
             stream: asyncio.StreamReader | None,
             sink: list[str],
+            stream_name: str,
         ) -> None:
             nonlocal last_emit, last_activity
             if stream is None:
                 return
+            captured = 0
+            truncated = False
+            rolling_tail = ""
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+            def _append_text(text: str) -> None:
+                nonlocal captured, truncated, rolling_tail, last_emit
+                if not text:
+                    return
+                if not truncated:
+                    remaining = capture_limit - captured
+                    if remaining > 0:
+                        piece = text[:remaining]
+                        sink.append(piece)
+                        captured += len(piece)
+                    if len(text) > remaining:
+                        sink.append(f"\n... [{stream_name} truncated]")
+                        truncated = True
+                if on_output_tail is not None:
+                    rolling_tail = (rolling_tail + text)[-300:]
+
             while True:
                 chunk = await stream.read(4096)
                 if not chunk:
+                    _append_text(decoder.decode(b"", final=True))
                     break
                 last_activity = time.monotonic()
-                text = chunk.decode("utf-8", errors="replace")
-                sink.append(text)
+                _append_text(decoder.decode(chunk, final=False))
                 if on_output_tail is not None:
                     now = time.monotonic()
                     if now - last_emit >= 0.6:
                         last_emit = now
-                        tail = "".join(sink)[-300:].strip()
+                        tail = rolling_tail.strip()
                         if tail:
                             try:
                                 await on_output_tail(tail)
@@ -177,13 +259,39 @@ class AgentRunner:
                     await self.cancel()
                     return
 
+        stdout_task = asyncio.create_task(_read_stream(proc.stdout, stdout_chunks, "stdout"))
+        stderr_task = asyncio.create_task(_read_stream(proc.stderr, stderr_chunks, "stderr"))
+        wait_task = asyncio.create_task(proc.wait())
         watchdog_task = asyncio.create_task(_inactivity_watchdog())
         try:
-            await asyncio.gather(
-                _read_stream(proc.stdout, stdout_chunks),
-                _read_stream(proc.stderr, stderr_chunks),
-                proc.wait(),
+            done, _pending = await asyncio.wait(
+                {stdout_task, stderr_task, wait_task},
+                return_when=asyncio.ALL_COMPLETED,
             )
+            for t in done:
+                exc = t.exception()
+                if exc is not None:
+                    raise exc
+        except asyncio.CancelledError:
+            await self.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                for t in (stdout_task, stderr_task, wait_task):
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True)
+                for stream in (proc.stdout, proc.stderr):
+                    transport = getattr(stream, "_transport", None)
+                    if transport is not None:
+                        try:
+                            transport.close()
+                        except Exception:
+                            pass
+            raise
         finally:
             if not watchdog_task.done():
                 watchdog_task.cancel()
@@ -192,14 +300,11 @@ class AgentRunner:
                 except asyncio.CancelledError:
                     pass
             self._active_proc = None
+            self._active_pgid = None
 
         duration_ms = int((time.monotonic() - started) * 1000)
         stdout_text = "".join(stdout_chunks)
         stderr_text = "".join(stderr_chunks)
-        if len(stdout_text) > max_output_chars:
-            stdout_text = stdout_text[:max_output_chars] + "\n... [stdout truncated]"
-        if len(stderr_text) > max_output_chars:
-            stderr_text = stderr_text[:max_output_chars] + "\n... [stderr truncated]"
 
         session_match = _SESSION_ID_RE.search(stdout_text)
         session_id = session_match.group(1) if session_match else ""

@@ -5751,6 +5751,30 @@ class TestWorkspaceToolchain(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client2._args, ["/tmp/ws_beta/server.py"])  # type: ignore[attr-defined]
             self.assertEqual(client2._env["PROJECT_DIR"], "/tmp/ws_beta")  # type: ignore[attr-defined]
 
+    async def test_unknown_workspace_tool_returns_error_dict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=root / "cfg",
+                data_dir=root / "data",
+                llm_router=_MockLLMRouter(),
+            )
+            daemon.config_manager.update_config({"workspace": {"active_path": str(ws)}})
+
+            async def _deny(*_a: Any, **_k: Any) -> bool:
+                return False
+
+            res = await daemon._execute_workspace_tool(
+                "nonexistent_tool", {}, daemon.config_manager.config, _deny
+            )
+            self.assertIsInstance(res, dict)
+            self.assertFalse(res["ok"])
+            self.assertIn("Unknown workspace tool", res["error"])
+
 
 class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
     """Tests for AgentRegistry, AgentRunner, God Mode API, and bytey_agent__run."""
@@ -5844,6 +5868,209 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
                 "claude", [sys.executable, str(silent_cli)], root, timeout_seconds=0.4
             )
             self.assertTrue(res_silent.timed_out)
+
+    async def test_runner_bounds_output_during_read_and_streams_tail(self) -> None:
+        import tracemalloc
+        from bytey_ai_companion.agents import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            noisy_cli = root / "noisy_cli.py"
+            noisy_cli.write_text(
+                "import sys, time\n"
+                "for i in range(1000):\n"
+                "    print(f'line_{i:04d}_' + ('x' * 4000), flush=True)\n"
+                "time.sleep(0.7)\n"
+                "print('POST_LIMIT_TAIL_MARKER', flush=True)\n",
+                encoding="utf-8",
+            )
+            tails: list[str] = []
+
+            async def _on_tail(tail: str) -> None:
+                tails.append(tail)
+
+            runner = AgentRunner()
+            tracemalloc.start()
+            try:
+                res = await runner.run(
+                    "claude",
+                    [sys.executable, str(noisy_cli)],
+                    root,
+                    timeout_seconds=5,
+                    max_output_chars=120,
+                    on_output_tail=_on_tail,
+                )
+                _cur, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+
+            self.assertEqual(res.exit_code, 0)
+            self.assertIn("... [stdout truncated]", res.stdout)
+            self.assertLessEqual(len(res.stdout), 160)
+            # Peak traced memory stays well below the ~4MB emitted stdout
+            self.assertLess(peak, 2 * 1024 * 1024)
+            self.assertTrue(any("POST_LIMIT_TAIL_MARKER" in t for t in tails))
+
+    async def test_runner_task_cancellation_terminates_process_group(self) -> None:
+        from bytey_ai_companion.agents import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_file = root / "pids.txt"
+            long_cli = root / "long_cli.py"
+            long_cli.write_text(
+                "import os, signal, subprocess, sys, time\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                "def stop(signum, frame):\n"
+                "    child.wait()\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                f"with open({str(pid_file)!r}, 'w', encoding='utf-8') as fh:\n"
+                "    fh.write(f'{os.getpid()},{child.pid}')\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            runner = AgentRunner()
+            task = asyncio.create_task(
+                runner.run("claude", [sys.executable, str(long_cli)], root, timeout_seconds=30)
+            )
+            pids: list[int] = []
+            try:
+                for _ in range(50):
+                    if pid_file.exists():
+                        raw = pid_file.read_text(encoding="utf-8").strip()
+                        if "," in raw:
+                            pids = [int(p) for p in raw.split(",")]
+                            break
+                    await asyncio.sleep(0.05)
+                self.assertEqual(len(pids), 2)
+
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+                self.assertFalse(runner.is_running)
+                for p in pids:
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(p, 0)
+            finally:
+                for p in pids:
+                    try:
+                        os.kill(p, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        pass
+
+    async def test_runner_decodes_split_utf8_incrementally(self) -> None:
+        from bytey_ai_companion.agents import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Emit 4-byte UTF-8 emoji split exactly across a 4096-byte read boundary
+            cli = root / "split_utf8.py"
+            cli.write_text(
+                "import sys\n"
+                "payload = b'a' * 4094 + '🚀'.encode('utf-8') + b'done'\n"
+                "sys.stdout.buffer.write(payload)\n"
+                "sys.stdout.buffer.flush()\n",
+                encoding="utf-8",
+            )
+            runner = AgentRunner()
+            res = await runner.run("claude", [sys.executable, str(cli)], root, timeout_seconds=5)
+            self.assertEqual(res.exit_code, 0)
+            self.assertNotIn("\ufffd", res.stdout)
+            self.assertIn("🚀done", res.stdout)
+
+    async def test_disabled_custom_cli_honored_in_detect_and_sync(self) -> None:
+        from bytey_ai_companion.agents import AgentRegistry
+        from bytey_ai_companion.config import AgentsConfig, CustomCLIAgentConfig, ExternalAgentOverride
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = root / "custom_tool"
+            tool.write_text("#!/bin/sh\necho 'custom 1.0'\n", encoding="utf-8")
+            tool.chmod(0o755)
+
+            reg = AgentRegistry()
+            cfg = AgentsConfig(
+                custom_agents=[
+                    CustomCLIAgentConfig(
+                        id="custom1", display_name="Custom 1", command=str(tool), enabled=False
+                    )
+                ]
+            )
+            detected = {a.id: a for a in await reg.detect_all(cfg)}
+            self.assertTrue(detected["custom1"].installed)
+            self.assertFalse(detected["custom1"].enabled)
+
+            synced = {a.id: a for a in reg.sync_config(cfg)}
+            self.assertFalse(synced["custom1"].enabled)
+
+            # Explicit per-agent override takes precedence
+            cfg.overrides["custom1"] = ExternalAgentOverride(enabled=True)
+            synced_ov = {a.id: a for a in reg.sync_config(cfg)}
+            self.assertTrue(synced_ov["custom1"].enabled)
+
+    async def test_sync_config_reresolves_when_custom_path_cleared_or_command_changed(self) -> None:
+        from bytey_ai_companion.agents import AgentRegistry
+        from bytey_ai_companion.config import AgentsConfig, CustomCLIAgentConfig, ExternalAgentOverride
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_a = root / "tool_a"
+            bin_b = root / "tool_b"
+            for p in (bin_a, bin_b):
+                p.write_text("#!/bin/sh\necho 'tool 1.0'\n", encoding="utf-8")
+                p.chmod(0o755)
+
+            reg = AgentRegistry()
+            cfg = AgentsConfig(
+                overrides={"claude": ExternalAgentOverride(custom_path=str(bin_a))},
+                custom_agents=[
+                    CustomCLIAgentConfig(id="mycli", display_name="My CLI", command=str(bin_a))
+                ],
+            )
+            detected = {a.id: a for a in await reg.detect_all(cfg)}
+            self.assertEqual(detected["claude"].resolved_path, str(bin_a))
+            self.assertEqual(detected["mycli"].resolved_path, str(bin_a))
+
+            # Clearing custom_path re-resolves back to default binary (not stuck on bin_a)
+            cfg.overrides["claude"] = ExternalAgentOverride(custom_path="")
+            # Changing custom agent command re-resolves to bin_b
+            cfg.custom_agents[0] = CustomCLIAgentConfig(
+                id="mycli", display_name="My CLI", command=str(bin_b)
+            )
+            synced = {a.id: a for a in reg.sync_config(cfg)}
+            self.assertNotEqual(synced["claude"].resolved_path, str(bin_a))
+            self.assertEqual(synced["mycli"].resolved_path, str(bin_b))
+
+    async def test_collect_git_status_timeout_kills_and_reaps_process(self) -> None:
+        from unittest.mock import patch
+        from bytey_ai_companion.agents import runner as runner_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_file = root / "git.pid"
+            orig_exec = asyncio.create_subprocess_exec
+
+            async def _fake_exec(*_args: Any, **_kwargs: Any) -> asyncio.subprocess.Process:
+                return await orig_exec(
+                    sys.executable,
+                    "-c",
+                    f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(30)",
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+
+            with patch.object(runner_mod.asyncio, "create_subprocess_exec", side_effect=_fake_exec):
+                out = await runner_mod._collect_git_status(root, timeout_s=0.15)
+            self.assertEqual(out, "")
+            self.assertTrue(pid_file.exists())
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
 
     async def test_daemon_god_mode_routes_slash_command_and_run_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5960,6 +6187,104 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             finally:
                 await daemon.stop()
 
+    async def test_cancel_prompt_rejects_pending_confirmations_and_stops_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            long_cli = root / "long_cli.py"
+            long_cli.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=root / "cfg",
+                data_dir=root / "data",
+                llm_router=_MockLLMRouter(),
+            )
+            await daemon.start()
+            try:
+                sid = await daemon._ensure_active_session()
+                msg = await daemon.storage.add_message(sid, role="assistant", content="working")
+                await daemon.storage.add_tool_call(
+                    message_id=msg["id"],
+                    server_name="bytey_workspace",
+                    tool_name="write_file",
+                    arguments_json="{}",
+                    status="running",
+                    call_id="c_pending",
+                )
+
+                confirm_task = asyncio.create_task(
+                    daemon._request_tool_confirmation(
+                        "c_pending",
+                        msg["id"],
+                        "bytey_workspace",
+                        "write_file",
+                        {"rel_path": "a.txt"},
+                    )
+                )
+                for _ in range(50):
+                    if "c_pending" in daemon._pending_confirmations:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertIn("c_pending", daemon._pending_confirmations)
+
+                agent_task = asyncio.create_task(
+                    daemon.agent_runner.run(
+                        "claude", [sys.executable, str(long_cli)], ws, timeout_seconds=30
+                    )
+                )
+                for _ in range(50):
+                    if daemon.agent_runner.is_running:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(daemon.agent_runner.is_running)
+
+                cancel_res = await daemon._route_cancel_prompt(None)  # type: ignore[arg-type]
+                self.assertTrue(cancel_res["ok"])
+                self.assertEqual(cancel_res["rejected_confirmations"], 1)
+                self.assertTrue(cancel_res["agent_cancelled"])
+                self.assertFalse(await confirm_task)
+
+                agent_res = await agent_task
+                self.assertTrue(agent_res.cancelled)
+                self.assertFalse(daemon.agent_runner.is_running)
+
+                # Subsequent confirmation requests while cancelled must immediately reject
+                self.assertFalse(
+                    await daemon._request_tool_confirmation(
+                        "c_after",
+                        msg["id"],
+                        "bytey_workspace",
+                        "write_file",
+                        {"rel_path": "b.txt"},
+                    )
+                )
+            finally:
+                await daemon.stop()
+
+    async def test_probe_version_timeout_terminates_and_reaps_process(self) -> None:
+        from bytey_ai_companion.agents.registry import _probe_version
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_file = root / "probe.pid"
+            hung_probe = root / "hung_probe.py"
+            hung_probe.write_text(
+                "import os, time\n"
+                f"with open({str(pid_file)!r}, 'w', encoding='utf-8') as fh:\n"
+                "    fh.write(str(os.getpid()))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            version = await _probe_version(sys.executable, (str(hung_probe),))
+            self.assertEqual(version, "")
+            self.assertTrue(pid_file.exists())
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
 
 class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -6050,6 +6375,77 @@ class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
             await git.diff(rel_path="../outside.txt")
         with self.assertRaises(ValueError):
             await git.stage(paths=["/etc/passwd"])
+
+    async def test_large_output_bounded_and_drained(self) -> None:
+        from bytey_ai_companion.workspace.git_tools import MAX_GIT_BYTES
+
+        git = await self._init_configured_repo()
+        big_file = self.root / "big.txt"
+        big_file.write_text(("A" * 100 + "\n") * 800, encoding="utf-8")
+        self.assertTrue((await git.stage(paths=["big.txt"]))["ok"])
+        diff_res = await git.diff(staged=True)
+        self.assertTrue(diff_res["ok"])
+        self.assertIn("[Truncated at 32 KiB]", diff_res["content"])
+        self.assertLessEqual(len(diff_res["content"].encode("utf-8")), MAX_GIT_BYTES + 128)
+
+    async def test_subdirectory_of_parent_repo_is_rejected(self) -> None:
+        from bytey_ai_companion.workspace.git_tools import GitToolchain
+
+        await self._init_configured_repo()
+        sibling = self.root / "sibling.txt"
+        sibling.write_text("keep\n", encoding="utf-8")
+        sub = self.root / "sub"
+        sub.mkdir()
+        (sub / "local.txt").write_text("sub\n", encoding="utf-8")
+
+        sub_git = GitToolchain(sub)
+        self.assertFalse(await sub_git.is_repo())
+        st_res = await sub_git.status()
+        self.assertFalse(st_res["ok"])
+        self.assertIn("Not a git repository", st_res["error"])
+        stage_res = await sub_git.stage(all_files=True)
+        self.assertFalse(stage_res["ok"])
+        self.assertEqual(sibling.read_text(encoding="utf-8"), "keep\n")
+
+    async def test_option_shaped_git_args_rejected(self) -> None:
+        git = await self._init_configured_repo()
+        victim = self.root / "victim.txt"
+        with self.assertRaises(ValueError):
+            await git.diff(ref=f"--output={victim}")
+        with self.assertRaises(ValueError):
+            await git.log(ref="--format=%H", author="--all")
+        with self.assertRaises(ValueError):
+            await git.show(ref="--output=/tmp/evil")
+        with self.assertRaises(ValueError):
+            await git.checkout(ref="-f")
+        with self.assertRaises(ValueError):
+            await git.push(remote="--receive-pack=evil")
+        self.assertFalse(victim.exists())
+
+    async def test_blame_short_file_clamps_default_end_line(self) -> None:
+        git = await self._init_configured_repo()
+        short_file = self.root / "short.py"
+        short_file.write_text("line1\nline2\nline3\n", encoding="utf-8")
+        self.assertTrue((await git.stage(paths=["short.py"]))["ok"])
+        self.assertTrue((await git.commit("add short"))["ok"])
+
+        blame_res = await git.blame("short.py")
+        self.assertTrue(blame_res["ok"], blame_res)
+        self.assertIn("line3", blame_res["content"])
+
+    async def test_blame_read_error_returns_error(self) -> None:
+        from unittest.mock import patch
+
+        git = await self._init_configured_repo()
+        locked = self.root / "locked.py"
+        locked.write_text("secret\n", encoding="utf-8")
+        self.assertTrue((await git.stage(paths=["locked.py"]))["ok"])
+        self.assertTrue((await git.commit("add locked"))["ok"])
+
+        with patch.object(git, "_count_lines_up_to", side_effect=PermissionError("Permission denied")):
+            res = await git.blame("locked.py")
+        self.assertFalse(res["ok"])
+        self.assertIn("Permission denied", res["error"])
 
 
 class TestGitDaemonIntegration(unittest.IsolatedAsyncioTestCase):

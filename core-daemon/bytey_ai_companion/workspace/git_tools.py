@@ -39,10 +39,31 @@ ALWAYS_CONFIRM_GIT_TOOLS: frozenset[str] = frozenset(
 )
 
 
-def _cap_output(raw: bytes) -> str:
-    if len(raw) > MAX_GIT_BYTES:
+def _cap_output(raw: bytes, truncated: bool = False) -> str:
+    if truncated or len(raw) > MAX_GIT_BYTES:
         return raw[:MAX_GIT_BYTES].decode("utf-8", errors="replace") + "\n[Truncated at 32 KiB]"
     return raw.decode("utf-8", errors="replace")
+
+
+async def _read_bounded_stream(
+    stream: asyncio.StreamReader | None, max_bytes: int
+) -> tuple[bytes, bool]:
+    """Drain stream to EOF while keeping at most max_bytes in memory."""
+    if stream is None:
+        return b"", False
+    buf = bytearray()
+    truncated = False
+    while True:
+        chunk = await stream.read(4096)
+        if not chunk:
+            break
+        if not truncated:
+            remaining = max_bytes - len(buf)
+            if remaining > 0:
+                buf.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                truncated = True
+    return bytes(buf), truncated
 
 
 class GitToolchain:
@@ -72,6 +93,18 @@ class GitToolchain:
             return []
         return [self._resolve_rel_path(str(p)) for p in paths if str(p).strip()]
 
+    @staticmethod
+    def _validate_git_arg(value: str, label: str = "argument") -> str:
+        """Reject option-shaped ('-...') or control-character Git arguments."""
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return ""
+        if cleaned.startswith("-"):
+            raise ValueError(f"Invalid Git {label} (cannot start with '-'): {value!r}")
+        if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
+            raise ValueError(f"Invalid Git {label} (contains control characters): {value!r}")
+        return cleaned
+
     async def _run_git(
         self,
         args: list[str],
@@ -93,11 +126,19 @@ class GitToolchain:
             "-C",
             str(self.root),
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            (stdout_b, stdout_trunc), (stderr_b, stderr_trunc), _ = await asyncio.wait_for(
+                asyncio.gather(
+                    _read_bounded_stream(proc.stdout, MAX_GIT_BYTES),
+                    _read_bounded_stream(proc.stderr, MAX_GIT_BYTES),
+                    proc.wait(),
+                ),
+                timeout=timeout_s,
+            )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
@@ -111,19 +152,27 @@ class GitToolchain:
         return {
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,
-            "stdout": _cap_output(stdout_b),
-            "stderr": _cap_output(stderr_b),
+            "stdout": _cap_output(stdout_b, stdout_trunc),
+            "stderr": _cap_output(stderr_b, stderr_trunc),
             "timed_out": False,
         }
 
     async def is_repo(self) -> bool:
-        """Return True when self.root is inside a Git work tree."""
+        """Return True only when self.root is the Git worktree root."""
         res = await self._run_git(
-            ["rev-parse", "--is-inside-work-tree"],
+            ["rev-parse", "--show-toplevel"],
             timeout_s=5.0,
             require_repo=False,
         )
-        return bool(res["ok"] and res["stdout"].strip() == "true")
+        if not res["ok"]:
+            return False
+        toplevel = res["stdout"].strip()
+        if not toplevel:
+            return False
+        try:
+            return Path(toplevel).resolve() == self.root.resolve()
+        except OSError:
+            return False
 
     @staticmethod
     def format_result(res: dict[str, Any], empty_msg: str = "(ok)") -> dict[str, Any]:
@@ -156,10 +205,12 @@ class GitToolchain:
             args.append("--staged")
         if stat_only:
             args.append("--stat")
-        if ref.strip():
-            args.append(ref.strip())
-        if target_ref.strip():
-            args.append(target_ref.strip())
+        safe_ref = self._validate_git_arg(ref, "ref")
+        safe_target = self._validate_git_arg(target_ref, "target_ref")
+        if safe_ref:
+            args.append(safe_ref)
+        if safe_target:
+            args.append(safe_target)
         if rel_path.strip():
             args.extend(["--", self._resolve_rel_path(rel_path)])
         return self.format_result(await self._run_git(args), empty_msg="(no diff)")
@@ -178,12 +229,15 @@ class GitToolchain:
         args = ["log", f"-n{clamped}"]
         if oneline:
             args.append("--oneline")
-        if author.strip():
-            args.append(f"--author={author.strip()}")
-        if since.strip():
-            args.append(f"--since={since.strip()}")
-        if ref.strip():
-            args.append(ref.strip())
+        safe_author = self._validate_git_arg(author, "author")
+        safe_since = self._validate_git_arg(since, "since")
+        safe_ref = self._validate_git_arg(ref, "ref")
+        if safe_author:
+            args.append(f"--author={safe_author}")
+        if safe_since:
+            args.append(f"--since={safe_since}")
+        if safe_ref:
+            args.append(safe_ref)
         if rel_path.strip():
             args.extend(["--", self._resolve_rel_path(rel_path)])
         return self.format_result(await self._run_git(args), empty_msg="(no commits)")
@@ -194,17 +248,41 @@ class GitToolchain:
         args = ["show"]
         if stat_only:
             args.append("--stat")
-        args.append((ref or "HEAD").strip())
+        safe_ref = self._validate_git_arg(ref or "HEAD", "ref") or "HEAD"
+        args.append(safe_ref)
         if rel_path.strip():
             args.extend(["--", self._resolve_rel_path(rel_path)])
         return self.format_result(await self._run_git(args))
 
+    @staticmethod
+    def _count_lines_up_to(target_file: Path, limit: int | None) -> int:
+        count = 0
+        with target_file.open("rb") as fh:
+            for _ in fh:
+                count += 1
+                if limit is not None and count >= limit:
+                    break
+        return count
+
     async def blame(
-        self, rel_path: str, start_line: int = 1, end_line: int = 200
+        self, rel_path: str, start_line: int = 1, end_line: int | None = 200
     ) -> dict[str, Any]:
         safe_path = self._resolve_rel_path(rel_path)
         s = max(1, int(start_line))
-        e = max(s, int(end_line))
+        target_file = self.root / safe_path
+        if target_file.is_file():
+            limit = max(s, int(end_line)) if end_line is not None else None
+            try:
+                total_lines = await asyncio.to_thread(self._count_lines_up_to, target_file, limit)
+            except OSError as exc:
+                err = str(exc)
+                return {"ok": False, "error": err, "content": err}
+            if total_lines == 0:
+                return {"ok": True, "content": "(empty file)"}
+            s = min(s, total_lines)
+            e = total_lines if end_line is None else max(s, min(int(end_line), total_lines))
+        else:
+            e = max(s, int(end_line if end_line is not None else s))
         args = ["blame", f"-L{s},{e}", "--", safe_path]
         return self.format_result(await self._run_git(args))
 
@@ -216,8 +294,9 @@ class GitToolchain:
 
     async def tag_list(self, pattern: str = "") -> dict[str, Any]:
         args = ["tag", "-l"]
-        if pattern.strip():
-            args.append(pattern.strip())
+        safe_pattern = self._validate_git_arg(pattern, "pattern")
+        if safe_pattern:
+            args.extend(["--", safe_pattern])
         return self.format_result(await self._run_git(args), empty_msg="(no tags)")
 
     async def stash_list(self) -> dict[str, Any]:
@@ -230,8 +309,9 @@ class GitToolchain:
 
     async def init(self, default_branch: str = "") -> dict[str, Any]:
         args = ["init"]
-        if default_branch.strip():
-            args.extend(["-b", default_branch.strip()])
+        safe_branch = self._validate_git_arg(default_branch, "default_branch")
+        if safe_branch:
+            args.extend(["-b", safe_branch])
         return self.format_result(await self._run_git(args, require_repo=False))
 
     async def stage(self, paths: list[str] | None = None, all_files: bool = False) -> dict[str, Any]:
@@ -269,22 +349,23 @@ class GitToolchain:
     async def branch_create(
         self, name: str, start_point: str = "", checkout: bool = True
     ) -> dict[str, Any]:
-        branch = (name or "").strip()
+        branch = self._validate_git_arg(name, "branch name")
         if not branch:
             return {"ok": False, "error": "Branch name must not be empty"}
         args = ["checkout", "-b", branch] if checkout else ["branch", branch]
-        if start_point.strip():
-            args.append(start_point.strip())
+        safe_start = self._validate_git_arg(start_point, "start_point")
+        if safe_start:
+            args.append(safe_start)
         return self.format_result(await self._run_git(args))
 
     async def checkout(self, ref: str) -> dict[str, Any]:
-        target = (ref or "").strip()
+        target = self._validate_git_arg(ref, "ref")
         if not target:
             return {"ok": False, "error": "Target branch or ref must not be empty"}
         return self.format_result(await self._run_git(["checkout", target]))
 
     async def branch_delete(self, name: str, force: bool = False) -> dict[str, Any]:
-        branch = (name or "").strip()
+        branch = self._validate_git_arg(name, "branch name")
         if not branch:
             return {"ok": False, "error": "Branch name must not be empty"}
         flag = "-D" if force else "-d"
@@ -295,7 +376,7 @@ class GitToolchain:
     ) -> dict[str, Any]:
         if abort:
             return self.format_result(await self._run_git(["merge", "--abort"]))
-        target = (branch or "").strip()
+        target = self._validate_git_arg(branch, "branch")
         if not target:
             return {"ok": False, "error": "Branch name must not be empty"}
         args = ["merge"]
@@ -315,7 +396,7 @@ class GitToolchain:
             return self.format_result(await self._run_git(["rebase", "--abort"]))
         if continue_rebase:
             return self.format_result(await self._run_git(["rebase", "--continue"]))
-        target = (onto or "").strip()
+        target = self._validate_git_arg(onto, "onto")
         if not target:
             return {"ok": False, "error": "Upstream branch/ref must not be empty"}
         return self.format_result(await self._run_git(["rebase", target]))
@@ -327,7 +408,7 @@ class GitToolchain:
             return self.format_result(await self._run_git(["cherry-pick", "--abort"]))
         if continue_cp:
             return self.format_result(await self._run_git(["cherry-pick", "--continue"]))
-        target = (commit or "").strip()
+        target = self._validate_git_arg(commit, "commit")
         if not target:
             return {"ok": False, "error": "Commit ref must not be empty"}
         return self.format_result(await self._run_git(["cherry-pick", target]))
@@ -349,14 +430,15 @@ class GitToolchain:
                 args.extend(["-m", message.strip()])
         elif act in ("pop", "apply", "drop"):
             args = ["stash", act]
-            if ref.strip():
-                args.append(ref.strip())
+            safe_ref = self._validate_git_arg(ref, "stash ref")
+            if safe_ref:
+                args.append(safe_ref)
         else:
             return {"ok": False, "error": f"Unsupported stash action: {action!r}"}
         return self.format_result(await self._run_git(args))
 
     async def tag_create(self, name: str, message: str = "", ref: str = "") -> dict[str, Any]:
-        tag_name = (name or "").strip()
+        tag_name = self._validate_git_arg(name, "tag name")
         if not tag_name:
             return {"ok": False, "error": "Tag name must not be empty"}
         args = ["tag"]
@@ -364,8 +446,9 @@ class GitToolchain:
             args.extend(["-a", tag_name, "-m", message.strip()])
         else:
             args.append(tag_name)
-        if ref.strip():
-            args.append(ref.strip())
+        safe_ref = self._validate_git_arg(ref, "ref")
+        if safe_ref:
+            args.append(safe_ref)
         return self.format_result(await self._run_git(args), empty_msg=f"Created tag {tag_name}")
 
     async def restore(self, paths: list[str], source: str = "") -> dict[str, Any]:
@@ -373,8 +456,9 @@ class GitToolchain:
         if not safe_paths:
             return {"ok": False, "error": "Provide paths to restore"}
         args = ["restore"]
-        if source.strip():
-            args.extend(["--source", source.strip()])
+        safe_source = self._validate_git_arg(source, "source")
+        if safe_source:
+            args.extend(["--source", safe_source])
         args.extend(["--", *safe_paths])
         return self.format_result(await self._run_git(args), empty_msg="Restored paths.")
 
@@ -382,7 +466,7 @@ class GitToolchain:
         m = (mode or "mixed").strip().lower()
         if m not in ("soft", "mixed", "hard"):
             return {"ok": False, "error": f"Invalid reset mode: {mode!r}"}
-        target = (ref or "HEAD").strip()
+        target = self._validate_git_arg(ref or "HEAD", "ref") or "HEAD"
         return self.format_result(await self._run_git(["reset", f"--{m}", target]))
 
     # --- Remote / network tools ---
@@ -393,8 +477,10 @@ class GitToolchain:
         args = ["fetch"]
         if all_remotes:
             args.append("--all")
-        elif remote.strip():
-            args.append(remote.strip())
+        else:
+            safe_remote = self._validate_git_arg(remote, "remote")
+            if safe_remote:
+                args.append(safe_remote)
         if prune:
             args.append("--prune")
         return self.format_result(await self._run_git(args, timeout_s=REMOTE_TIMEOUT_S))
@@ -405,10 +491,12 @@ class GitToolchain:
         args = ["pull"]
         if rebase:
             args.append("--rebase")
-        if remote.strip():
-            args.append(remote.strip())
-            if branch.strip():
-                args.append(branch.strip())
+        safe_remote = self._validate_git_arg(remote, "remote")
+        safe_branch = self._validate_git_arg(branch, "branch")
+        if safe_remote:
+            args.append(safe_remote)
+            if safe_branch:
+                args.append(safe_branch)
         return self.format_result(await self._run_git(args, timeout_s=REMOTE_TIMEOUT_S))
 
     async def push(
@@ -424,8 +512,10 @@ class GitToolchain:
             args.append("-u")
         if force_with_lease:
             args.append("--force-with-lease")
-        if remote.strip():
-            args.append(remote.strip())
-        if branch.strip():
-            args.append(branch.strip())
+        safe_remote = self._validate_git_arg(remote, "remote")
+        safe_branch = self._validate_git_arg(branch, "branch")
+        if safe_remote:
+            args.append(safe_remote)
+        if safe_branch:
+            args.append(safe_branch)
         return self.format_result(await self._run_git(args, timeout_s=REMOTE_TIMEOUT_S))
