@@ -6027,6 +6027,83 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             finally:
                 await daemon.stop()
 
+    async def test_cancel_prompt_rejects_pending_confirmations_and_stops_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            long_cli = root / "long_cli.py"
+            long_cli.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=root / "cfg",
+                data_dir=root / "data",
+                llm_router=_MockLLMRouter(),
+            )
+            await daemon.start()
+            try:
+                sid = await daemon._ensure_active_session()
+                msg = await daemon.storage.add_message(sid, role="assistant", content="working")
+                await daemon.storage.add_tool_call(
+                    message_id=msg["id"],
+                    server_name="bytey_workspace",
+                    tool_name="write_file",
+                    arguments_json="{}",
+                    status="running",
+                    call_id="c_pending",
+                )
+
+                confirm_task = asyncio.create_task(
+                    daemon._request_tool_confirmation(
+                        "c_pending",
+                        msg["id"],
+                        "bytey_workspace",
+                        "write_file",
+                        {"rel_path": "a.txt"},
+                    )
+                )
+                for _ in range(50):
+                    if "c_pending" in daemon._pending_confirmations:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertIn("c_pending", daemon._pending_confirmations)
+
+                agent_task = asyncio.create_task(
+                    daemon.agent_runner.run(
+                        "claude", [sys.executable, str(long_cli)], ws, timeout_seconds=30
+                    )
+                )
+                for _ in range(50):
+                    if daemon.agent_runner.is_running:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(daemon.agent_runner.is_running)
+
+                cancel_res = await daemon._route_cancel_prompt(None)  # type: ignore[arg-type]
+                self.assertTrue(cancel_res["ok"])
+                self.assertEqual(cancel_res["rejected_confirmations"], 1)
+                self.assertTrue(cancel_res["agent_cancelled"])
+                self.assertFalse(await confirm_task)
+
+                agent_res = await agent_task
+                self.assertTrue(agent_res.cancelled)
+                self.assertFalse(daemon.agent_runner.is_running)
+
+                # Subsequent confirmation requests while cancelled must immediately reject
+                self.assertFalse(
+                    await daemon._request_tool_confirmation(
+                        "c_after",
+                        msg["id"],
+                        "bytey_workspace",
+                        "write_file",
+                        {"rel_path": "b.txt"},
+                    )
+                )
+            finally:
+                await daemon.stop()
+
 
 class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

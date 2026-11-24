@@ -1647,6 +1647,16 @@ class ByteyDaemon:
         self._started = True
         logger.info("Bytey AI Companion daemon listening on http://%s:%s", self.ipc.host, self.ipc.port)
 
+    def _reject_pending_confirmations(self) -> int:
+        """Resolve all pending tool confirmation futures as rejected."""
+        rejected = 0
+        for call_id, fut in list(self._pending_confirmations.items()):
+            if not fut.done():
+                fut.set_result(False)
+                rejected += 1
+            self._pending_confirmations.pop(call_id, None)
+        return rejected
+
     async def stop(self) -> None:
         """Gracefully shut down all subsystems, subprocesses, and sockets."""
         if not self._started and self._stop_event.is_set():
@@ -1654,10 +1664,7 @@ class ByteyDaemon:
         self._started = False
         self._stop_event.set()
 
-        for call_id, fut in list(self._pending_confirmations.items()):
-            if not fut.done():
-                fut.set_result(False)
-            self._pending_confirmations.pop(call_id, None)
+        self._reject_pending_confirmations()
 
         self._cancel_emotion_reset()
         if self._idle_mood_task is not None and not self._idle_mood_task.done():
@@ -2071,6 +2078,8 @@ class ByteyDaemon:
         arguments: dict[str, Any],
         extra_payload: dict[str, Any] | None = None,
     ) -> bool:
+        if self._prompt_cancel_event.is_set():
+            return False
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[bool] = loop.create_future()
         self._pending_confirmations[call_id] = fut
@@ -2091,7 +2100,7 @@ class ByteyDaemon:
         await self.ipc.connection_manager.broadcast(payload)
         try:
             approved = await asyncio.wait_for(fut, timeout=60.0)
-            return bool(approved)
+            return bool(approved) and not self._prompt_cancel_event.is_set()
         except asyncio.TimeoutError:
             return False
         finally:
@@ -2568,24 +2577,27 @@ class ByteyDaemon:
                             c_extra: dict[str, Any] | None = None,
                             _cid: str = call_id,
                         ) -> bool:
+                            if self._prompt_cancel_event.is_set():
+                                return False
                             approved = await self._request_tool_confirmation(
                                 _cid, assistant_id, c_srv, c_tool, c_args, c_extra
                             )
-                            if approved:
-                                await self.storage.update_tool_call(_cid, "running")
-                                await self.ipc.connection_manager.broadcast(
-                                    {
-                                        "type": "tool_call_status",
-                                        "call_id": _cid,
-                                        "message_id": assistant_id,
-                                        "server": c_srv,
-                                        "tool": c_tool,
-                                        "arguments": c_args,
-                                        "status": "running",
-                                        "summary": "Approved",
-                                    }
-                                )
-                            return approved
+                            if not approved or self._prompt_cancel_event.is_set():
+                                return False
+                            await self.storage.update_tool_call(_cid, "running")
+                            await self.ipc.connection_manager.broadcast(
+                                {
+                                    "type": "tool_call_status",
+                                    "call_id": _cid,
+                                    "message_id": assistant_id,
+                                    "server": c_srv,
+                                    "tool": c_tool,
+                                    "arguments": c_args,
+                                    "status": "running",
+                                    "summary": "Approved",
+                                }
+                            )
+                            return True
 
                         if is_skill_tool:
                             tool_res = await self._execute_skill_tool(
@@ -3458,9 +3470,16 @@ class ByteyDaemon:
         return {"ok": True}
 
     async def _route_cancel_prompt(self, _req: IPCRequest) -> dict[str, Any]:
-        """Signal any active multi-round prompt loop to stop cleanly."""
+        """Signal any active multi-round prompt loop, pending approval, and CLI run to stop cleanly."""
         self._prompt_cancel_event.set()
-        return {"ok": True, "cancelling": self._chat_lock.locked()}
+        rejected_confirmations = self._reject_pending_confirmations()
+        agent_cancelled = await self.agent_runner.cancel()
+        return {
+            "ok": True,
+            "cancelling": self._chat_lock.locked(),
+            "rejected_confirmations": rejected_confirmations,
+            "agent_cancelled": agent_cancelled,
+        }
 
     async def _route_pause_tts(self, req: IPCRequest) -> dict[str, Any]:
         body = req.json()
