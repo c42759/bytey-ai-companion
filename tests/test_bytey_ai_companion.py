@@ -6104,6 +6104,27 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             finally:
                 await daemon.stop()
 
+    async def test_probe_version_timeout_terminates_and_reaps_process(self) -> None:
+        from bytey_ai_companion.agents.registry import _probe_version
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_file = root / "probe.pid"
+            hung_probe = root / "hung_probe.py"
+            hung_probe.write_text(
+                "import os, time\n"
+                f"with open({str(pid_file)!r}, 'w', encoding='utf-8') as fh:\n"
+                "    fh.write(str(os.getpid()))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            version = await _probe_version(sys.executable, (str(hung_probe),))
+            self.assertEqual(version, "")
+            self.assertTrue(pid_file.exists())
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
 
 class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -6225,6 +6246,21 @@ class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
         stage_res = await sub_git.stage(all_files=True)
         self.assertFalse(stage_res["ok"])
         self.assertEqual(sibling.read_text(encoding="utf-8"), "keep\n")
+
+    async def test_option_shaped_git_args_rejected(self) -> None:
+        git = await self._init_configured_repo()
+        victim = self.root / "victim.txt"
+        with self.assertRaises(ValueError):
+            await git.diff(ref=f"--output={victim}")
+        with self.assertRaises(ValueError):
+            await git.log(ref="--format=%H", author="--all")
+        with self.assertRaises(ValueError):
+            await git.show(ref="--output=/tmp/evil")
+        with self.assertRaises(ValueError):
+            await git.checkout(ref="-f")
+        with self.assertRaises(ValueError):
+            await git.push(remote="--receive-pack=evil")
+        self.assertFalse(victim.exists())
 
 
 class TestGitDaemonIntegration(unittest.IsolatedAsyncioTestCase):

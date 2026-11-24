@@ -172,10 +172,27 @@ def _resolve_binary(binary: str, custom_path: str = "") -> str:
     return shutil.which(binary, path=_augmented_search_path()) or ""
 
 
+async def _terminate_and_reap(proc: asyncio.subprocess.Process | None) -> None:
+    """Terminate/kill and reap a subprocess if still running."""
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    except Exception:
+        pass
+    try:
+        await proc.wait()
+    except Exception:
+        pass
+
+
 async def _probe_version(binary_path: str, version_args: tuple[str, ...]) -> str:
     """Run a quick non-blocking version probe with 2s timeout."""
     if not binary_path:
         return ""
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             binary_path,
@@ -190,7 +207,14 @@ async def _probe_version(binary_path: str, version_args: tuple[str, ...]) -> str
             return ""
         first_line = raw.splitlines()[0].strip()
         return first_line[:120]
+    except asyncio.TimeoutError:
+        await _terminate_and_reap(proc)
+        return ""
+    except asyncio.CancelledError:
+        await _terminate_and_reap(proc)
+        raise
     except Exception:
+        await _terminate_and_reap(proc)
         return ""
 
 
