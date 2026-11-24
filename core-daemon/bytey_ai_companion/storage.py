@@ -379,6 +379,18 @@ class StorageManager:
                 call_id = str(item.get("call_id") or "").strip()
                 if call_id:
                     normalized.append({"type": "tool_call", "call_id": call_id})
+            elif ptype == "attachment":
+                name = str(item.get("name") or "").strip()
+                if name:
+                    normalized.append(
+                        {
+                            "type": "attachment",
+                            "name": name,
+                            "mime_type": str(item.get("mime_type") or "application/octet-stream"),
+                            "size": int(item.get("size") or 0),
+                            "stored_path": str(item.get("stored_path") or ""),
+                        }
+                    )
         return normalized
 
     @classmethod

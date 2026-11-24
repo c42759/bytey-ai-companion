@@ -79,7 +79,7 @@ export default class ByteyExtension extends Extension {
         this._positionManager = new PositionManager();
 
         this._drawer = new TranscriptDrawer(this._positionManager, {
-            onSendText: text => this._handleSendText(text),
+            onSendText: (text, attachments) => this._handleSendText(text, attachments),
             onClearChat: () => this._handleNewChat(),
             onReplayTts: (messageId, text) => this._handleReplayTts(messageId, text),
             onDeleteMessage: messageId => this._handleDeleteMessage(messageId),
@@ -123,6 +123,8 @@ export default class ByteyExtension extends Extension {
             },
             onSelectWorkspace: path => this._handleSelectWorkspace(path),
             onOpenWorkspaceSettings: () => this.openPreferences(),
+            onListModels: provider => this._handleListModels(provider),
+            onSelectModel: model => this._handleSelectModel(model),
         });
 
         this._islandWidget = new IslandWidget(this._positionManager, {
@@ -399,6 +401,24 @@ export default class ByteyExtension extends Extension {
         this._refreshSkillsList().catch(() => {});
     }
 
+    async _handleListModels(provider) {
+        if (this._disabled || !provider)
+            return [];
+        const resp = await this._httpJson(
+            'GET',
+            `/api/v1/providers/${encodeURIComponent(String(provider))}/models`
+        );
+        if (this._disabled || !resp.ok || !resp.data)
+            return [];
+        return Array.isArray(resp.data.models) ? resp.data.models : [];
+    }
+
+    async _handleSelectModel(model) {
+        if (this._disabled || !model)
+            return;
+        await this._patchConfig({provider: {model: String(model)}});
+    }
+
     async _refreshSkillsList() {
         const resp = await this._httpJson('GET', '/api/v1/skills');
         if (this._disabled || !resp.ok || !resp.data)
@@ -538,7 +558,7 @@ export default class ByteyExtension extends Extension {
         }).catch(() => {});
     }
 
-    async _handleSendText(text) {
+    async _handleSendText(text, attachments = []) {
         const sessionTarget = this._activeSessionId
             ? encodeURIComponent(this._activeSessionId)
             : 'active';
@@ -548,6 +568,8 @@ export default class ByteyExtension extends Extension {
             input_mode: 'text',
             source: 'text',
         };
+        if (Array.isArray(attachments) && attachments.length > 0)
+            body.attachments = attachments;
 
         let resp = await this._httpJson('POST', `/api/v1/sessions/${sessionTarget}/messages`, body);
         if (!resp.ok && resp.status === 404) {

@@ -6678,5 +6678,82 @@ class TestInterleavedMessageParts(unittest.IsolatedAsyncioTestCase):
                 await daemon.stop()
 
 
+class TestAttachments(unittest.IsolatedAsyncioTestCase):
+    async def test_text_and_image_attachments_stored_per_session_and_cleaned_up(self) -> None:
+        from bytey_ai_companion.llm.router import LLMRouter
+
+        captured_messages: list[list[dict[str, Any]]] = []
+
+        class _CaptureRouter(LLMRouter):
+            async def generate_chat(self, **kwargs: Any) -> dict[str, Any]:
+                captured_messages.append(list(kwargs.get("messages") or []))
+                on_text_chunk = kwargs.get("on_text_chunk")
+                if on_text_chunk:
+                    await on_text_chunk("Got your files.")
+                return {"content": "Got your files.", "emotion": "happy", "tool_calls": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            src_txt = tmp / "notes.py"
+            src_txt.write_text("print('hello attachment')\n", encoding="utf-8")
+            # Minimal 1x1 PNG bytes
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+                b"\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00"
+                b"\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            src_img = tmp / "shot.png"
+            src_img.write_bytes(png_bytes)
+
+            data_dir = tmp / "data"
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=tmp / "cfg",
+                data_dir=data_dir,
+                enable_voice_capture=False,
+                llm_router=_CaptureRouter(),
+            )
+            daemon.config_manager.update_config({"voice_out": {"tts_provider": "disabled"}})
+            await daemon.start()
+            try:
+                sess = await daemon.storage.get_or_create_active_session()
+                sid = sess["id"]
+                await daemon.handle_user_prompt(
+                    "Check these",
+                    session_id=sid,
+                    input_mode="text",
+                    attachments=[
+                        {"path": str(src_txt), "name": "notes.py"},
+                        {"path": str(src_img), "name": "shot.png"},
+                    ],
+                )
+                att_dir = daemon._attachments_dir(sid)
+                self.assertTrue(att_dir.is_dir())
+                stored_files = list(att_dir.iterdir())
+                self.assertEqual(len(stored_files), 2)
+
+                msgs = await daemon.storage.list_messages(sid)
+                user_msg = [m for m in msgs if m["role"] == "user"][-1]
+                att_parts = [p for p in user_msg["parts"] if p["type"] == "attachment"]
+                self.assertEqual(len(att_parts), 2)
+                self.assertEqual({p["name"] for p in att_parts}, {"notes.py", "shot.png"})
+
+                self.assertEqual(len(captured_messages), 1)
+                last_u = [m for m in captured_messages[0] if m["role"] == "user"][-1]
+                self.assertIn("print('hello attachment')", last_u["content"])
+                self.assertEqual(len(last_u.get("images") or []), 1)
+                self.assertEqual(last_u["images"][0]["mime_type"], "image/png")
+
+                # Deleting session cleans up attachments directory
+                base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+                async with httpx.AsyncClient(base_url=base_url) as client:
+                    del_resp = await client.delete(f"/api/v1/sessions/{sid}")
+                    self.assertEqual(del_resp.status_code, 200)
+                self.assertFalse(att_dir.exists())
+            finally:
+                await daemon.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
