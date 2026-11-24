@@ -1391,7 +1391,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
 
         host_row = Adw.ActionRow(
             title="Bytey MCP Host",
-            subtitle="Built-in MCP host • Workspace & Skills tools (always enabled)",
+            subtitle="Built-in MCP host • Workspace, Git & Skills tools (always enabled)",
         )
         host_badge = Gtk.Label(
             label="Built-in",
@@ -1571,7 +1571,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         cfg = {} if is_builtin else dict(self._mcp_servers.get(name, {}))
         mcp_title = "Bytey MCP Host" if is_builtin else str(name)
         if is_builtin:
-            mcp_desc = "Built-in MCP host providing native Workspace and Skills tools for Bytey."
+            mcp_desc = "Built-in MCP host providing native Workspace, Git, and Skills tools for Bytey."
         else:
             transport = str(cfg.get("transport") or ("http" if cfg.get("url") else "stdio"))
             target = (

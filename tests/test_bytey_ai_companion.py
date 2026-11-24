@@ -5921,5 +5921,166 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
                 await daemon.stop()
 
 
+class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp_dir.name)
+        self.git = None
+
+    async def asyncTearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    async def _init_configured_repo(self):
+        from bytey_ai_companion.workspace.git_tools import GitToolchain
+
+        git = GitToolchain(self.root)
+        init_res = await git.init(default_branch="main")
+        self.assertTrue(init_res["ok"], init_res)
+        for key, val in (("user.name", "Bytey Test"), ("user.email", "bytey@example.com")):
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(self.root), "config", key, val
+            )
+            await proc.wait()
+        return git
+
+    async def test_git_lifecycle_operations(self) -> None:
+        from bytey_ai_companion.workspace.git_tools import GitToolchain
+
+        git = GitToolchain(self.root)
+        self.assertFalse(await git.is_repo())
+        non_repo = await git.status()
+        self.assertFalse(non_repo["ok"])
+        self.assertIn("Not a git repository", non_repo["error"])
+
+        git = await self._init_configured_repo()
+        self.assertTrue(await git.is_repo())
+
+        (self.root / "app.py").write_text("print('v1')\n", encoding="utf-8")
+        st = await git.status()
+        self.assertTrue(st["ok"])
+        self.assertIn("app.py", st["content"])
+
+        self.assertTrue((await git.stage(paths=["app.py"]))["ok"])
+        c1 = await git.commit("initial commit")
+        self.assertTrue(c1["ok"], c1)
+
+        log_res = await git.log(limit=5)
+        self.assertTrue(log_res["ok"])
+        self.assertIn("initial commit", log_res["content"])
+
+        show_res = await git.show("HEAD", stat_only=True)
+        self.assertTrue(show_res["ok"])
+        self.assertIn("app.py", show_res["content"])
+
+        blame_res = await git.blame("app.py", start_line=1, end_line=1)
+        self.assertTrue(blame_res["ok"])
+        self.assertIn("Bytey Test", blame_res["content"])
+
+        (self.root / "app.py").write_text("print('v2')\n", encoding="utf-8")
+        diff_res = await git.diff(rel_path="app.py")
+        self.assertTrue(diff_res["ok"])
+        self.assertIn("+print('v2')", diff_res["content"])
+
+        # Stash push & pop
+        self.assertTrue((await git.stash("push", message="wip"))["ok"])
+        self.assertIn("wip", (await git.stash_list())["content"])
+        self.assertTrue((await git.stash("pop"))["ok"])
+
+        # Restore working tree
+        self.assertTrue((await git.restore(["app.py"]))["ok"])
+        self.assertEqual((self.root / "app.py").read_text(encoding="utf-8"), "print('v1')\n")
+
+        # Branch create, commit, merge, delete, tag
+        self.assertTrue((await git.branch_create("feat"))["ok"])
+        (self.root / "feat.txt").write_text("feature\n", encoding="utf-8")
+        self.assertTrue((await git.stage(all_files=True))["ok"])
+        self.assertTrue((await git.commit("add feat"))["ok"])
+        self.assertIn("feat", (await git.branch_list(include_remote=False))["content"])
+
+        self.assertTrue((await git.checkout("main"))["ok"])
+        self.assertTrue((await git.merge("feat", no_ff=True))["ok"])
+        self.assertTrue((await git.branch_delete("feat"))["ok"])
+
+        self.assertTrue((await git.tag_create("v1.0.0", message="release"))["ok"])
+        self.assertIn("v1.0.0", (await git.tag_list())["content"])
+
+    async def test_path_traversal_rejected(self) -> None:
+        git = await self._init_configured_repo()
+        with self.assertRaises(ValueError):
+            await git.diff(rel_path="../outside.txt")
+        with self.assertRaises(ValueError):
+            await git.stage(paths=["/etc/passwd"])
+
+
+class TestGitDaemonIntegration(unittest.IsolatedAsyncioTestCase):
+    async def test_mcp_host_and_execute_git_tool_confirmation(self) -> None:
+        from bytey_ai_companion.main import ByteyDaemon
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ws"
+            cfg_dir = Path(tmp) / "cfg"
+            data_dir = Path(tmp) / "data"
+            root.mkdir()
+
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=cfg_dir,
+                data_dir=data_dir,
+                enable_voice_capture=False,
+                llm_router=_MockLLMRouter(),
+            )
+            daemon.config_manager.update_config(
+                {
+                    "workspace": {
+                        "active_path": str(root),
+                        "require_write_approval": True,
+                    }
+                }
+            )
+            await daemon.start()
+            try:
+                base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+                async with httpx.AsyncClient(base_url=base_url) as client:
+                    resp = await client.get("/api/v1/mcp/host")
+                    self.assertEqual(resp.status_code, 200)
+                    names = {t["name"] for t in resp.json()["tools"]}
+                    for expected in ("bytey_git__status", "bytey_git__commit", "bytey_git__push"):
+                        self.assertIn(expected, names)
+
+                cfg = daemon.config_manager.config
+
+                async def deny_cb(*_args: Any, **_kwargs: Any) -> bool:
+                    return False
+
+                async def allow_cb(*_args: Any, **_kwargs: Any) -> bool:
+                    return True
+
+                # Init + stage + commit with confirmation
+                init_res = await daemon._execute_git_tool("init", {"default_branch": "main"}, cfg, allow_cb)
+                self.assertTrue(init_res["ok"], init_res)
+                for key, val in (("user.name", "Bytey"), ("user.email", "bytey@example.com")):
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "-C", str(root), "config", key, val
+                    )
+                    await proc.wait()
+
+                (root / "readme.md").write_text("hello\n", encoding="utf-8")
+                st_res = await daemon._execute_git_tool("status", {}, cfg, deny_cb)
+                self.assertTrue(st_res["ok"])
+                self.assertIn("readme.md", st_res["content"])
+
+                denied_stage = await daemon._execute_git_tool("stage", {"all": True}, cfg, deny_cb)
+                self.assertFalse(denied_stage["ok"])
+                self.assertTrue(denied_stage.get("denied"))
+
+                ok_stage = await daemon._execute_git_tool("stage", {"all": True}, cfg, allow_cb)
+                self.assertTrue(ok_stage["ok"], ok_stage)
+                ok_commit = await daemon._execute_git_tool("commit", {"message": "init"}, cfg, allow_cb)
+                self.assertTrue(ok_commit["ok"], ok_commit)
+            finally:
+                await daemon.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

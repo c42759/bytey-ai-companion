@@ -48,6 +48,11 @@ from .tts import (
     StreamingTTSPlayer,
 )
 from .storage import StorageManager, resolve_db_path
+from .workspace.git_tools import (
+    ALWAYS_CONFIRM_GIT_TOOLS,
+    READ_ONLY_GIT_TOOLS,
+    GitToolchain,
+)
 from .workspace.tools import WorkspaceToolchain, detect_git_branch, load_workspace_rules
 
 logger = logging.getLogger(__name__)
@@ -1193,6 +1198,392 @@ class ByteyDaemon:
                 }
         except (ValueError, FileNotFoundError, NotADirectoryError, PermissionError, OSError) as exc:
             return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _build_git_tools() -> list[dict[str, Any]]:
+        """Build OpenAI-style built-in pseudo-tool schemas for workspace Git operations."""
+        specs: list[tuple[str, str, dict[str, Any], list[str]]] = [
+            (
+                "status",
+                "Show Git working tree status for the active workspace.",
+                {"short": {"type": "boolean", "description": "Use short status with branch (default true).", "default": True}},
+                [],
+            ),
+            (
+                "diff",
+                "Show Git diff for unstaged, staged, or ref-to-ref changes.",
+                {
+                    "staged": {"type": "boolean", "description": "Show staged diff (--staged).", "default": False},
+                    "ref": {"type": "string", "description": "Base git ref/commit."},
+                    "target_ref": {"type": "string", "description": "Optional target git ref/commit."},
+                    "rel_path": {"type": "string", "description": "Optional relative file/dir path."},
+                    "stat_only": {"type": "boolean", "description": "Show diffstat only (--stat).", "default": False},
+                },
+                [],
+            ),
+            (
+                "log",
+                "Show Git commit history for the active workspace.",
+                {
+                    "limit": {"type": "integer", "description": "Max commits to show (1-200, default 20).", "default": 20},
+                    "ref": {"type": "string", "description": "Branch, tag, or commit ref."},
+                    "rel_path": {"type": "string", "description": "Optional relative file/dir path."},
+                    "oneline": {"type": "boolean", "description": "Format one line per commit (default true).", "default": True},
+                    "author": {"type": "string", "description": "Filter commits by author."},
+                    "since": {"type": "string", "description": "Filter commits since date/time (e.g. '1 week ago')."},
+                },
+                [],
+            ),
+            (
+                "show",
+                "Inspect a Git commit, tag, or object.",
+                {
+                    "ref": {"type": "string", "description": "Git ref/commit (default HEAD).", "default": "HEAD"},
+                    "stat_only": {"type": "boolean", "description": "Show diffstat only (--stat).", "default": False},
+                    "rel_path": {"type": "string", "description": "Optional relative file path."},
+                },
+                [],
+            ),
+            (
+                "blame",
+                "Show line-by-line Git authorship for a workspace file.",
+                {
+                    "rel_path": {"type": "string", "description": "Relative path to file."},
+                    "start_line": {"type": "integer", "description": "1-based start line (default 1).", "default": 1},
+                    "end_line": {"type": "integer", "description": "1-based end line (default 200).", "default": 200},
+                },
+                ["rel_path"],
+            ),
+            (
+                "branch_list",
+                "List local and optionally remote Git branches.",
+                {"include_remote": {"type": "boolean", "description": "Include remote-tracking branches (default true).", "default": True}},
+                [],
+            ),
+            (
+                "tag_list",
+                "List Git tags in the repository.",
+                {"pattern": {"type": "string", "description": "Optional glob pattern to filter tags."}},
+                [],
+            ),
+            ("stash_list", "List Git stashes.", {}, []),
+            ("remote_list", "List configured Git remotes.", {}, []),
+            (
+                "init",
+                "Initialize a new Git repository in the active workspace.",
+                {"default_branch": {"type": "string", "description": "Optional initial branch name (e.g. main)."}},
+                [],
+            ),
+            (
+                "stage",
+                "Stage workspace files for commit (git add).",
+                {
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Relative paths to stage."},
+                    "all": {"type": "boolean", "description": "Stage all changes (git add -A).", "default": False},
+                },
+                [],
+            ),
+            (
+                "unstage",
+                "Unstage workspace files from the Git index.",
+                {"paths": {"type": "array", "items": {"type": "string"}, "description": "Relative paths to unstage (default all)."}},
+                [],
+            ),
+            (
+                "commit",
+                "Create a Git commit in the active workspace.",
+                {
+                    "message": {"type": "string", "description": "Commit message."},
+                    "amend": {"type": "boolean", "description": "Amend the previous commit.", "default": False},
+                    "all": {"type": "boolean", "description": "Automatically stage modified/deleted tracked files (-a).", "default": False},
+                },
+                [],
+            ),
+            (
+                "branch_create",
+                "Create a new Git branch and optionally check it out.",
+                {
+                    "name": {"type": "string", "description": "New branch name."},
+                    "start_point": {"type": "string", "description": "Optional base ref/commit."},
+                    "checkout": {"type": "boolean", "description": "Switch to the new branch (default true).", "default": True},
+                },
+                ["name"],
+            ),
+            (
+                "checkout",
+                "Switch to an existing Git branch or ref.",
+                {"ref": {"type": "string", "description": "Target branch, tag, or commit ref."}},
+                ["ref"],
+            ),
+            (
+                "branch_delete",
+                "Delete a local Git branch.",
+                {
+                    "name": {"type": "string", "description": "Branch name to delete."},
+                    "force": {"type": "boolean", "description": "Force delete (-D).", "default": False},
+                },
+                ["name"],
+            ),
+            (
+                "merge",
+                "Merge a branch into the current branch, or abort an in-progress merge.",
+                {
+                    "branch": {"type": "string", "description": "Branch to merge."},
+                    "no_ff": {"type": "boolean", "description": "Create a merge commit (--no-ff).", "default": False},
+                    "abort": {"type": "boolean", "description": "Abort current conflicted merge (--abort).", "default": False},
+                },
+                [],
+            ),
+            (
+                "rebase",
+                "Rebase current branch onto another ref, or continue/abort rebase.",
+                {
+                    "onto": {"type": "string", "description": "Upstream branch/ref."},
+                    "abort": {"type": "boolean", "description": "Abort in-progress rebase (--abort).", "default": False},
+                    "continue": {"type": "boolean", "description": "Continue rebase (--continue).", "default": False},
+                },
+                [],
+            ),
+            (
+                "cherry_pick",
+                "Apply a commit onto the current branch, or continue/abort cherry-pick.",
+                {
+                    "commit": {"type": "string", "description": "Commit hash/ref to cherry-pick."},
+                    "abort": {"type": "boolean", "description": "Abort in-progress cherry-pick (--abort).", "default": False},
+                    "continue": {"type": "boolean", "description": "Continue cherry-pick (--continue).", "default": False},
+                },
+                [],
+            ),
+            (
+                "stash",
+                "Save, pop, apply, or drop a Git stash.",
+                {
+                    "action": {"type": "string", "enum": ["push", "pop", "apply", "drop"], "description": "Stash action (default push).", "default": "push"},
+                    "message": {"type": "string", "description": "Optional stash message (for push)."},
+                    "ref": {"type": "string", "description": "Optional stash ref like stash@{0}."},
+                    "include_untracked": {"type": "boolean", "description": "Include untracked files (-u, for push).", "default": False},
+                },
+                [],
+            ),
+            (
+                "tag_create",
+                "Create a lightweight or annotated Git tag.",
+                {
+                    "name": {"type": "string", "description": "Tag name."},
+                    "message": {"type": "string", "description": "Optional annotation message."},
+                    "ref": {"type": "string", "description": "Optional target commit ref."},
+                },
+                ["name"],
+            ),
+            (
+                "restore",
+                "Discard working tree changes for specified paths (git restore).",
+                {
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Relative paths to restore."},
+                    "source": {"type": "string", "description": "Optional source ref (--source)."},
+                },
+                ["paths"],
+            ),
+            (
+                "reset",
+                "Reset current HEAD to a specified state (soft, mixed, or hard).",
+                {
+                    "ref": {"type": "string", "description": "Target ref (default HEAD).", "default": "HEAD"},
+                    "mode": {"type": "string", "enum": ["soft", "mixed", "hard"], "description": "Reset mode (default mixed).", "default": "mixed"},
+                },
+                [],
+            ),
+            (
+                "fetch",
+                "Fetch objects and refs from a remote repository.",
+                {
+                    "remote": {"type": "string", "description": "Remote name (default origin).", "default": "origin"},
+                    "prune": {"type": "boolean", "description": "Prune deleted remote-tracking branches (--prune).", "default": False},
+                    "all": {"type": "boolean", "description": "Fetch all remotes (--all).", "default": False},
+                },
+                [],
+            ),
+            (
+                "pull",
+                "Fetch from and integrate with another repository or local branch.",
+                {
+                    "remote": {"type": "string", "description": "Remote name."},
+                    "branch": {"type": "string", "description": "Remote branch name."},
+                    "rebase": {"type": "boolean", "description": "Rebase instead of merge (--rebase).", "default": False},
+                },
+                [],
+            ),
+            (
+                "push",
+                "Update remote refs along with associated objects.",
+                {
+                    "remote": {"type": "string", "description": "Remote name (default origin).", "default": "origin"},
+                    "branch": {"type": "string", "description": "Branch name to push."},
+                    "set_upstream": {"type": "boolean", "description": "Set upstream tracking (-u).", "default": False},
+                    "force_with_lease": {"type": "boolean", "description": "Use --force-with-lease.", "default": False},
+                },
+                [],
+            ),
+        ]
+        tools: list[dict[str, Any]] = []
+        for name, desc, props, req in specs:
+            params: dict[str, Any] = {"type": "object", "properties": props}
+            if req:
+                params["required"] = req
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": f"bytey_git__{name}",
+                        "description": desc,
+                        "parameters": params,
+                    },
+                    "server": "bytey_git",
+                    "tool": name,
+                }
+            )
+        return tools
+
+    async def _execute_git_tool(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        cfg: Any,
+        confirm_cb: Any,
+    ) -> dict[str, Any]:
+        """Execute a bytey_git__* tool call with confirmation gating."""
+        active_ws = (cfg.workspace.active_path or "").strip()
+        if not active_ws:
+            return {"ok": False, "error": "No active workspace is configured."}
+        try:
+            git = GitToolchain(active_ws)
+            needs_confirm = (
+                tool_name in ALWAYS_CONFIRM_GIT_TOOLS
+                or (tool_name not in READ_ONLY_GIT_TOOLS and bool(cfg.workspace.require_write_approval))
+            )
+            if needs_confirm:
+                approved = await confirm_cb(
+                    "bytey_git",
+                    tool_name,
+                    args,
+                    {"command": f"git {tool_name}", "rel_path": "."},
+                )
+                if not approved:
+                    return {
+                        "ok": False,
+                        "denied": True,
+                        "error": "User rejected the proposed Git operation.",
+                    }
+
+            handlers = {
+                "status": lambda: git.status(short=bool(args.get("short", True))),
+                "diff": lambda: git.diff(
+                    staged=bool(args.get("staged", False)),
+                    ref=str(args.get("ref") or ""),
+                    target_ref=str(args.get("target_ref") or ""),
+                    rel_path=str(args.get("rel_path") or ""),
+                    stat_only=bool(args.get("stat_only", False)),
+                ),
+                "log": lambda: git.log(
+                    limit=int(args.get("limit", 20)),
+                    ref=str(args.get("ref") or ""),
+                    rel_path=str(args.get("rel_path") or ""),
+                    oneline=bool(args.get("oneline", True)),
+                    author=str(args.get("author") or ""),
+                    since=str(args.get("since") or ""),
+                ),
+                "show": lambda: git.show(
+                    ref=str(args.get("ref") or "HEAD"),
+                    stat_only=bool(args.get("stat_only", False)),
+                    rel_path=str(args.get("rel_path") or ""),
+                ),
+                "blame": lambda: git.blame(
+                    rel_path=str(args.get("rel_path") or ""),
+                    start_line=int(args.get("start_line", 1)),
+                    end_line=int(args.get("end_line", 200)),
+                ),
+                "branch_list": lambda: git.branch_list(include_remote=bool(args.get("include_remote", True))),
+                "tag_list": lambda: git.tag_list(pattern=str(args.get("pattern") or "")),
+                "stash_list": lambda: git.stash_list(),
+                "remote_list": lambda: git.remote_list(),
+                "init": lambda: git.init(default_branch=str(args.get("default_branch") or "")),
+                "stage": lambda: git.stage(
+                    paths=list(args.get("paths") or []),
+                    all_files=bool(args.get("all", False)),
+                ),
+                "unstage": lambda: git.unstage(paths=list(args.get("paths") or [])),
+                "commit": lambda: git.commit(
+                    message=str(args.get("message") or ""),
+                    amend=bool(args.get("amend", False)),
+                    all_tracked=bool(args.get("all", False)),
+                ),
+                "branch_create": lambda: git.branch_create(
+                    name=str(args.get("name") or ""),
+                    start_point=str(args.get("start_point") or ""),
+                    checkout=bool(args.get("checkout", True)),
+                ),
+                "checkout": lambda: git.checkout(ref=str(args.get("ref") or "")),
+                "branch_delete": lambda: git.branch_delete(
+                    name=str(args.get("name") or ""),
+                    force=bool(args.get("force", False)),
+                ),
+                "merge": lambda: git.merge(
+                    branch=str(args.get("branch") or ""),
+                    no_ff=bool(args.get("no_ff", False)),
+                    abort=bool(args.get("abort", False)),
+                ),
+                "rebase": lambda: git.rebase(
+                    onto=str(args.get("onto") or ""),
+                    abort=bool(args.get("abort", False)),
+                    continue_rebase=bool(args.get("continue", False)),
+                ),
+                "cherry_pick": lambda: git.cherry_pick(
+                    commit=str(args.get("commit") or ""),
+                    abort=bool(args.get("abort", False)),
+                    continue_cp=bool(args.get("continue", False)),
+                ),
+                "stash": lambda: git.stash(
+                    action=str(args.get("action") or "push"),
+                    message=str(args.get("message") or ""),
+                    ref=str(args.get("ref") or ""),
+                    include_untracked=bool(args.get("include_untracked", False)),
+                ),
+                "tag_create": lambda: git.tag_create(
+                    name=str(args.get("name") or ""),
+                    message=str(args.get("message") or ""),
+                    ref=str(args.get("ref") or ""),
+                ),
+                "restore": lambda: git.restore(
+                    paths=list(args.get("paths") or []),
+                    source=str(args.get("source") or ""),
+                ),
+                "reset": lambda: git.reset(
+                    ref=str(args.get("ref") or "HEAD"),
+                    mode=str(args.get("mode") or "mixed"),
+                ),
+                "fetch": lambda: git.fetch(
+                    remote=str(args.get("remote") or "origin"),
+                    prune=bool(args.get("prune", False)),
+                    all_remotes=bool(args.get("all", False)),
+                ),
+                "pull": lambda: git.pull(
+                    remote=str(args.get("remote") or ""),
+                    branch=str(args.get("branch") or ""),
+                    rebase=bool(args.get("rebase", False)),
+                ),
+                "push": lambda: git.push(
+                    remote=str(args.get("remote") or "origin"),
+                    branch=str(args.get("branch") or ""),
+                    set_upstream=bool(args.get("set_upstream", False)),
+                    force_with_lease=bool(args.get("force_with_lease", False)),
+                ),
+            }
+            handler = handlers.get(tool_name)
+            if handler is None:
+                return {"ok": False, "error": f"Unknown Git tool: {tool_name}"}
+            return await handler()
+        except (ValueError, FileNotFoundError, NotADirectoryError, PermissionError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
         return {"ok": False, "error": f"Unknown workspace tool: {tool_name!r}"}
 
     def _track_task(self, coro: Any) -> asyncio.Task[Any]:
@@ -1917,6 +2308,7 @@ class ByteyDaemon:
                         if (t.get("function") or {}).get("name") not in _write_ws_tools
                     ]
                 tools.extend(ws_tools)
+                tools.extend(self._build_git_tools())
             if supports_tools and god_mode:
                 if not self.agent_registry.list_agents():
                     await self.agent_registry.detect_all(cfg.agents)
@@ -2129,6 +2521,7 @@ class ByteyDaemon:
                         call_id = str(uuid.uuid4())
                         is_skill_tool = ns_name.startswith("bytey_skill__")
                         is_workspace_tool = ns_name.startswith("bytey_workspace__")
+                        is_git_tool = ns_name.startswith("bytey_git__")
                         is_agent_tool = ns_name.startswith("bytey_agent__")
                         if is_skill_tool:
                             srv_name = "bytey_skill"
@@ -2136,6 +2529,9 @@ class ByteyDaemon:
                         elif is_workspace_tool:
                             srv_name = "bytey_workspace"
                             tool_name = ns_name[len("bytey_workspace__") :]
+                        elif is_git_tool:
+                            srv_name = "bytey_git"
+                            tool_name = ns_name[len("bytey_git__") :]
                         elif is_agent_tool:
                             srv_name = "bytey_agent"
                             tool_name = ns_name[len("bytey_agent__") :]
@@ -2200,6 +2596,13 @@ class ByteyDaemon:
                             )
                         elif is_workspace_tool:
                             tool_res = await self._execute_workspace_tool(
+                                tool_name,
+                                args,
+                                cfg,
+                                confirm_cb,
+                            )
+                        elif is_git_tool:
+                            tool_res = await self._execute_git_tool(
                                 tool_name,
                                 args,
                                 cfg,
@@ -2687,6 +3090,7 @@ class ByteyDaemon:
         cfg = self.config_manager.config
         raw_tools: list[dict[str, Any]] = []
         raw_tools.extend(self._build_workspace_tools())
+        raw_tools.extend(self._build_git_tools())
         if cfg.skills.enabled:
             raw_tools.extend(self._build_skill_tools(cfg))
         if cfg.agents.god_mode_enabled:
@@ -2701,7 +3105,7 @@ class ByteyDaemon:
         return {
             "ok": True,
             "title": "Bytey MCP Host",
-            "description": "Built-in MCP host providing native Workspace and Skills tools for Bytey.",
+            "description": "Built-in MCP host providing native Workspace, Git, and Skills tools for Bytey.",
             "tools": tools,
         }
 
