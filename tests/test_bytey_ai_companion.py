@@ -5912,6 +5912,39 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
 
+    async def test_sync_config_reresolves_when_custom_path_cleared_or_command_changed(self) -> None:
+        from bytey_ai_companion.agents import AgentRegistry
+        from bytey_ai_companion.config import AgentsConfig, CustomCLIAgentConfig, ExternalAgentOverride
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_a = root / "tool_a"
+            bin_b = root / "tool_b"
+            for p in (bin_a, bin_b):
+                p.write_text("#!/bin/sh\necho 'tool 1.0'\n", encoding="utf-8")
+                p.chmod(0o755)
+
+            reg = AgentRegistry()
+            cfg = AgentsConfig(
+                overrides={"claude": ExternalAgentOverride(custom_path=str(bin_a))},
+                custom_agents=[
+                    CustomCLIAgentConfig(id="mycli", display_name="My CLI", command=str(bin_a))
+                ],
+            )
+            detected = {a.id: a for a in await reg.detect_all(cfg)}
+            self.assertEqual(detected["claude"].resolved_path, str(bin_a))
+            self.assertEqual(detected["mycli"].resolved_path, str(bin_a))
+
+            # Clearing custom_path re-resolves back to default binary (not stuck on bin_a)
+            cfg.overrides["claude"] = ExternalAgentOverride(custom_path="")
+            # Changing custom agent command re-resolves to bin_b
+            cfg.custom_agents[0] = CustomCLIAgentConfig(
+                id="mycli", display_name="My CLI", command=str(bin_b)
+            )
+            synced = {a.id: a for a in reg.sync_config(cfg)}
+            self.assertNotEqual(synced["claude"].resolved_path, str(bin_a))
+            self.assertEqual(synced["mycli"].resolved_path, str(bin_b))
+
     async def test_daemon_god_mode_routes_slash_command_and_run_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

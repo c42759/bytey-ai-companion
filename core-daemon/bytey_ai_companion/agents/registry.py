@@ -290,17 +290,20 @@ class AgentRegistry:
             self._specs[spec.id] = spec
             prev = self._detected.get(spec.id)
             ov = cfg.overrides.get(spec.id, ExternalAgentOverride())
-            resolved = prev.resolved_path if prev else _resolve_binary(spec.binary, ov.custom_path)
-            if ov.custom_path.strip() and (not prev or ov.custom_path.strip() != prev.custom_path):
-                resolved = _resolve_binary(spec.binary, ov.custom_path)
+            new_custom_path = ov.custom_path.strip()
+            if not prev or new_custom_path != prev.custom_path or spec.binary != prev.binary:
+                resolved = _resolve_binary(spec.binary, new_custom_path)
+            else:
+                resolved = prev.resolved_path
             installed = bool(resolved)
+            version = prev.version if prev and installed and resolved == prev.resolved_path else ""
             updated[spec.id] = AgentInfo(
                 id=spec.id,
                 display_name=spec.display_name,
                 binary=spec.binary,
                 installed=installed,
                 resolved_path=resolved,
-                version=prev.version if prev and installed else "",
+                version=version,
                 enabled=bool(ov.enabled) if installed else False,
                 model=ov.model.strip(),
                 model_flag=spec.model_flag,
