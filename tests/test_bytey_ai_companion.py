@@ -6396,6 +6396,17 @@ class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
             await git.push(remote="--receive-pack=evil")
         self.assertFalse(victim.exists())
 
+    async def test_blame_short_file_clamps_default_end_line(self) -> None:
+        git = await self._init_configured_repo()
+        short_file = self.root / "short.py"
+        short_file.write_text("line1\nline2\nline3\n", encoding="utf-8")
+        self.assertTrue((await git.stage(paths=["short.py"]))["ok"])
+        self.assertTrue((await git.commit("add short"))["ok"])
+
+        blame_res = await git.blame("short.py")
+        self.assertTrue(blame_res["ok"], blame_res)
+        self.assertIn("line3", blame_res["content"])
+
 
 class TestGitDaemonIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_mcp_host_and_execute_git_tool_confirmation(self) -> None:

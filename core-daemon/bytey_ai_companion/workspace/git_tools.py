@@ -255,11 +255,23 @@ class GitToolchain:
         return self.format_result(await self._run_git(args))
 
     async def blame(
-        self, rel_path: str, start_line: int = 1, end_line: int = 200
+        self, rel_path: str, start_line: int = 1, end_line: int | None = 200
     ) -> dict[str, Any]:
         safe_path = self._resolve_rel_path(rel_path)
         s = max(1, int(start_line))
-        e = max(s, int(end_line))
+        target_file = self.root / safe_path
+        if target_file.is_file():
+            try:
+                with target_file.open("rb") as fh:
+                    total_lines = sum(1 for _ in fh)
+            except OSError:
+                total_lines = 0
+            if total_lines == 0:
+                return {"ok": True, "content": "(empty file)"}
+            s = min(s, total_lines)
+            e = total_lines if end_line is None else max(s, min(int(end_line), total_lines))
+        else:
+            e = max(s, int(end_line if end_line is not None else s))
         args = ["blame", f"-L{s},{e}", "--", safe_path]
         return self.format_result(await self._run_git(args))
 
