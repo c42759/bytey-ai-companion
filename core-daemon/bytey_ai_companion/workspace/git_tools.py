@@ -254,6 +254,16 @@ class GitToolchain:
             args.extend(["--", self._resolve_rel_path(rel_path)])
         return self.format_result(await self._run_git(args))
 
+    @staticmethod
+    def _count_lines_up_to(target_file: Path, limit: int | None) -> int:
+        count = 0
+        with target_file.open("rb") as fh:
+            for _ in fh:
+                count += 1
+                if limit is not None and count >= limit:
+                    break
+        return count
+
     async def blame(
         self, rel_path: str, start_line: int = 1, end_line: int | None = 200
     ) -> dict[str, Any]:
@@ -261,9 +271,9 @@ class GitToolchain:
         s = max(1, int(start_line))
         target_file = self.root / safe_path
         if target_file.is_file():
+            limit = max(s, int(end_line)) if end_line is not None else None
             try:
-                with target_file.open("rb") as fh:
-                    total_lines = sum(1 for _ in fh)
+                total_lines = await asyncio.to_thread(self._count_lines_up_to, target_file, limit)
             except OSError:
                 total_lines = 0
             if total_lines == 0:
