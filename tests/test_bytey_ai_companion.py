@@ -5870,6 +5870,7 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(res_silent.timed_out)
 
     async def test_runner_bounds_output_during_read_and_streams_tail(self) -> None:
+        import tracemalloc
         from bytey_ai_companion.agents import AgentRunner
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -5877,10 +5878,10 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             noisy_cli = root / "noisy_cli.py"
             noisy_cli.write_text(
                 "import sys, time\n"
-                "for i in range(20):\n"
-                "    print(f'line_{i:02d}_' + ('x' * 200), flush=True)\n"
-                "    time.sleep(0.04)\n"
-                "print('FINAL_TAIL_MARKER', flush=True)\n",
+                "for i in range(1000):\n"
+                "    print(f'line_{i:04d}_' + ('x' * 4000), flush=True)\n"
+                "time.sleep(0.7)\n"
+                "print('POST_LIMIT_TAIL_MARKER', flush=True)\n",
                 encoding="utf-8",
             )
             tails: list[str] = []
@@ -5889,18 +5890,26 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
                 tails.append(tail)
 
             runner = AgentRunner()
-            res = await runner.run(
-                "claude",
-                [sys.executable, str(noisy_cli)],
-                root,
-                timeout_seconds=5,
-                max_output_chars=120,
-                on_output_tail=_on_tail,
-            )
+            tracemalloc.start()
+            try:
+                res = await runner.run(
+                    "claude",
+                    [sys.executable, str(noisy_cli)],
+                    root,
+                    timeout_seconds=5,
+                    max_output_chars=120,
+                    on_output_tail=_on_tail,
+                )
+                _cur, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+
             self.assertEqual(res.exit_code, 0)
             self.assertIn("... [stdout truncated]", res.stdout)
             self.assertLessEqual(len(res.stdout), 160)
-            self.assertTrue(any("line_" in t for t in tails))
+            # Peak traced memory stays well below the ~4MB emitted stdout
+            self.assertLess(peak, 2 * 1024 * 1024)
+            self.assertTrue(any("POST_LIMIT_TAIL_MARKER" in t for t in tails))
 
     async def test_runner_task_cancellation_terminates_process_group(self) -> None:
         from bytey_ai_companion.agents import AgentRunner
