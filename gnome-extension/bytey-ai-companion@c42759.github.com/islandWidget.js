@@ -291,6 +291,7 @@ export class IslandWidget {
 
         this._state = 'IDLE';
         this._emotion = 'neutral';
+        this._godMode = false;
         this._labelText = '';
         this._visualsConfig = {
             animation_mode: 'full',
@@ -674,10 +675,23 @@ export class IslandWidget {
             this._island.set_style(`background-color: ${_rgbaCss(this._bgColor)};`);
     }
 
+    setGodMode(enabled) {
+        const next = Boolean(enabled);
+        if (this._godMode === next)
+            return;
+        this._godMode = next;
+        this._syncRainbowTimer();
+        this._borderCanvas?.queue_repaint();
+    }
+
+    _shouldRunRainbow() {
+        if (this._destroyed || (this._visualsConfig.animation_mode ?? 'full') !== 'full')
+            return false;
+        return this._state === 'THINKING' || (this._godMode && this._state === 'IDLE');
+    }
+
     _syncRainbowTimer() {
-        const shouldRun = !this._destroyed &&
-            this._state === 'THINKING' &&
-            (this._visualsConfig.animation_mode ?? 'full') === 'full';
+        const shouldRun = this._shouldRunRainbow();
 
         if (!shouldRun) {
             this._stopRainbowTimer();
@@ -689,9 +703,7 @@ export class IslandWidget {
 
         this._rainbowLastUs = GLib.get_monotonic_time();
         this._rainbowTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
-            if (this._destroyed ||
-                this._state !== 'THINKING' ||
-                (this._visualsConfig.animation_mode ?? 'full') !== 'full') {
+            if (!this._shouldRunRainbow()) {
                 this._rainbowTimerId = 0;
                 return GLib.SOURCE_REMOVE;
             }
@@ -712,7 +724,20 @@ export class IslandWidget {
         }
     }
 
-    _strokeRainbowCapsule(cr, width, height, inset, lineWidth, sat, light, alpha) {
+    _rainbowSegmentRgb(t, sat, light, palette = 'full') {
+        const phasePos = (t - this._rainbowPhase + 1) % 1.0;
+        if (palette === 'yellow') {
+            const blend = 0.5 - 0.5 * Math.cos(2 * Math.PI * phasePos);
+            // Interpolate between yellow (#FACC15) and light yellow (#FEF08A)
+            const r = (250 + (254 - 250) * blend) / 255;
+            const g = (204 + (240 - 204) * blend) / 255;
+            const b = (21 + (138 - 21) * blend) / 255;
+            return [r, g, b];
+        }
+        return _hslToRgb(phasePos, sat, light);
+    }
+
+    _strokeRainbowCapsule(cr, width, height, inset, lineWidth, sat, light, alpha, palette = 'full') {
         const w = width - 2 * inset;
         const h = height - 2 * inset;
         if (w <= 0 || h <= 0)
@@ -735,8 +760,7 @@ export class IslandWidget {
             const s1 = ((i + 1.18) / N) * L;
             const [x1, y1] = _capsulePoint(s0, inset, inset, w, h, rc);
             const [x2, y2] = _capsulePoint(s1, inset, inset, w, h, rc);
-            const hue = ((i / N) - this._rainbowPhase + 1) % 1.0;
-            const [crR, crG, crB] = _hslToRgb(hue, sat, light);
+            const [crR, crG, crB] = this._rainbowSegmentRgb(i / N, sat, light, palette);
             cr.setSourceRGBA(crR, crG, crB, alpha);
             cr.newSubPath();
             cr.moveTo(x1, y1);
@@ -804,7 +828,7 @@ export class IslandWidget {
         cr.restore();
     }
 
-    _strokeRainbowNotch(cr, width, height, inset, lineWidth, sat, light, alpha) {
+    _strokeRainbowNotch(cr, width, height, inset, lineWidth, sat, light, alpha, palette = 'full') {
         const {totalLength} = _notchBorderMetrics(width, height, inset);
         if (totalLength <= 0)
             return;
@@ -818,8 +842,7 @@ export class IslandWidget {
             const s1 = Math.min(totalLength, ((i + 1.18) / N) * totalLength);
             const [x1, y1] = _notchBorderPoint(s0, width, height, inset);
             const [x2, y2] = _notchBorderPoint(s1, width, height, inset);
-            const hue = ((i / N) - this._rainbowPhase + 1) % 1.0;
-            const [crR, crG, crB] = _hslToRgb(hue, sat, light);
+            const [crR, crG, crB] = this._rainbowSegmentRgb(i / N, sat, light, palette);
             cr.setSourceRGBA(crR, crG, crB, alpha);
             cr.newSubPath();
             cr.moveTo(x1, y1);
@@ -844,11 +867,21 @@ export class IslandWidget {
             const isNotch = this._isNotchMode();
             if (this._state === 'THINKING' && mode !== 'disabled') {
                 if (isNotch) {
-                    this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24);
-                    this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96);
+                    this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'full');
+                    this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'full');
                 } else {
-                    this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24);
-                    this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96);
+                    this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'full');
+                    this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'full');
+                }
+                return;
+            }
+            if (this._godMode && this._state === 'IDLE' && mode !== 'disabled') {
+                if (isNotch) {
+                    this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'yellow');
+                    this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'yellow');
+                } else {
+                    this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'yellow');
+                    this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'yellow');
                 }
                 return;
             }

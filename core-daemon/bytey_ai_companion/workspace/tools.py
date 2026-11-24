@@ -382,22 +382,74 @@ class WorkspaceToolchain:
         _atomic_write_text(path, updated)
         return {"ok": True, "diff": preview["diff"], "rel_path": rel_path}
 
-    def preview_write(self, rel_path: str, content: str) -> dict[str, Any]:
+    def preview_write(
+        self, rel_path: str, content: str, *, overwrite: bool = False
+    ) -> dict[str, Any]:
         """Compute unified diff for writing content to rel_path without modifying disk."""
         path = self._resolve_in_workspace(rel_path)
         is_new = not path.exists()
+        if not is_new and not overwrite:
+            return {
+                "ok": False,
+                "error": (
+                    f"File already exists: {rel_path}. Use bytey_workspace__propose_edit "
+                    "for partial edits, bytey_workspace__append_file to append, or pass "
+                    "overwrite=true for a full rewrite."
+                ),
+                "diff": "",
+                "rel_path": rel_path,
+                "is_new": False,
+            }
         original = "" if is_new else path.read_text(encoding="utf-8")
         diff = _unified_diff(original, content, rel_path)
         return {"ok": True, "diff": diff, "rel_path": rel_path, "is_new": is_new}
 
-    def apply_write(self, rel_path: str, content: str) -> dict[str, Any]:
+    def apply_write(
+        self, rel_path: str, content: str, *, overwrite: bool = False
+    ) -> dict[str, Any]:
         """Create parent directories if needed and atomically write content to rel_path."""
+        preview = self.preview_write(rel_path, content, overwrite=overwrite)
+        if not preview["ok"]:
+            return preview
+        path = self._resolve_in_workspace(rel_path)
+        _atomic_write_text(path, content)
+        return {
+            "ok": True,
+            "diff": preview["diff"],
+            "rel_path": rel_path,
+            "is_new": preview["is_new"],
+        }
+
+    def _build_appended_content(self, original: str, content: str) -> str:
+        """Join appended content onto original text with a clean newline boundary."""
+        if not original:
+            return content
+        if original.endswith("\n") or content.startswith("\n"):
+            return original + content
+        return original + "\n" + content
+
+    def preview_append(self, rel_path: str, content: str) -> dict[str, Any]:
+        """Compute unified diff for appending content to rel_path without modifying disk."""
         path = self._resolve_in_workspace(rel_path)
         is_new = not path.exists()
         original = "" if is_new else path.read_text(encoding="utf-8")
-        _atomic_write_text(path, content)
-        diff = _unified_diff(original, content, rel_path)
+        updated = self._build_appended_content(original, content)
+        diff = _unified_diff(original, updated, rel_path)
         return {"ok": True, "diff": diff, "rel_path": rel_path, "is_new": is_new}
+
+    def apply_append(self, rel_path: str, content: str) -> dict[str, Any]:
+        """Append content to rel_path (creating if needed) and return unified diff."""
+        preview = self.preview_append(rel_path, content)
+        path = self._resolve_in_workspace(rel_path)
+        original = "" if preview["is_new"] else path.read_text(encoding="utf-8")
+        updated = self._build_appended_content(original, content)
+        _atomic_write_text(path, updated)
+        return {
+            "ok": True,
+            "diff": preview["diff"],
+            "rel_path": rel_path,
+            "is_new": preview["is_new"],
+        }
 
     def preview_delete(self, rel_path: str) -> dict[str, Any]:
         """Validate target file and compute unified deletion diff without modifying disk."""

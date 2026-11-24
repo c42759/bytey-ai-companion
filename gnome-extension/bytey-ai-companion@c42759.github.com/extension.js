@@ -102,6 +102,13 @@ export default class ByteyExtension extends Extension {
                     },
                 }).catch(() => {});
             },
+            onGodModeChange: enabled => {
+                this._patchConfig({
+                    agents: {
+                        god_mode_enabled: Boolean(enabled),
+                    },
+                }).catch(() => {});
+            },
             onOpenChanged: isOpen => {
                 if (isOpen && !this._drawer?.hasPendingConfirmation() && !this._isDaemonBusy())
                     this._refreshActiveSession().catch(() => {});
@@ -306,9 +313,11 @@ export default class ByteyExtension extends Extension {
             voice_out: {...(this._config?.voice_out ?? {}), ...(config.voice_out ?? {})},
             visuals: {...(this._config?.visuals ?? {}), ...(config.visuals ?? {})},
             workspace: {...(this._config?.workspace ?? {}), ...(config.workspace ?? {})},
+            agents: {...(this._config?.agents ?? {}), ...(config.agents ?? {})},
         };
 
         this._islandWidget?.applyVisualsConfig(this._config.visuals);
+        this._islandWidget?.setGodMode(Boolean(this._config.agents?.god_mode_enabled));
         this._contextMenu?.syncFromConfig(this._config);
         this._drawer?.setConfig(this._config);
         this._syncDrawerPosition();

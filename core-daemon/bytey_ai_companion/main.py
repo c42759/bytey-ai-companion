@@ -18,10 +18,12 @@ from pathlib import Path
 from collections import deque
 from datetime import datetime
 
+from .agents import AgentRegistry, AgentRunner
 from .audio import VoiceInputService
 from .config import (
     PIPER_VOICE_PRESETS,
     ConfigManager,
+    ExternalAgentOverride,
     MCPServerConfig,
     SecretStore,
     SkillOverrideConfig,
@@ -46,6 +48,11 @@ from .tts import (
     StreamingTTSPlayer,
 )
 from .storage import StorageManager, resolve_db_path
+from .workspace.git_tools import (
+    ALWAYS_CONFIRM_GIT_TOOLS,
+    READ_ONLY_GIT_TOOLS,
+    GitToolchain,
+)
 from .workspace.tools import WorkspaceToolchain, detect_git_branch, load_workspace_rules
 
 logger = logging.getLogger(__name__)
@@ -68,6 +75,8 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "model": ("provider", "model"),
     "llm_context_size": ("provider", "context_size"),
     "context_size": ("provider", "context_size"),
+    "max_tool_rounds": ("provider", "max_tool_rounds"),
+    "llm_max_tool_rounds": ("provider", "max_tool_rounds"),
     "mic_muted": ("voice_in", "mic_muted"),
     "wake_sensitivity": ("voice_in", "wake_sensitivity"),
     "vad_silence_timeout_ms": ("voice_in", "silence_timeout_ms"),
@@ -166,6 +175,26 @@ def _auto_title_from_prompt(text: str, max_len: int = 48) -> str:
     return snippet.rstrip() + "..."
 
 
+def _compact_older_tool_messages(
+    messages: list[dict[str, Any]],
+    *,
+    keep_recent: int = 4,
+    max_chars: int = 800,
+) -> None:
+    """Truncate older `role='tool'` outputs in place so long multi-round loops fit context."""
+    tool_indices = [
+        idx for idx, msg in enumerate(messages) if isinstance(msg, dict) and msg.get("role") == "tool"
+    ]
+    if len(tool_indices) <= keep_recent:
+        return
+    for idx in tool_indices[:-keep_recent]:
+        content = str(messages[idx].get("content") or "")
+        if len(content) > max_chars:
+            messages[idx]["content"] = (
+                content[:max_chars].rstrip() + "\n...[older tool output compacted]"
+            )
+
+
 class ByteyDaemon:
     """Orchestrates IPC, storage, voice pipeline, LLM router, MCP host, and TTS."""
 
@@ -201,6 +230,9 @@ class ByteyDaemon:
         )
         self.skill_runner = SkillScriptRunner()
         self._rescan_skills()
+        self.agent_registry = AgentRegistry()
+        self.agent_runner = AgentRunner()
+        self._agent_sessions: dict[str, str] = {}
         self.kokoro_client = kokoro_client or KokoroTTSClient()
         self._owns_kokoro = kokoro_client is None
         self.elevenlabs_client = elevenlabs_client or ElevenLabsTTSClient()
@@ -249,6 +281,7 @@ class ByteyDaemon:
         self._detected_context_length: int | None = None
         self._pending_confirmations: dict[str, asyncio.Future[bool]] = {}
         self._chat_lock = asyncio.Lock()
+        self._prompt_cancel_event = asyncio.Event()
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._stop_event = asyncio.Event()
         self._started = False
@@ -548,6 +581,173 @@ class ByteyDaemon:
         return {"ok": False, "error": f"Unknown skill tool: {tool_name!r}"}
 
     @staticmethod
+    def _build_agent_tools() -> list[dict[str, Any]]:
+        """Build built-in pseudo-tool schema for delegating prompts to external AI CLIs."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_agent__run",
+                    "description": (
+                        "Run a prepared prompt non-interactively in an enabled external AI CLI agent "
+                        "(e.g. claude, copilot, agy, gemini, codex, opencode, aider) and return its output."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent": {
+                                "type": "string",
+                                "description": "Target CLI agent ID (e.g. 'claude', 'copilot').",
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "Complete self-contained prompt to execute non-interactively.",
+                            },
+                            "working_dir": {
+                                "type": "string",
+                                "description": "Optional working directory override; defaults to active workspace.",
+                            },
+                            "resume": {
+                                "type": "boolean",
+                                "description": "If true, resume previous CLI session when supported.",
+                            },
+                        },
+                        "required": ["agent", "prompt"],
+                    },
+                },
+            }
+        ]
+
+    async def _execute_agent_tool(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        cfg: Any,
+        confirm_cb: Any,
+        *,
+        call_id: str,
+        assistant_id: str,
+    ) -> dict[str, Any]:
+        """Execute bytey_agent__run with preflight validation, approval gate, and output capture."""
+        if tool_name != "run":
+            return {"ok": False, "error": f"Unknown agent tool: {tool_name!r}"}
+
+        agent_id = str(args.get("agent") or "").strip().lower()
+        prompt = str(args.get("prompt") or "").strip()
+        working_dir_arg = str(args.get("working_dir") or "").strip()
+        resume = bool(args.get("resume", False))
+
+        if not agent_id:
+            return {"ok": False, "error": "Missing required 'agent' argument."}
+        if not prompt:
+            return {"ok": False, "error": "Missing required 'prompt' argument."}
+
+        if not self.agent_registry.list_agents():
+            await self.agent_registry.detect_all(cfg.agents)
+        else:
+            self.agent_registry.sync_config(cfg.agents)
+
+        info = self.agent_registry.get_agent(agent_id)
+        if info is None:
+            return {"ok": False, "error": f"Unknown CLI agent: {agent_id!r}"}
+        if not info.installed:
+            return {"ok": False, "error": f"CLI agent '{agent_id}' is not installed on this machine."}
+        if not info.enabled:
+            return {"ok": False, "error": f"CLI agent '{agent_id}' is disabled in God Mode settings."}
+
+        cwd_str = working_dir_arg or (cfg.workspace.active_path or "").strip()
+        if not cwd_str:
+            return {
+                "ok": False,
+                "error": "No active workspace is set. Select a workspace folder or pass 'working_dir'.",
+            }
+        cwd = Path(cwd_str).expanduser().resolve()
+        if not cwd.is_dir():
+            return {"ok": False, "error": f"Working directory does not exist: {cwd_str!r}"}
+
+        resume_sid = self._agent_sessions.get(agent_id, "") if resume else ""
+        try:
+            argv = self.agent_registry.build_argv(
+                agent_id,
+                prompt,
+                cfg.agents,
+                resume_session_id=resume_sid,
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        auto_accept = (not cfg.workspace.require_write_approval) and (
+            not cfg.workspace.require_command_approval
+        )
+        if cfg.agents.require_run_approval and not auto_accept:
+            argv_preview = " ".join(
+                shlex.quote(a if a != prompt else "<prompt>") for a in argv
+            )
+            extra = {
+                "kind": "agent_run",
+                "agent": agent_id,
+                "model": info.model or "(default)",
+                "permission_mode": info.permission_mode,
+                "cwd": str(cwd),
+                "command": argv_preview,
+                "prompt": prompt,
+                "diff": (
+                    f"Agent: {info.display_name} ({agent_id})\n"
+                    f"Model: {info.model or 'CLI default'}\n"
+                    f"Permission Mode: {info.permission_mode}\n"
+                    f"CWD: {cwd}\n"
+                    f"Command: {argv_preview}\n\n"
+                    f"--- Prompt ---\n{prompt}"
+                ),
+            }
+            approved = await confirm_cb("bytey_agent", "run", args, extra)
+            if not approved:
+                return {"ok": False, "denied": True, "error": "User rejected external AI CLI execution."}
+
+        async def _on_tail(tail: str) -> None:
+            await self.ipc.connection_manager.broadcast(
+                {
+                    "type": "tool_call_status",
+                    "call_id": call_id,
+                    "message_id": assistant_id,
+                    "server": "bytey_agent",
+                    "tool": "run",
+                    "arguments": {"agent": agent_id},
+                    "status": "running",
+                    "summary": tail,
+                }
+            )
+
+        res = await self.agent_runner.run(
+            agent_id,
+            argv,
+            cwd,
+            timeout_seconds=cfg.agents.timeout_seconds,
+            max_output_chars=cfg.agents.max_output_chars,
+            on_output_tail=_on_tail,
+        )
+        if res.session_id:
+            self._agent_sessions[agent_id] = res.session_id
+
+        payload = {
+            "agent": res.agent,
+            "exit_code": res.exit_code,
+            "duration_ms": res.duration_ms,
+            "timed_out": res.timed_out,
+            "cancelled": res.cancelled,
+            "auth_hint": res.auth_hint,
+            "git_status": res.git_status,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+        }
+        ok = res.exit_code == 0 and not res.timed_out and not res.cancelled
+        return {
+            "ok": ok,
+            "content": json.dumps(payload, ensure_ascii=False),
+            "error": res.auth_hint or res.stderr or (f"exit_code={res.exit_code}" if not ok else ""),
+        }
+
+    @staticmethod
     def _build_workspace_tools() -> list[dict[str, Any]]:
         """Build OpenAI-style built-in pseudo-tool schemas for active workspace operations."""
         return [
@@ -654,7 +854,12 @@ class ByteyDaemon:
                 "type": "function",
                 "function": {
                     "name": "bytey_workspace__write_file",
-                    "description": "Create or overwrite a file inside the active workspace.",
+                    "description": (
+                        "Create a new file inside the active workspace, or completely replace an "
+                        "existing file when overwrite=true. Do NOT use for partial edits or "
+                        "appending to existing files—use bytey_workspace__propose_edit or "
+                        "bytey_workspace__append_file instead."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -666,12 +871,39 @@ class ByteyDaemon:
                                 "type": "string",
                                 "description": "Full file content to write.",
                             },
+                            "overwrite": {
+                                "type": "boolean",
+                                "description": "Set true only to completely replace an existing file. Default false.",
+                            },
                         },
                         "required": ["rel_path", "content"],
                     },
                 },
                 "server": "bytey_workspace",
                 "tool": "write_file",
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "bytey_workspace__append_file",
+                    "description": "Append content to the end of an existing workspace file (or create it if missing).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "rel_path": {
+                                "type": "string",
+                                "description": "Relative path to the file inside the workspace.",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content to append to the end of the file.",
+                            },
+                        },
+                        "required": ["rel_path", "content"],
+                    },
+                },
+                "server": "bytey_workspace",
+                "tool": "append_file",
             },
             {
                 "type": "function",
@@ -812,7 +1044,8 @@ class ByteyDaemon:
             if tool_name == "write_file":
                 rel_path = str(args.get("rel_path") or "")
                 content = str(args.get("content") or "")
-                preview = toolchain.preview_write(rel_path, content)
+                overwrite = bool(args.get("overwrite", False))
+                preview = toolchain.preview_write(rel_path, content, overwrite=overwrite)
                 if not preview.get("ok"):
                     return {
                         "ok": False,
@@ -831,13 +1064,42 @@ class ByteyDaemon:
                             "denied": True,
                             "error": "User rejected the proposed change/command.",
                         }
-                res = toolchain.apply_write(rel_path, content)
+                res = toolchain.apply_write(rel_path, content, overwrite=overwrite)
                 if not res.get("ok"):
                     return {
                         "ok": False,
                         "error": str(res.get("error") or "Write failed"),
                     }
                 return {"ok": True, "content": res.get("diff") or f"Wrote {rel_path}"}
+            if tool_name == "append_file":
+                rel_path = str(args.get("rel_path") or "")
+                content = str(args.get("content") or "")
+                preview = toolchain.preview_append(rel_path, content)
+                if not preview.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(preview.get("error") or "Append preview failed"),
+                    }
+                if cfg.workspace.require_write_approval:
+                    approved = await confirm_cb(
+                        "bytey_workspace",
+                        "append_file",
+                        args,
+                        {"diff": preview["diff"], "rel_path": preview["rel_path"]},
+                    )
+                    if not approved:
+                        return {
+                            "ok": False,
+                            "denied": True,
+                            "error": "User rejected the proposed change/command.",
+                        }
+                res = toolchain.apply_append(rel_path, content)
+                if not res.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": str(res.get("error") or "Append failed"),
+                    }
+                return {"ok": True, "content": res.get("diff") or f"Appended to {rel_path}"}
             if tool_name == "delete_file":
                 rel_path = str(args.get("rel_path") or "")
                 preview = toolchain.preview_delete(rel_path)
@@ -936,6 +1198,392 @@ class ByteyDaemon:
                 }
         except (ValueError, FileNotFoundError, NotADirectoryError, PermissionError, OSError) as exc:
             return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _build_git_tools() -> list[dict[str, Any]]:
+        """Build OpenAI-style built-in pseudo-tool schemas for workspace Git operations."""
+        specs: list[tuple[str, str, dict[str, Any], list[str]]] = [
+            (
+                "status",
+                "Show Git working tree status for the active workspace.",
+                {"short": {"type": "boolean", "description": "Use short status with branch (default true).", "default": True}},
+                [],
+            ),
+            (
+                "diff",
+                "Show Git diff for unstaged, staged, or ref-to-ref changes.",
+                {
+                    "staged": {"type": "boolean", "description": "Show staged diff (--staged).", "default": False},
+                    "ref": {"type": "string", "description": "Base git ref/commit."},
+                    "target_ref": {"type": "string", "description": "Optional target git ref/commit."},
+                    "rel_path": {"type": "string", "description": "Optional relative file/dir path."},
+                    "stat_only": {"type": "boolean", "description": "Show diffstat only (--stat).", "default": False},
+                },
+                [],
+            ),
+            (
+                "log",
+                "Show Git commit history for the active workspace.",
+                {
+                    "limit": {"type": "integer", "description": "Max commits to show (1-200, default 20).", "default": 20},
+                    "ref": {"type": "string", "description": "Branch, tag, or commit ref."},
+                    "rel_path": {"type": "string", "description": "Optional relative file/dir path."},
+                    "oneline": {"type": "boolean", "description": "Format one line per commit (default true).", "default": True},
+                    "author": {"type": "string", "description": "Filter commits by author."},
+                    "since": {"type": "string", "description": "Filter commits since date/time (e.g. '1 week ago')."},
+                },
+                [],
+            ),
+            (
+                "show",
+                "Inspect a Git commit, tag, or object.",
+                {
+                    "ref": {"type": "string", "description": "Git ref/commit (default HEAD).", "default": "HEAD"},
+                    "stat_only": {"type": "boolean", "description": "Show diffstat only (--stat).", "default": False},
+                    "rel_path": {"type": "string", "description": "Optional relative file path."},
+                },
+                [],
+            ),
+            (
+                "blame",
+                "Show line-by-line Git authorship for a workspace file.",
+                {
+                    "rel_path": {"type": "string", "description": "Relative path to file."},
+                    "start_line": {"type": "integer", "description": "1-based start line (default 1).", "default": 1},
+                    "end_line": {"type": "integer", "description": "1-based end line (default 200).", "default": 200},
+                },
+                ["rel_path"],
+            ),
+            (
+                "branch_list",
+                "List local and optionally remote Git branches.",
+                {"include_remote": {"type": "boolean", "description": "Include remote-tracking branches (default true).", "default": True}},
+                [],
+            ),
+            (
+                "tag_list",
+                "List Git tags in the repository.",
+                {"pattern": {"type": "string", "description": "Optional glob pattern to filter tags."}},
+                [],
+            ),
+            ("stash_list", "List Git stashes.", {}, []),
+            ("remote_list", "List configured Git remotes.", {}, []),
+            (
+                "init",
+                "Initialize a new Git repository in the active workspace.",
+                {"default_branch": {"type": "string", "description": "Optional initial branch name (e.g. main)."}},
+                [],
+            ),
+            (
+                "stage",
+                "Stage workspace files for commit (git add).",
+                {
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Relative paths to stage."},
+                    "all": {"type": "boolean", "description": "Stage all changes (git add -A).", "default": False},
+                },
+                [],
+            ),
+            (
+                "unstage",
+                "Unstage workspace files from the Git index.",
+                {"paths": {"type": "array", "items": {"type": "string"}, "description": "Relative paths to unstage (default all)."}},
+                [],
+            ),
+            (
+                "commit",
+                "Create a Git commit in the active workspace.",
+                {
+                    "message": {"type": "string", "description": "Commit message."},
+                    "amend": {"type": "boolean", "description": "Amend the previous commit.", "default": False},
+                    "all": {"type": "boolean", "description": "Automatically stage modified/deleted tracked files (-a).", "default": False},
+                },
+                [],
+            ),
+            (
+                "branch_create",
+                "Create a new Git branch and optionally check it out.",
+                {
+                    "name": {"type": "string", "description": "New branch name."},
+                    "start_point": {"type": "string", "description": "Optional base ref/commit."},
+                    "checkout": {"type": "boolean", "description": "Switch to the new branch (default true).", "default": True},
+                },
+                ["name"],
+            ),
+            (
+                "checkout",
+                "Switch to an existing Git branch or ref.",
+                {"ref": {"type": "string", "description": "Target branch, tag, or commit ref."}},
+                ["ref"],
+            ),
+            (
+                "branch_delete",
+                "Delete a local Git branch.",
+                {
+                    "name": {"type": "string", "description": "Branch name to delete."},
+                    "force": {"type": "boolean", "description": "Force delete (-D).", "default": False},
+                },
+                ["name"],
+            ),
+            (
+                "merge",
+                "Merge a branch into the current branch, or abort an in-progress merge.",
+                {
+                    "branch": {"type": "string", "description": "Branch to merge."},
+                    "no_ff": {"type": "boolean", "description": "Create a merge commit (--no-ff).", "default": False},
+                    "abort": {"type": "boolean", "description": "Abort current conflicted merge (--abort).", "default": False},
+                },
+                [],
+            ),
+            (
+                "rebase",
+                "Rebase current branch onto another ref, or continue/abort rebase.",
+                {
+                    "onto": {"type": "string", "description": "Upstream branch/ref."},
+                    "abort": {"type": "boolean", "description": "Abort in-progress rebase (--abort).", "default": False},
+                    "continue": {"type": "boolean", "description": "Continue rebase (--continue).", "default": False},
+                },
+                [],
+            ),
+            (
+                "cherry_pick",
+                "Apply a commit onto the current branch, or continue/abort cherry-pick.",
+                {
+                    "commit": {"type": "string", "description": "Commit hash/ref to cherry-pick."},
+                    "abort": {"type": "boolean", "description": "Abort in-progress cherry-pick (--abort).", "default": False},
+                    "continue": {"type": "boolean", "description": "Continue cherry-pick (--continue).", "default": False},
+                },
+                [],
+            ),
+            (
+                "stash",
+                "Save, pop, apply, or drop a Git stash.",
+                {
+                    "action": {"type": "string", "enum": ["push", "pop", "apply", "drop"], "description": "Stash action (default push).", "default": "push"},
+                    "message": {"type": "string", "description": "Optional stash message (for push)."},
+                    "ref": {"type": "string", "description": "Optional stash ref like stash@{0}."},
+                    "include_untracked": {"type": "boolean", "description": "Include untracked files (-u, for push).", "default": False},
+                },
+                [],
+            ),
+            (
+                "tag_create",
+                "Create a lightweight or annotated Git tag.",
+                {
+                    "name": {"type": "string", "description": "Tag name."},
+                    "message": {"type": "string", "description": "Optional annotation message."},
+                    "ref": {"type": "string", "description": "Optional target commit ref."},
+                },
+                ["name"],
+            ),
+            (
+                "restore",
+                "Discard working tree changes for specified paths (git restore).",
+                {
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Relative paths to restore."},
+                    "source": {"type": "string", "description": "Optional source ref (--source)."},
+                },
+                ["paths"],
+            ),
+            (
+                "reset",
+                "Reset current HEAD to a specified state (soft, mixed, or hard).",
+                {
+                    "ref": {"type": "string", "description": "Target ref (default HEAD).", "default": "HEAD"},
+                    "mode": {"type": "string", "enum": ["soft", "mixed", "hard"], "description": "Reset mode (default mixed).", "default": "mixed"},
+                },
+                [],
+            ),
+            (
+                "fetch",
+                "Fetch objects and refs from a remote repository.",
+                {
+                    "remote": {"type": "string", "description": "Remote name (default origin).", "default": "origin"},
+                    "prune": {"type": "boolean", "description": "Prune deleted remote-tracking branches (--prune).", "default": False},
+                    "all": {"type": "boolean", "description": "Fetch all remotes (--all).", "default": False},
+                },
+                [],
+            ),
+            (
+                "pull",
+                "Fetch from and integrate with another repository or local branch.",
+                {
+                    "remote": {"type": "string", "description": "Remote name."},
+                    "branch": {"type": "string", "description": "Remote branch name."},
+                    "rebase": {"type": "boolean", "description": "Rebase instead of merge (--rebase).", "default": False},
+                },
+                [],
+            ),
+            (
+                "push",
+                "Update remote refs along with associated objects.",
+                {
+                    "remote": {"type": "string", "description": "Remote name (default origin).", "default": "origin"},
+                    "branch": {"type": "string", "description": "Branch name to push."},
+                    "set_upstream": {"type": "boolean", "description": "Set upstream tracking (-u).", "default": False},
+                    "force_with_lease": {"type": "boolean", "description": "Use --force-with-lease.", "default": False},
+                },
+                [],
+            ),
+        ]
+        tools: list[dict[str, Any]] = []
+        for name, desc, props, req in specs:
+            params: dict[str, Any] = {"type": "object", "properties": props}
+            if req:
+                params["required"] = req
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": f"bytey_git__{name}",
+                        "description": desc,
+                        "parameters": params,
+                    },
+                    "server": "bytey_git",
+                    "tool": name,
+                }
+            )
+        return tools
+
+    async def _execute_git_tool(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        cfg: Any,
+        confirm_cb: Any,
+    ) -> dict[str, Any]:
+        """Execute a bytey_git__* tool call with confirmation gating."""
+        active_ws = (cfg.workspace.active_path or "").strip()
+        if not active_ws:
+            return {"ok": False, "error": "No active workspace is configured."}
+        try:
+            git = GitToolchain(active_ws)
+            needs_confirm = (
+                tool_name in ALWAYS_CONFIRM_GIT_TOOLS
+                or (tool_name not in READ_ONLY_GIT_TOOLS and bool(cfg.workspace.require_write_approval))
+            )
+            if needs_confirm:
+                approved = await confirm_cb(
+                    "bytey_git",
+                    tool_name,
+                    args,
+                    {"command": f"git {tool_name}", "rel_path": "."},
+                )
+                if not approved:
+                    return {
+                        "ok": False,
+                        "denied": True,
+                        "error": "User rejected the proposed Git operation.",
+                    }
+
+            handlers = {
+                "status": lambda: git.status(short=bool(args.get("short", True))),
+                "diff": lambda: git.diff(
+                    staged=bool(args.get("staged", False)),
+                    ref=str(args.get("ref") or ""),
+                    target_ref=str(args.get("target_ref") or ""),
+                    rel_path=str(args.get("rel_path") or ""),
+                    stat_only=bool(args.get("stat_only", False)),
+                ),
+                "log": lambda: git.log(
+                    limit=int(args.get("limit", 20)),
+                    ref=str(args.get("ref") or ""),
+                    rel_path=str(args.get("rel_path") or ""),
+                    oneline=bool(args.get("oneline", True)),
+                    author=str(args.get("author") or ""),
+                    since=str(args.get("since") or ""),
+                ),
+                "show": lambda: git.show(
+                    ref=str(args.get("ref") or "HEAD"),
+                    stat_only=bool(args.get("stat_only", False)),
+                    rel_path=str(args.get("rel_path") or ""),
+                ),
+                "blame": lambda: git.blame(
+                    rel_path=str(args.get("rel_path") or ""),
+                    start_line=int(args.get("start_line", 1)),
+                    end_line=int(args.get("end_line", 200)),
+                ),
+                "branch_list": lambda: git.branch_list(include_remote=bool(args.get("include_remote", True))),
+                "tag_list": lambda: git.tag_list(pattern=str(args.get("pattern") or "")),
+                "stash_list": lambda: git.stash_list(),
+                "remote_list": lambda: git.remote_list(),
+                "init": lambda: git.init(default_branch=str(args.get("default_branch") or "")),
+                "stage": lambda: git.stage(
+                    paths=list(args.get("paths") or []),
+                    all_files=bool(args.get("all", False)),
+                ),
+                "unstage": lambda: git.unstage(paths=list(args.get("paths") or [])),
+                "commit": lambda: git.commit(
+                    message=str(args.get("message") or ""),
+                    amend=bool(args.get("amend", False)),
+                    all_tracked=bool(args.get("all", False)),
+                ),
+                "branch_create": lambda: git.branch_create(
+                    name=str(args.get("name") or ""),
+                    start_point=str(args.get("start_point") or ""),
+                    checkout=bool(args.get("checkout", True)),
+                ),
+                "checkout": lambda: git.checkout(ref=str(args.get("ref") or "")),
+                "branch_delete": lambda: git.branch_delete(
+                    name=str(args.get("name") or ""),
+                    force=bool(args.get("force", False)),
+                ),
+                "merge": lambda: git.merge(
+                    branch=str(args.get("branch") or ""),
+                    no_ff=bool(args.get("no_ff", False)),
+                    abort=bool(args.get("abort", False)),
+                ),
+                "rebase": lambda: git.rebase(
+                    onto=str(args.get("onto") or ""),
+                    abort=bool(args.get("abort", False)),
+                    continue_rebase=bool(args.get("continue", False)),
+                ),
+                "cherry_pick": lambda: git.cherry_pick(
+                    commit=str(args.get("commit") or ""),
+                    abort=bool(args.get("abort", False)),
+                    continue_cp=bool(args.get("continue", False)),
+                ),
+                "stash": lambda: git.stash(
+                    action=str(args.get("action") or "push"),
+                    message=str(args.get("message") or ""),
+                    ref=str(args.get("ref") or ""),
+                    include_untracked=bool(args.get("include_untracked", False)),
+                ),
+                "tag_create": lambda: git.tag_create(
+                    name=str(args.get("name") or ""),
+                    message=str(args.get("message") or ""),
+                    ref=str(args.get("ref") or ""),
+                ),
+                "restore": lambda: git.restore(
+                    paths=list(args.get("paths") or []),
+                    source=str(args.get("source") or ""),
+                ),
+                "reset": lambda: git.reset(
+                    ref=str(args.get("ref") or "HEAD"),
+                    mode=str(args.get("mode") or "mixed"),
+                ),
+                "fetch": lambda: git.fetch(
+                    remote=str(args.get("remote") or "origin"),
+                    prune=bool(args.get("prune", False)),
+                    all_remotes=bool(args.get("all", False)),
+                ),
+                "pull": lambda: git.pull(
+                    remote=str(args.get("remote") or ""),
+                    branch=str(args.get("branch") or ""),
+                    rebase=bool(args.get("rebase", False)),
+                ),
+                "push": lambda: git.push(
+                    remote=str(args.get("remote") or "origin"),
+                    branch=str(args.get("branch") or ""),
+                    set_upstream=bool(args.get("set_upstream", False)),
+                    force_with_lease=bool(args.get("force_with_lease", False)),
+                ),
+            }
+            handler = handlers.get(tool_name)
+            if handler is None:
+                return {"ok": False, "error": f"Unknown Git tool: {tool_name}"}
+            return await handler()
+        except (ValueError, FileNotFoundError, NotADirectoryError, PermissionError, OSError) as exc:
+            return {"ok": False, "error": str(exc)}
         return {"ok": False, "error": f"Unknown workspace tool: {tool_name!r}"}
 
     def _track_task(self, coro: Any) -> asyncio.Task[Any]:
@@ -990,6 +1638,7 @@ class ByteyDaemon:
             cfg,
             self._get_provider_api_key(cfg.provider.active_provider),
         )
+        await self.agent_registry.detect_all(cfg.agents)
 
         await self.ipc.start()
         if self.enable_voice_capture:
@@ -1028,6 +1677,7 @@ class ByteyDaemon:
 
         await self.voice_input.stop()
         await self.tts_player.stop()
+        await self.agent_runner.cancel()
         if self._owns_mcp_manager:
             await self.mcp_manager.close_all()
         if self._owns_llm_router:
@@ -1066,6 +1716,7 @@ class ByteyDaemon:
             "temperature": cfg.provider.temperature,
             "context_size": cfg.provider.context_size,
             "max_context_size": self._detected_context_length,
+            "max_tool_rounds": cfg.provider.max_tool_rounds,
         }
         data["voice_input"] = {
             "mic_muted": cfg.voice_in.mic_muted,
@@ -1122,6 +1773,8 @@ class ByteyDaemon:
             merge_section("skills", raw_patch["skills"])
         if isinstance(raw_patch.get("workspace"), dict):
             merge_section("workspace", raw_patch["workspace"])
+        if isinstance(raw_patch.get("agents"), dict):
+            merge_section("agents", raw_patch["agents"])
 
         # settings-ui `llm` mirror
         if isinstance(raw_patch.get("llm"), dict):
@@ -1139,6 +1792,8 @@ class ByteyDaemon:
                 mapped["temperature"] = llm["temperature"]
             if "context_size" in llm:
                 mapped["context_size"] = llm["context_size"]
+            if "max_tool_rounds" in llm:
+                mapped["max_tool_rounds"] = llm["max_tool_rounds"]
             if "supports_tools" in llm and isinstance(llm["supports_tools"], bool):
                 tools_hint = llm["supports_tools"]
             if "force_enable_tools" in llm:
@@ -1481,6 +2136,54 @@ class ByteyDaemon:
 
             ws_parts = text.split(None, 1)
             ws_cmd = ws_parts[0].lower()
+            if ws_cmd in ("/god", "/godmode"):
+                arg = ws_parts[1].strip().lower() if len(ws_parts) > 1 else ""
+                cur_god = bool(self.config_manager.config.agents.god_mode_enabled)
+                if not arg:
+                    next_god = not cur_god
+                elif arg in ("on", "true", "1", "enable"):
+                    next_god = True
+                elif arg in ("off", "false", "0", "disable"):
+                    next_god = False
+                else:
+                    next_god = cur_god
+                prev_muted = self.config_manager.config.voice_in.mic_muted
+                updated = self.config_manager.update_config(
+                    {"agents": {"god_mode_enabled": next_god}}
+                )
+                await self._finalize_config_change(
+                    updated,
+                    prev_muted,
+                    refresh_provider=False,
+                    broadcast_visuals=False,
+                    tools_hint=None,
+                )
+                reply_emotion = "happy" if next_god else "neutral"
+                reply_text = f"God Mode {'enabled' if next_god else 'disabled'}."
+                reply_msg = await self.storage.add_message(
+                    sid,
+                    role="assistant",
+                    content=reply_text,
+                    input_mode=input_mode,
+                    emotion=reply_emotion,
+                )
+                await self.ipc.connection_manager.broadcast(
+                    {
+                        "type": "transcript_delta",
+                        "session_id": sid,
+                        "message_id": reply_msg["id"],
+                        "role": "assistant",
+                        "source": input_mode,
+                        "text": reply_text,
+                        "emotion": reply_emotion,
+                        "is_final": True,
+                    }
+                )
+                return {
+                    "session_id": sid,
+                    "user_message": user_msg,
+                    "assistant_message": reply_msg,
+                }
             if ws_cmd in ("/workspace", "/cd"):
                 ws_arg = ws_parts[1].strip() if len(ws_parts) > 1 else ""
                 reply_emotion = "happy"
@@ -1586,10 +2289,32 @@ class ByteyDaemon:
                     tools = []
             active_ws = (cfg.workspace.active_path or "").strip()
             ws_valid = bool(active_ws and Path(active_ws).is_dir())
+            god_mode = bool(cfg.agents.god_mode_enabled)
             if supports_tools and cfg.skills.enabled:
                 tools.extend(self._build_skill_tools(cfg))
             if supports_tools and ws_valid:
-                tools.extend(self._build_workspace_tools())
+                ws_tools = self._build_workspace_tools()
+                if god_mode:
+                    _write_ws_tools = {
+                        "bytey_workspace__propose_edit",
+                        "bytey_workspace__write_file",
+                        "bytey_workspace__append_file",
+                        "bytey_workspace__delete_file",
+                        "bytey_workspace__rename_file",
+                    }
+                    ws_tools = [
+                        t
+                        for t in ws_tools
+                        if (t.get("function") or {}).get("name") not in _write_ws_tools
+                    ]
+                tools.extend(ws_tools)
+                tools.extend(self._build_git_tools())
+            if supports_tools and god_mode:
+                if not self.agent_registry.list_agents():
+                    await self.agent_registry.detect_all(cfg.agents)
+                else:
+                    self.agent_registry.sync_config(cfg.agents)
+                tools.extend(self._build_agent_tools())
 
             chunker = SentenceChunker()
             idle_before_s, recent_count = self._record_interaction()
@@ -1628,12 +2353,42 @@ class ByteyDaemon:
                     runtime_context_note += (
                         "\n[Workspace Tool Rule: When the user asks to create, write, edit, rename, "
                         "delete, inspect, or run files/scripts in the workspace, ALWAYS invoke "
-                        "bytey_workspace__write_file, bytey_workspace__propose_edit, "
-                        "bytey_workspace__rename_file, bytey_workspace__delete_file, "
-                        "bytey_workspace__list_files, bytey_workspace__read_file, or "
-                        "bytey_workspace__run_command instead of only pasting code in chat. "
-                        "The user will review and approve writes in the UI.]"
+                        "bytey_workspace__write_file, bytey_workspace__append_file, "
+                        "bytey_workspace__propose_edit, bytey_workspace__rename_file, "
+                        "bytey_workspace__delete_file, bytey_workspace__list_files, "
+                        "bytey_workspace__read_file, or bytey_workspace__run_command instead of "
+                        "only pasting code in chat. For existing files, ALWAYS call "
+                        "bytey_workspace__read_file first and use bytey_workspace__propose_edit "
+                        "for partial edits or bytey_workspace__append_file to append sections; "
+                        "use bytey_workspace__write_file only for new files or intentional full "
+                        "rewrites (overwrite=true). The user will review and approve writes in the UI.]"
                     )
+            if god_mode and supports_tools:
+                enabled_agents = [
+                    a for a in self.agent_registry.list_agents(cfg.agents) if a.installed and a.enabled
+                ]
+                agents_desc = (
+                    ", ".join(
+                        f"{a.id} ({a.display_name}, model={a.model or 'default'})"
+                        for a in enabled_agents
+                    )
+                    if enabled_agents
+                    else "none enabled"
+                )
+                runtime_context_note += (
+                    "\n[God Mode Active: Act as Prompt Architect & Orchestrator instead of editing "
+                    "workspace files directly. Collaborate with the user to craft a clear, "
+                    "self-contained prompt (you may use read-only workspace tools to inspect files). "
+                    f"Available enabled external CLIs: {agents_desc}. "
+                    "When the user asks to execute or send the prompt to a CLI, invoke "
+                    "bytey_agent__run(agent, prompt). "
+                    "CRITICAL: Inspect the returned stdout and git_status carefully before reporting. "
+                    "If the external CLI asked a question, requested approval, or git_status shows no "
+                    "expected file changes, NEVER claim files were created or modified—relay the CLI's "
+                    "exact question/blocker to the user instead, and use resume=True if the user confirms. "
+                    "Keep your spoken summary concise and TTS-friendly (do not read raw logs/diffs aloud); "
+                    "put file paths and details in chat text.]"
+                )
             if needs_auto_title:
                 runtime_context_note += (
                     "\n[Runtime Title Request: This is a new conversation. Begin your reply with "
@@ -1698,8 +2453,19 @@ class ByteyDaemon:
                 for sentence in chunker.feed(delta):
                     await self.tts_player.enqueue_sentence(sentence)
 
+            self._prompt_cancel_event.clear()
             try:
-                for _round in range(6):
+                max_rounds = max(1, int(cfg.provider.max_tool_rounds))
+                last_tc_sig: tuple[tuple[str, str], ...] | None = None
+                repeat_sig_count = 0
+                hit_round_cap = False
+                cancelled = False
+                for _round in range(max_rounds):
+                    if self._prompt_cancel_event.is_set():
+                        cancelled = True
+                        break
+                    if _round > 0:
+                        _compact_older_tool_messages(llm_messages)
                     chat_kwargs: dict[str, Any] = {
                         "messages": llm_messages,
                         "system_prompt": effective_system_prompt,
@@ -1721,24 +2487,54 @@ class ByteyDaemon:
                     tool_calls = result.get("tool_calls") or []
                     if not tool_calls:
                         break
+                    if _round == max_rounds - 1:
+                        hit_round_cap = True
 
                     llm_messages.append(
                         result.get("raw_assistant_message")
                         or {"role": "assistant", "content": result.get("content", "")}
                     )
 
+                    tc_sig = tuple(
+                        (
+                            str(tc.get("name") or ""),
+                            json.dumps(
+                                tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {},
+                                sort_keys=True,
+                                ensure_ascii=False,
+                            ),
+                        )
+                        for tc in tool_calls
+                    )
+                    if tc_sig == last_tc_sig:
+                        repeat_sig_count += 1
+                    else:
+                        last_tc_sig = tc_sig
+                        repeat_sig_count = 1
+
                     for tc in tool_calls:
+                        if self._prompt_cancel_event.is_set():
+                            cancelled = True
+                            break
                         ns_name = str(tc.get("name") or "")
                         args = tc.get("arguments") if isinstance(tc.get("arguments"), dict) else {}
                         call_id = str(uuid.uuid4())
                         is_skill_tool = ns_name.startswith("bytey_skill__")
                         is_workspace_tool = ns_name.startswith("bytey_workspace__")
+                        is_git_tool = ns_name.startswith("bytey_git__")
+                        is_agent_tool = ns_name.startswith("bytey_agent__")
                         if is_skill_tool:
                             srv_name = "bytey_skill"
                             tool_name = ns_name[len("bytey_skill__") :]
                         elif is_workspace_tool:
                             srv_name = "bytey_workspace"
                             tool_name = ns_name[len("bytey_workspace__") :]
+                        elif is_git_tool:
+                            srv_name = "bytey_git"
+                            tool_name = ns_name[len("bytey_git__") :]
+                        elif is_agent_tool:
+                            srv_name = "bytey_agent"
+                            tool_name = ns_name[len("bytey_agent__") :]
                         else:
                             split = self.mcp_manager._split_namespaced_tool(ns_name, cfg.mcp_servers)
                             srv_name, tool_name = split if split else ("mcp", ns_name)
@@ -1805,6 +2601,22 @@ class ByteyDaemon:
                                 cfg,
                                 confirm_cb,
                             )
+                        elif is_git_tool:
+                            tool_res = await self._execute_git_tool(
+                                tool_name,
+                                args,
+                                cfg,
+                                confirm_cb,
+                            )
+                        elif is_agent_tool:
+                            tool_res = await self._execute_agent_tool(
+                                tool_name,
+                                args,
+                                cfg,
+                                confirm_cb,
+                                call_id=call_id,
+                                assistant_id=assistant_id,
+                            )
                         else:
                             tool_res = await self.mcp_manager.execute_tool_call(
                                 ns_name,
@@ -1851,7 +2663,57 @@ class ByteyDaemon:
                             }
                         )
 
+                    if cancelled:
+                        break
+                    if repeat_sig_count >= 3:
+                        llm_messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "[Loop Guard: You repeated the exact same tool call multiple "
+                                    "times. Try a different approach or summarize what you have "
+                                    "completed so far without repeating the call.]"
+                                ),
+                            }
+                        )
+                    if hit_round_cap:
+                        break
+
                     await self._set_state("THINKING", emotion=final_emotion)
+
+                if cancelled:
+                    accumulated_parts.append("\n\n[Stopped by user.]")
+                elif hit_round_cap:
+                    await self._set_state("THINKING", emotion=final_emotion)
+                    _compact_older_tool_messages(llm_messages)
+                    llm_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "[System: Maximum tool-call rounds reached for this turn. "
+                                "Summarize what you completed so far and what remains next "
+                                "without calling any tools.]"
+                            ),
+                        }
+                    )
+                    wrapup_kwargs: dict[str, Any] = {
+                        "messages": llm_messages,
+                        "system_prompt": effective_system_prompt,
+                        "provider": cfg.provider.active_provider,
+                        "model": cfg.provider.model,
+                        "base_url": cfg.provider.base_url,
+                        "api_key": api_key,
+                        "temperature": cfg.provider.temperature,
+                        "tools": None,
+                        "on_text_chunk": on_text_chunk,
+                        "on_emotion": on_emotion,
+                    }
+                    if _accepts_kwarg(self.llm_router.generate_chat, "context_size"):
+                        wrapup_kwargs["context_size"] = effective_context_size
+                    wrapup_res = await self.llm_router.generate_chat(**wrapup_kwargs)
+                    last_result = wrapup_res
+                    if wrapup_res.get("emotion"):
+                        final_emotion = str(wrapup_res["emotion"])
 
                 if final_emotion == "neutral":
                     if data_volume_chars >= self.astonished_data_threshold_chars:
@@ -2001,6 +2863,10 @@ class ByteyDaemon:
         self.ipc.register_route("GET", "/api/v1/skills", self._route_list_skills)
         self.ipc.register_route("GET", "/api/v1/workspace", self._route_get_workspace)
         self.ipc.register_route("PUT", "/api/v1/workspace", self._route_put_workspace)
+        self.ipc.register_route("GET", "/api/v1/agents", self._route_list_agents)
+        self.ipc.register_route("POST", "/api/v1/agents/detect", self._route_detect_agents)
+        self.ipc.register_route("POST", "/api/v1/agents/cancel", self._route_cancel_agent)
+        self.ipc.register_route("PATCH", "/api/v1/agents/{agent_id}", self._route_patch_agent)
         self.ipc.register_route("POST", "/api/v1/skills/rescan", self._route_rescan_skills)
         self.ipc.register_route("POST", "/api/v1/skills/import", self._route_import_skill)
         self.ipc.register_route("POST", "/api/v1/skills", self._route_create_skill)
@@ -2037,6 +2903,7 @@ class ByteyDaemon:
         )
         self.ipc.register_route("DELETE", "/api/v1/sessions/{session_id}", self._route_delete_session)
         self.ipc.register_route("POST", "/api/v1/chat", self._route_chat)
+        self.ipc.register_route("POST", "/api/v1/prompt/cancel", self._route_cancel_prompt)
 
         self.ipc.register_route("POST", "/api/v1/voice/trigger", self._route_voice_trigger)
         self.ipc.register_route("POST", "/api/v1/voice/barge-in", self._route_voice_barge_in)
@@ -2223,8 +3090,11 @@ class ByteyDaemon:
         cfg = self.config_manager.config
         raw_tools: list[dict[str, Any]] = []
         raw_tools.extend(self._build_workspace_tools())
+        raw_tools.extend(self._build_git_tools())
         if cfg.skills.enabled:
             raw_tools.extend(self._build_skill_tools(cfg))
+        if cfg.agents.god_mode_enabled:
+            raw_tools.extend(self._build_agent_tools())
         tools = [
             {
                 "name": str((t.get("function") or {}).get("name") or t.get("tool") or ""),
@@ -2235,7 +3105,7 @@ class ByteyDaemon:
         return {
             "ok": True,
             "title": "Bytey MCP Host",
-            "description": "Built-in MCP host providing native Workspace and Skills tools for Bytey.",
+            "description": "Built-in MCP host providing native Workspace, Git, and Skills tools for Bytey.",
             "tools": tools,
         }
 
@@ -2251,6 +3121,93 @@ class ByteyDaemon:
             )
         fut.set_result(approved)
         return {"ok": True, "call_id": call_id, "approved": approved}
+
+    async def _route_list_agents(self, _req: IPCRequest) -> dict[str, Any]:
+        """Return all supported CLI agents with installation status and per-agent config."""
+        cfg = self.config_manager.config
+        if not self.agent_registry.list_agents():
+            await self.agent_registry.detect_all(cfg.agents)
+        else:
+            self.agent_registry.sync_config(cfg.agents)
+        agents = [a.to_dict() for a in self.agent_registry.list_agents(cfg.agents)]
+        return {
+            "ok": True,
+            "god_mode_enabled": bool(cfg.agents.god_mode_enabled),
+            "agents": agents,
+        }
+
+    async def _route_detect_agents(self, _req: IPCRequest) -> dict[str, Any]:
+        """Re-scan installed external CLI agents and broadcast agents_updated."""
+        cfg = self.config_manager.config
+        detected = await self.agent_registry.detect_all(cfg.agents)
+        agents = [a.to_dict() for a in detected]
+        await self.ipc.connection_manager.broadcast(
+            {
+                "type": "agents_updated",
+                "god_mode_enabled": bool(cfg.agents.god_mode_enabled),
+                "agents": agents,
+            }
+        )
+        return {
+            "ok": True,
+            "god_mode_enabled": bool(cfg.agents.god_mode_enabled),
+            "agents": agents,
+        }
+
+    async def _route_cancel_agent(self, _req: IPCRequest) -> dict[str, Any]:
+        """Cancel any active external CLI subprocess."""
+        cancelled = await self.agent_runner.cancel()
+        return {"ok": True, "cancelled": cancelled}
+
+    async def _route_patch_agent(self, req: IPCRequest) -> dict[str, Any]:
+        """Update per-CLI agent override settings (enabled, model, permission_mode, etc.)."""
+        agent_id = str(req.path_params.get("agent_id") or "").strip().lower()
+        body = req.json()
+        cfg = self.config_manager.config
+        if not self.agent_registry.list_agents():
+            await self.agent_registry.detect_all(cfg.agents)
+        info = self.agent_registry.get_agent(agent_id)
+        if info is None:
+            return IPCResponse(
+                status=404,
+                body={"ok": False, "error": f"Unknown agent {agent_id!r}"},
+            )
+        if "enabled" in body and bool(body["enabled"]) and not info.installed:
+            return IPCResponse(
+                status=400,
+                body={"ok": False, "error": f"Cannot enable '{agent_id}': CLI is not installed"},
+            )
+
+        current_ov = cfg.agents.overrides.get(agent_id, ExternalAgentOverride()).model_dump()
+        for key in ("enabled", "model", "permission_mode", "custom_path", "extra_args", "allow_autonomous_flags"):
+            if key in body:
+                current_ov[key] = body[key]
+
+        prev_muted = self.config_manager.config.voice_in.mic_muted
+        updated_cfg = self.config_manager.update_config(
+            {"agents": {"overrides": {agent_id: current_ov}}}
+        )
+        await self._finalize_config_change(
+            updated_cfg,
+            prev_muted,
+            refresh_provider=False,
+            broadcast_visuals=False,
+            tools_hint=None,
+        )
+        agents = [a.to_dict() for a in self.agent_registry.sync_config(updated_cfg.agents)]
+        await self.ipc.connection_manager.broadcast(
+            {
+                "type": "agents_updated",
+                "god_mode_enabled": bool(updated_cfg.agents.god_mode_enabled),
+                "agents": agents,
+            }
+        )
+        updated_agent = self.agent_registry.get_agent(agent_id)
+        return {
+            "ok": True,
+            "agent": updated_agent.to_dict() if updated_agent else None,
+            "agents": agents,
+        }
 
     async def _route_get_workspace(self, _req: IPCRequest) -> dict[str, Any]:
         return self._build_workspace_payload()
@@ -2499,6 +3456,11 @@ class ByteyDaemon:
             await self._set_state(self.state, emotion=replay_emotion)
         await self.tts_player.speak_text(text)
         return {"ok": True}
+
+    async def _route_cancel_prompt(self, _req: IPCRequest) -> dict[str, Any]:
+        """Signal any active multi-round prompt loop to stop cleanly."""
+        self._prompt_cancel_event.set()
+        return {"ok": True, "cancelling": self._chat_lock.locked()}
 
     async def _route_pause_tts(self, req: IPCRequest) -> dict[str, Any]:
         body = req.json()

@@ -61,7 +61,12 @@ assert "version" not in meta, "Deprecated integer 'version' must not be in metad
 assert meta.get("url"), "metadata.json missing url"
 assert meta.get("settings-schema"), "metadata.json missing settings-schema"
 assert meta.get("shell-version"), "metadata.json missing shell-version"
-for icon_rel in ("icons/bytey-ai-companion.svg", "icons/bytey-ai-companion-symbolic.svg"):
+for icon_rel in (
+    "icons/bytey-ai-companion.svg",
+    "icons/bytey-ai-companion-symbolic.svg",
+    "icons/bytey-double-check-symbolic.svg",
+    "icons/bytey-god-mode-symbolic.svg",
+):
     icon_path = ext_dir / icon_rel
     assert icon_path.is_file(), f"Missing icon file: {icon_path}"
     root = ET.parse(icon_path).getroot()
@@ -87,6 +92,8 @@ files = [
     "eyeRenderer.js",
     "icons/bytey-ai-companion-symbolic.svg",
     "icons/bytey-ai-companion.svg",
+    "icons/bytey-double-check-symbolic.svg",
+    "icons/bytey-god-mode-symbolic.svg",
     "islandWidget.js",
     "metadata.json",
     "positionManager.js",

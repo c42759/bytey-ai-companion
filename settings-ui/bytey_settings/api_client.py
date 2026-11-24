@@ -94,6 +94,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "force_enable_tools": False,
         "context_size": None,
         "max_context_size": None,
+        "max_tool_rounds": 25,
     },
     "voice_input": {
         "mic_muted": False,
@@ -555,6 +556,47 @@ class DaemonClient:
             error=_extract_error(resp),
             status_code=resp.status_code,
         )
+
+    def list_agents(self) -> ApiResult:
+        """Fetch supported external CLI agents and detection status."""
+        resp, err, offline = self._request("GET", "/api/v1/agents", timeout=5.0)
+        if resp is None:
+            return ApiResult(
+                ok=False,
+                offline=offline,
+                error="Daemon offline: cannot list CLI agents" if offline else err,
+            )
+        if resp.is_success:
+            return ApiResult(ok=True, data=resp.json(), status_code=resp.status_code)
+        return ApiResult(ok=False, error=_extract_error(resp), status_code=resp.status_code)
+
+    def detect_agents(self) -> ApiResult:
+        """Trigger CLI agent re-detection on the daemon."""
+        resp, err, offline = self._request("POST", "/api/v1/agents/detect", json={}, timeout=10.0)
+        if resp is None:
+            return ApiResult(
+                ok=False,
+                offline=offline,
+                error="Daemon offline: cannot detect CLI agents" if offline else err,
+            )
+        if resp.is_success:
+            return ApiResult(ok=True, data=resp.json(), status_code=resp.status_code)
+        return ApiResult(ok=False, error=_extract_error(resp), status_code=resp.status_code)
+
+    def patch_agent(self, agent_id: str, patch: dict[str, Any]) -> ApiResult:
+        """Update per-CLI agent override settings (enabled, model, permission_mode, etc.)."""
+        resp, err, offline = self._request(
+            "PATCH", f"/api/v1/agents/{agent_id}", json=patch, timeout=5.0
+        )
+        if resp is None:
+            return ApiResult(
+                ok=False,
+                offline=offline,
+                error="Daemon offline: cannot update CLI agent" if offline else err,
+            )
+        if resp.is_success:
+            return ApiResult(ok=True, data=resp.json(), status_code=resp.status_code)
+        return ApiResult(ok=False, error=_extract_error(resp), status_code=resp.status_code)
 
     def test_mcp_server(self, name: str, cfg: dict[str, Any]) -> ApiResult:
         """Test connectivity and discover tools for a single MCP server."""

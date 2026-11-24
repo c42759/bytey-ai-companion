@@ -2616,6 +2616,98 @@ asyncio.run(main())
             self.assertIn("bytey_skill__load", tools_by_name)
             self.assertTrue(all(bool(desc) for desc in tools_by_name.values()))
 
+    async def test_multi_round_tool_loop_wrapup_and_cancel(self) -> None:
+        from bytey_ai_companion.config import ProviderConfig
+
+        self.assertEqual(ProviderConfig().max_tool_rounds, 25)
+        self.assertEqual(ProviderConfig(max_tool_rounds=0).max_tool_rounds, 1)
+        self.assertEqual(ProviderConfig(max_tool_rounds=999).max_tool_rounds, 100)
+
+        with tempfile.TemporaryDirectory() as ws_tmp:
+            Path(ws_tmp, "a.txt").write_text("hi\n", encoding="utf-8")
+            orig_generate = self.daemon.llm_router.generate_chat
+            try:
+                async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+                    await client.put("/api/v1/workspace", json={"active_path": ws_tmp})
+                    r_cfg = await client.patch(
+                        "/api/v1/config",
+                        json={
+                            "llm": {"max_tool_rounds": 8, "supports_tools": True, "force_enable_tools": True},
+                        },
+                    )
+                    self.assertEqual(r_cfg.status_code, 200)
+                    self.assertEqual(r_cfg.json()["llm"]["max_tool_rounds"], 8)
+
+                    calls_8 = {"n": 0}
+
+                    async def mock_eight_rounds(**kwargs):
+                        calls_8["n"] += 1
+                        if calls_8["n"] <= 7:
+                            return {
+                                "content": "",
+                                "emotion": "focus",
+                                "tool_calls": [
+                                    {
+                                        "id": f"c_{calls_8['n']}",
+                                        "name": "bytey_workspace__list_files",
+                                        "arguments": {},
+                                    }
+                                ],
+                                "raw_assistant_message": {"role": "assistant", "content": ""},
+                            }
+                        if kwargs.get("on_text_chunk"):
+                            await kwargs["on_text_chunk"]("Finished 8 rounds!")
+                        return {"content": "Finished 8 rounds!", "emotion": "happy", "tool_calls": []}
+
+                    self.daemon.llm_router.generate_chat = mock_eight_rounds
+                    r_chat = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Do 8 rounds", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_chat.status_code, 200)
+                    self.assertEqual(calls_8["n"], 8)
+                    self.assertIn("Finished 8 rounds!", r_chat.json()["assistant_message"]["content"])
+
+                    # Now test round cap wrap-up (max_tool_rounds=2)
+                    await client.patch("/api/v1/config", json={"llm": {"max_tool_rounds": 2}})
+                    wrap_calls = {"n": 0, "wrap_tools_none": False}
+
+                    async def mock_cap_hit(**kwargs):
+                        wrap_calls["n"] += 1
+                        if kwargs.get("tools") is None:
+                            wrap_calls["wrap_tools_none"] = True
+                            if kwargs.get("on_text_chunk"):
+                                await kwargs["on_text_chunk"]("Wrap-up summary.")
+                            return {"content": "Wrap-up summary.", "emotion": "neutral", "tool_calls": []}
+                        return {
+                            "content": "",
+                            "emotion": "focus",
+                            "tool_calls": [
+                                {
+                                    "id": f"cap_{wrap_calls['n']}",
+                                    "name": "bytey_workspace__list_files",
+                                    "arguments": {},
+                                }
+                            ],
+                            "raw_assistant_message": {"role": "assistant", "content": ""},
+                        }
+
+                    self.daemon.llm_router.generate_chat = mock_cap_hit
+                    r_cap = await client.post(
+                        "/api/v1/chat",
+                        json={"content": "Loop forever", "input_mode": "text"},
+                    )
+                    self.assertEqual(r_cap.status_code, 200)
+                    self.assertEqual(wrap_calls["n"], 3)
+                    self.assertTrue(wrap_calls["wrap_tools_none"])
+                    self.assertIn("Wrap-up summary.", r_cap.json()["assistant_message"]["content"])
+
+                    r_cancel = await client.post("/api/v1/prompt/cancel")
+                    self.assertEqual(r_cancel.status_code, 200)
+                    self.assertTrue(r_cancel.json()["ok"])
+            finally:
+                self.daemon.llm_router.generate_chat = orig_generate
+
 
 class TestSettingsClientAndSyntax(unittest.TestCase):
     """Test DaemonClient offline fallback + secret stripping and static syntax checks."""
@@ -4009,6 +4101,21 @@ assert.strictEqual(elevenlabsApiKeyRow.visible, false);
             win_block.index('title="Bytey MCP Host"'),
             win_block.index("No external MCP servers configured"),
         )
+
+    def test_max_tool_rounds_ui_parity(self) -> None:
+        from bytey_settings.api_client import DEFAULT_CONFIG
+
+        self.assertEqual(DEFAULT_CONFIG["llm"]["max_tool_rounds"], 25)
+        prefs_js = (
+            REPO_ROOT / "gnome-extension" / "bytey-ai-companion@c42759.github.com" / "prefs.js"
+        ).read_text(encoding="utf-8")
+        window_py = (REPO_ROOT / "settings-ui" / "bytey_settings" / "window.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("title: 'Max Tool Loops'", prefs_js)
+        self.assertIn("max_tool_rounds", prefs_js)
+        self.assertIn("self.max_tool_rounds_row", window_py)
+        self.assertIn("llm_max_tool_rounds", window_py)
 
     def test_mcp_info_icon_and_dialog_parity(self) -> None:
         ext_dir = Path(__file__).resolve().parent.parent / "gnome-extension" / "bytey-ai-companion@c42759.github.com"
@@ -5446,6 +5553,27 @@ class TestWorkspaceToolchain(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(w_app["is_new"])
             self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "line1\n")
 
+            w_rej = tc.preview_write("nested/new.txt", "replaced\n")
+            self.assertFalse(w_rej["ok"])
+            self.assertIn("already exists", w_rej["error"].lower())
+            w_rej_app = tc.apply_write("nested/new.txt", "replaced\n")
+            self.assertFalse(w_rej_app["ok"])
+            self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "line1\n")
+
+            w_ow = tc.apply_write("nested/new.txt", "replaced", overwrite=True)
+            self.assertTrue(w_ow["ok"])
+            self.assertFalse(w_ow["is_new"])
+            self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "replaced")
+
+            a_prev = tc.preview_append("nested/new.txt", "line2\n")
+            self.assertTrue(a_prev["ok"])
+            self.assertIn("+line2", a_prev["diff"])
+            self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "replaced")
+
+            a_app = tc.apply_append("nested/new.txt", "line2\n")
+            self.assertTrue(a_app["ok"])
+            self.assertEqual((ws / "nested" / "new.txt").read_text(encoding="utf-8"), "replaced\nline2\n")
+
             cmd_ok = await tc.run_command("pwd")
             self.assertTrue(cmd_ok["ok"])
             self.assertEqual(cmd_ok["returncode"], 0)
@@ -5582,6 +5710,376 @@ class TestWorkspaceToolchain(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(client2._args, ["/tmp/ws_beta/server.py"])  # type: ignore[attr-defined]
             self.assertEqual(client2._env["PROJECT_DIR"], "/tmp/ws_beta")  # type: ignore[attr-defined]
+
+
+class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
+    """Tests for AgentRegistry, AgentRunner, God Mode API, and bytey_agent__run."""
+
+    async def test_registry_detect_build_argv_and_runner(self) -> None:
+        from bytey_ai_companion.agents import AgentRegistry, AgentRunner
+        from bytey_ai_companion.config import AgentsConfig, ExternalAgentOverride
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_claude = root / "claude"
+            fake_claude.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('claude 1.2.3')\n"
+                "    sys.exit(0)\n"
+                "print('ARGS:' + '|'.join(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+
+            cfg = AgentsConfig(
+                overrides={
+                    "claude": ExternalAgentOverride(
+                        enabled=True,
+                        model="sonnet",
+                        permission_mode="accept_edits",
+                        custom_path=str(fake_claude),
+                    )
+                }
+            )
+            reg = AgentRegistry()
+            with patch("bytey_ai_companion.agents.registry._resolve_binary", side_effect=lambda b, c="": c if c else ""):
+                agents = await reg.detect_all(cfg)
+
+            by_id = {a.id: a for a in agents}
+            self.assertTrue(by_id["claude"].installed)
+            self.assertEqual(by_id["claude"].version, "claude 1.2.3")
+            self.assertTrue(by_id["claude"].enabled)
+            self.assertFalse(by_id["copilot"].installed)
+            self.assertFalse(by_id["copilot"].enabled)
+
+            argv = reg.build_argv("claude", "build feature x", cfg)
+            self.assertIn("--model", argv)
+            self.assertIn("sonnet", argv)
+            self.assertIn("--permission-mode", argv)
+            self.assertIn("acceptEdits", argv)
+            self.assertIn("build feature x", argv)
+
+            # autonomous mode without allow_autonomous_flags=True must raise
+            cfg_auto = AgentsConfig(
+                overrides={
+                    "claude": ExternalAgentOverride(
+                        enabled=True,
+                        permission_mode="autonomous",
+                        allow_autonomous_flags=False,
+                        custom_path=str(fake_claude),
+                    )
+                }
+            )
+            reg.sync_config(cfg_auto)
+            with self.assertRaises(ValueError):
+                reg.build_argv("claude", "hi", cfg_auto)
+
+            runner = AgentRunner()
+            res = await runner.run("claude", argv, root, timeout_seconds=10)
+            self.assertEqual(res.exit_code, 0)
+            self.assertIn("ARGS:-p|build feature x|--output-format|text|--model|sonnet", res.stdout)
+
+            # Active output resets inactivity timer (total runtime > timeout_seconds does not time out)
+            active_cli = root / "active_cli.py"
+            active_cli.write_text(
+                "import sys, time\n"
+                "for i in range(4):\n"
+                "    print(f'step {i}', flush=True)\n"
+                "    time.sleep(0.25)\n",
+                encoding="utf-8",
+            )
+            res_active = await runner.run(
+                "claude", [sys.executable, str(active_cli)], root, timeout_seconds=0.6
+            )
+            self.assertFalse(res_active.timed_out)
+            self.assertEqual(res_active.exit_code, 0)
+            self.assertIn("step 3", res_active.stdout)
+
+            # Silent/hung CLI does time out after inactivity limit
+            silent_cli = root / "silent_cli.py"
+            silent_cli.write_text("import time\ntime.sleep(5)\n", encoding="utf-8")
+            res_silent = await runner.run(
+                "claude", [sys.executable, str(silent_cli)], root, timeout_seconds=0.4
+            )
+            self.assertTrue(res_silent.timed_out)
+
+    async def test_daemon_god_mode_routes_slash_command_and_run_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            fake_claude = root / "claude"
+            fake_claude.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if '--version' in sys.argv:\n"
+                "    print('claude 9.9.9')\n"
+                "    sys.exit(0)\n"
+                "print('CLAUDE_DONE:' + ' '.join(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+
+            mock_llm = _MockLLMRouter()
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=root / "cfg",
+                data_dir=root / "data",
+                enable_voice_capture=False,
+                llm_router=mock_llm,  # type: ignore[arg-type]
+            )
+            daemon.config_manager.update_config(
+                {
+                    "voice_out": {"tts_muted": True, "tts_provider": "disabled"},
+                    "workspace": {"active_path": str(ws)},
+                    "agents": {
+                        "require_run_approval": False,
+                        "overrides": {
+                            "claude": {
+                                "enabled": True,
+                                "model": "opus",
+                                "custom_path": str(fake_claude),
+                            }
+                        },
+                    },
+                }
+            )
+            await daemon.start()
+            base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+            try:
+                async with httpx.AsyncClient(base_url=base_url, timeout=5.0) as client:
+                    # 1. /api/v1/agents lists all supported CLIs
+                    r_list = await client.get("/api/v1/agents")
+                    self.assertEqual(r_list.status_code, 200)
+                    agents_data = {a["id"]: a for a in r_list.json()["agents"]}
+                    self.assertIn("claude", agents_data)
+                    self.assertIn("copilot", agents_data)
+                    self.assertTrue(agents_data["claude"]["installed"])
+                    self.assertEqual(agents_data["claude"]["model"], "opus")
+
+                    # 2. Cannot enable a non-installed CLI
+                    if not agents_data["agy"]["installed"]:
+                        r_bad = await client.patch("/api/v1/agents/agy", json={"enabled": True})
+                        self.assertEqual(r_bad.status_code, 400)
+
+                    # 3. PATCH model update works
+                    r_patch = await client.patch("/api/v1/agents/claude", json={"model": "sonnet"})
+                    self.assertEqual(r_patch.status_code, 200)
+                    self.assertEqual(r_patch.json()["agent"]["model"], "sonnet")
+
+                # 4. /god toggles God Mode
+                res_cmd = await daemon.handle_user_prompt("/god on", input_mode="text")
+                self.assertIn("God Mode enabled", res_cmd["assistant_message"]["content"])
+                self.assertTrue(daemon.config_manager.config.agents.god_mode_enabled)
+
+                # 5. bytey_agent__run executes non-interactively
+                tool_res = await daemon._execute_agent_tool(
+                    "run",
+                    {"agent": "claude", "prompt": "implement ping"},
+                    daemon.config_manager.config,
+                    confirm_cb=None,
+                    call_id="c1",
+                    assistant_id="a1",
+                )
+                self.assertTrue(tool_res["ok"])
+                payload = json.loads(tool_res["content"])
+                self.assertEqual(payload["exit_code"], 0)
+                self.assertIn("CLAUDE_DONE:", payload["stdout"])
+                self.assertIn("sonnet", payload["stdout"])
+
+                # 6. Auto-Accept bypasses require_run_approval in God Mode
+                daemon.config_manager.update_config(
+                    {
+                        "agents": {"require_run_approval": True},
+                        "workspace": {
+                            "require_write_approval": False,
+                            "require_command_approval": False,
+                        },
+                    }
+                )
+                confirm_called = False
+
+                async def _should_not_confirm(*_args: Any, **_kwargs: Any) -> bool:
+                    nonlocal confirm_called
+                    confirm_called = True
+                    return False
+
+                tool_res_auto = await daemon._execute_agent_tool(
+                    "run",
+                    {"agent": "claude", "prompt": "auto accept run"},
+                    daemon.config_manager.config,
+                    confirm_cb=_should_not_confirm,
+                    call_id="c2",
+                    assistant_id="a2",
+                )
+                self.assertFalse(confirm_called)
+                self.assertTrue(tool_res_auto["ok"])
+            finally:
+                await daemon.stop()
+
+
+class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp_dir.name)
+        self.git = None
+
+    async def asyncTearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    async def _init_configured_repo(self):
+        from bytey_ai_companion.workspace.git_tools import GitToolchain
+
+        git = GitToolchain(self.root)
+        init_res = await git.init(default_branch="main")
+        self.assertTrue(init_res["ok"], init_res)
+        for key, val in (("user.name", "Bytey Test"), ("user.email", "bytey@example.com")):
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", str(self.root), "config", key, val
+            )
+            await proc.wait()
+        return git
+
+    async def test_git_lifecycle_operations(self) -> None:
+        from bytey_ai_companion.workspace.git_tools import GitToolchain
+
+        git = GitToolchain(self.root)
+        self.assertFalse(await git.is_repo())
+        non_repo = await git.status()
+        self.assertFalse(non_repo["ok"])
+        self.assertIn("Not a git repository", non_repo["error"])
+
+        git = await self._init_configured_repo()
+        self.assertTrue(await git.is_repo())
+
+        (self.root / "app.py").write_text("print('v1')\n", encoding="utf-8")
+        st = await git.status()
+        self.assertTrue(st["ok"])
+        self.assertIn("app.py", st["content"])
+
+        self.assertTrue((await git.stage(paths=["app.py"]))["ok"])
+        c1 = await git.commit("initial commit")
+        self.assertTrue(c1["ok"], c1)
+
+        log_res = await git.log(limit=5)
+        self.assertTrue(log_res["ok"])
+        self.assertIn("initial commit", log_res["content"])
+
+        show_res = await git.show("HEAD", stat_only=True)
+        self.assertTrue(show_res["ok"])
+        self.assertIn("app.py", show_res["content"])
+
+        blame_res = await git.blame("app.py", start_line=1, end_line=1)
+        self.assertTrue(blame_res["ok"])
+        self.assertIn("Bytey Test", blame_res["content"])
+
+        (self.root / "app.py").write_text("print('v2')\n", encoding="utf-8")
+        diff_res = await git.diff(rel_path="app.py")
+        self.assertTrue(diff_res["ok"])
+        self.assertIn("+print('v2')", diff_res["content"])
+
+        # Stash push & pop
+        self.assertTrue((await git.stash("push", message="wip"))["ok"])
+        self.assertIn("wip", (await git.stash_list())["content"])
+        self.assertTrue((await git.stash("pop"))["ok"])
+
+        # Restore working tree
+        self.assertTrue((await git.restore(["app.py"]))["ok"])
+        self.assertEqual((self.root / "app.py").read_text(encoding="utf-8"), "print('v1')\n")
+
+        # Branch create, commit, merge, delete, tag
+        self.assertTrue((await git.branch_create("feat"))["ok"])
+        (self.root / "feat.txt").write_text("feature\n", encoding="utf-8")
+        self.assertTrue((await git.stage(all_files=True))["ok"])
+        self.assertTrue((await git.commit("add feat"))["ok"])
+        self.assertIn("feat", (await git.branch_list(include_remote=False))["content"])
+
+        self.assertTrue((await git.checkout("main"))["ok"])
+        self.assertTrue((await git.merge("feat", no_ff=True))["ok"])
+        self.assertTrue((await git.branch_delete("feat"))["ok"])
+
+        self.assertTrue((await git.tag_create("v1.0.0", message="release"))["ok"])
+        self.assertIn("v1.0.0", (await git.tag_list())["content"])
+
+    async def test_path_traversal_rejected(self) -> None:
+        git = await self._init_configured_repo()
+        with self.assertRaises(ValueError):
+            await git.diff(rel_path="../outside.txt")
+        with self.assertRaises(ValueError):
+            await git.stage(paths=["/etc/passwd"])
+
+
+class TestGitDaemonIntegration(unittest.IsolatedAsyncioTestCase):
+    async def test_mcp_host_and_execute_git_tool_confirmation(self) -> None:
+        from bytey_ai_companion.main import ByteyDaemon
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "ws"
+            cfg_dir = Path(tmp) / "cfg"
+            data_dir = Path(tmp) / "data"
+            root.mkdir()
+
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=cfg_dir,
+                data_dir=data_dir,
+                enable_voice_capture=False,
+                llm_router=_MockLLMRouter(),
+            )
+            daemon.config_manager.update_config(
+                {
+                    "workspace": {
+                        "active_path": str(root),
+                        "require_write_approval": True,
+                    }
+                }
+            )
+            await daemon.start()
+            try:
+                base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+                async with httpx.AsyncClient(base_url=base_url) as client:
+                    resp = await client.get("/api/v1/mcp/host")
+                    self.assertEqual(resp.status_code, 200)
+                    names = {t["name"] for t in resp.json()["tools"]}
+                    for expected in ("bytey_git__status", "bytey_git__commit", "bytey_git__push"):
+                        self.assertIn(expected, names)
+
+                cfg = daemon.config_manager.config
+
+                async def deny_cb(*_args: Any, **_kwargs: Any) -> bool:
+                    return False
+
+                async def allow_cb(*_args: Any, **_kwargs: Any) -> bool:
+                    return True
+
+                # Init + stage + commit with confirmation
+                init_res = await daemon._execute_git_tool("init", {"default_branch": "main"}, cfg, allow_cb)
+                self.assertTrue(init_res["ok"], init_res)
+                for key, val in (("user.name", "Bytey"), ("user.email", "bytey@example.com")):
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "-C", str(root), "config", key, val
+                    )
+                    await proc.wait()
+
+                (root / "readme.md").write_text("hello\n", encoding="utf-8")
+                st_res = await daemon._execute_git_tool("status", {}, cfg, deny_cb)
+                self.assertTrue(st_res["ok"])
+                self.assertIn("readme.md", st_res["content"])
+
+                denied_stage = await daemon._execute_git_tool("stage", {"all": True}, cfg, deny_cb)
+                self.assertFalse(denied_stage["ok"])
+                self.assertTrue(denied_stage.get("denied"))
+
+                ok_stage = await daemon._execute_git_tool("stage", {"all": True}, cfg, allow_cb)
+                self.assertTrue(ok_stage["ok"], ok_stage)
+                ok_commit = await daemon._execute_git_tool("commit", {"message": "init"}, cfg, allow_cb)
+                self.assertTrue(ok_commit["ok"], ok_commit)
+            finally:
+                await daemon.stop()
 
 
 if __name__ == "__main__":
