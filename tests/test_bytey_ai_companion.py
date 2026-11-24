@@ -5919,8 +5919,12 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             pid_file = root / "pids.txt"
             long_cli = root / "long_cli.py"
             long_cli.write_text(
-                "import os, subprocess, sys, time\n"
+                "import os, signal, subprocess, sys, time\n"
                 "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                "def stop(signum, frame):\n"
+                "    child.wait()\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
                 f"with open({str(pid_file)!r}, 'w', encoding='utf-8') as fh:\n"
                 "    fh.write(f'{os.getpid()},{child.pid}')\n"
                 "time.sleep(30)\n",
