@@ -960,7 +960,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         const aiGroup = new Adw.PreferencesGroup({
             title: 'AI Provider',
-            description: 'API keys stay securely in your core daemon .env or OS keyring.',
+            description: 'API keys stay securely in your OS keyring.',
         });
         const refreshModelsBtn = new Gtk.Button({
             icon_name: 'view-refresh-symbolic',

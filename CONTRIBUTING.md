@@ -85,7 +85,7 @@ Contributions, bug reports, and feature suggestions are welcome!
 
 ### Python Daemon & Settings UI
 
-- **No Hardcoded Secrets**: Never commit API keys, tokens, or `.env` files. Use `.env` or `libsecret` keyring entries.
+- **No Hardcoded Secrets**: Never commit API keys or tokens. Use `libsecret` keyring entries or process environment variables.
 - **Async Safety**: Avoid blocking the `asyncio` event loop in `core-daemon/` (run blocking I/O or ML inference in executors/subprocesses).
 
 ---

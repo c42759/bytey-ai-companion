@@ -399,32 +399,49 @@ class TestConfigAndSecrets(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp_dir.cleanup()
 
-    def test_secret_store_env_permissions_redaction_and_expansion(self) -> None:
+    def test_secret_store_keyring_redaction_and_expansion(self) -> None:
+        fake_keyring: dict[tuple[str, str], str] = {}
         store = SecretStore(config_dir=self.cfg_dir)
-        secret_val = "sk-super-secret-value-9988"
-        store.set_secret("OPENAI_API_KEY", secret_val)
 
-        self.assertTrue(store.env_file.is_file())
-        mode = stat.S_IMODE(store.env_file.stat().st_mode)
-        self.assertEqual(mode, 0o600)
-        self.assertEqual(store.get_secret("OPENAI_API_KEY"), secret_val)
+        with patch.dict(os.environ, {"BYTEY_DISABLE_KEYRING": "1"}):
+            with self.assertRaises(RuntimeError):
+                store.set_secret("OPENAI_API_KEY", "sk-should-fail")
 
-        os.environ["TEMP_TEST_HOST_VAR"] = "env-fallback-xyz"
-        try:
-            expanded = store.resolve_env_value("key=${OPENAI_API_KEY}&host=${TEMP_TEST_HOST_VAR}")
-            self.assertEqual(expanded, f"key={secret_val}&host=env-fallback-xyz")
-        finally:
-            os.environ.pop("TEMP_TEST_HOST_VAR", None)
+        with patch.dict(os.environ, {"BYTEY_DISABLE_KEYRING": ""}), patch.object(
+            store, "_keyring_enabled", return_value=True
+        ), patch.object(
+            store,
+            "_keyring_set",
+            side_effect=lambda k, v: fake_keyring.__setitem__((str(store.config_dir), k), v),
+        ), patch.object(
+            store,
+            "_keyring_get",
+            side_effect=lambda k: fake_keyring.get((str(store.config_dir), k)),
+        ), patch.object(
+            store,
+            "_keyring_delete",
+            side_effect=lambda k: fake_keyring.pop((str(store.config_dir), k), None),
+        ):
+            secret_val = "sk-super-secret-value-9988"
+            store.set_secret("OPENAI_API_KEY", secret_val)
 
-        cfg_mgr = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
-        redacted = cfg_mgr.get_redacted_dict()
-        self.assertTrue(redacted["secrets_configured"]["OPENAI_API_KEY"])
-        self.assertFalse(redacted["secrets_configured"]["GEMINI_API_KEY"])
-        self.assertNotIn(secret_val, json.dumps(redacted))
+            self.assertEqual(store.get_secret("OPENAI_API_KEY"), secret_val)
 
-        store.delete_secret("OPENAI_API_KEY")
-        self.assertIsNone(store.get_secret("OPENAI_API_KEY"))
-        self.assertEqual(stat.S_IMODE(store.env_file.stat().st_mode), 0o600)
+            os.environ["TEMP_TEST_HOST_VAR"] = "env-fallback-xyz"
+            try:
+                expanded = store.resolve_env_value("key=${OPENAI_API_KEY}&host=${TEMP_TEST_HOST_VAR}")
+                self.assertEqual(expanded, f"key={secret_val}&host=env-fallback-xyz")
+            finally:
+                os.environ.pop("TEMP_TEST_HOST_VAR", None)
+
+            cfg_mgr = ConfigManager(config_dir=self.cfg_dir, secret_store=store)
+            redacted = cfg_mgr.get_redacted_dict()
+            self.assertTrue(redacted["secrets_configured"]["OPENAI_API_KEY"])
+            self.assertFalse(redacted["secrets_configured"]["GEMINI_API_KEY"])
+            self.assertNotIn(secret_val, json.dumps(redacted))
+
+            store.delete_secret("OPENAI_API_KEY")
+            self.assertIsNone(store.get_secret("OPENAI_API_KEY"))
 
     def test_config_patch_merging_and_persistence(self) -> None:
         store = SecretStore(config_dir=self.cfg_dir)
@@ -1156,10 +1173,17 @@ class TestSchemaSyncAndMCP(unittest.IsolatedAsyncioTestCase):
         self.server_script = Path(self.tmp_dir.name) / "mock_mcp.py"
         self.server_script.write_text(MOCK_MCP_SERVER_SCRIPT, encoding="utf-8")
         self.secret_store = SecretStore(config_dir=Path(self.tmp_dir.name) / "cfg")
-        self.secret_store.set_secret("MCP_SECRET_TOKEN", "tok-abc-123")
+        self._fake_secrets = {"MCP_SECRET_TOKEN": "tok-abc-123"}
+        self._secret_patch = patch.object(
+            self.secret_store,
+            "get_secret",
+            side_effect=lambda k: self._fake_secrets.get(k),
+        )
+        self._secret_patch.start()
         self.manager = MCPClientManager(secret_resolver=self.secret_store)
 
     async def asyncTearDown(self) -> None:
+        self._secret_patch.stop()
         await self.manager.close_all()
         self.tmp_dir.cleanup()
 
@@ -1618,15 +1642,31 @@ class TestLiveDaemonIntegration(unittest.IsolatedAsyncioTestCase):
 
             # 3. Secrets PUT + verify secret absent from GET /api/v1/config
             gem_secret = "AIzaSyTestSecretValue12345"
-            r = await client.put("/api/v1/secrets", json={"secrets": {"GEMINI_API_KEY": gem_secret}})
-            self.assertEqual(r.status_code, 200)
-            self.assertTrue(r.json()["ok"])
-            self.assertTrue(r.json()["secrets_configured"]["GEMINI_API_KEY"])
+            fake_keyring: dict[str, str] = {}
+            with patch.object(
+                self.daemon.secret_store, "_keyring_enabled", return_value=True
+            ), patch.object(
+                self.daemon.secret_store,
+                "_keyring_set",
+                side_effect=lambda k, v: fake_keyring.__setitem__(k, v),
+            ), patch.object(
+                self.daemon.secret_store,
+                "_keyring_get",
+                side_effect=lambda k: fake_keyring.get(k),
+            ), patch.object(
+                self.daemon.secret_store,
+                "_keyring_delete",
+                side_effect=lambda k: fake_keyring.pop(k, None),
+            ):
+                r = await client.put("/api/v1/secrets", json={"secrets": {"GEMINI_API_KEY": gem_secret}})
+                self.assertEqual(r.status_code, 200)
+                self.assertTrue(r.json()["ok"])
+                self.assertTrue(r.json()["secrets_configured"]["GEMINI_API_KEY"])
 
-            r = await client.get("/api/v1/config")
-            self.assertEqual(r.status_code, 200)
-            self.assertTrue(r.json()["secrets_configured"]["GEMINI_API_KEY"])
-            self.assertNotIn(gem_secret, r.text)
+                r = await client.get("/api/v1/config")
+                self.assertEqual(r.status_code, 200)
+                self.assertTrue(r.json()["secrets_configured"]["GEMINI_API_KEY"])
+                self.assertNotIn(gem_secret, r.text)
 
             # 4. MCP JSON GET & PUT
             r = await client.get("/api/v1/mcp/json")

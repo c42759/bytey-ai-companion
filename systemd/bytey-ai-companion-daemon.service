@@ -6,8 +6,6 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory=%h
-EnvironmentFile=-%h/.config/ai-pet/.env
-EnvironmentFile=-%h/.config/bytey-ai-companion/.env
 ExecStart=%h/.local/bin/bytey-ai-companion-daemon
 Restart=on-failure
 RestartSec=3

@@ -12,7 +12,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values, set_key, unset_key
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from .llm.emotions import DEFAULT_SYSTEM_PROMPT
@@ -119,9 +118,9 @@ def resolve_config_dir(config_dir: Path | None = None) -> Path:
         return Path(env_dir)
     primary = _primary_config_dir()
     legacy = _legacy_config_dir()
-    if (primary / "config.json").exists() or (primary / ".env").exists():
+    if (primary / "config.json").exists():
         return primary
-    if (legacy / "config.json").exists() or (legacy / ".env").exists():
+    if (legacy / "config.json").exists():
         return legacy
     return primary
 
@@ -502,7 +501,7 @@ class ByteyConfig(BaseModel):
 
 
 class SecretStore:
-    """Manage secrets across .env (0o600), optional libsecret keyring, and os.environ."""
+    """Manage secrets across the OS keyring (libsecret) and os.environ."""
 
     KNOWN_SECRETS: tuple[str, ...] = (
         "GEMINI_API_KEY",
@@ -535,7 +534,6 @@ class SecretStore:
 
     def __init__(self, config_dir: Path | None = None) -> None:
         self.config_dir = resolve_config_dir(config_dir)
-        self.env_file = self.config_dir / ".env"
         self._allow_legacy_fallback = (
             config_dir is None
             and not os.environ.get("BYTEY_CONFIG_DIR")
@@ -608,7 +606,7 @@ class SecretStore:
 
     def _keyring_set(self, key: str, value: str) -> None:
         if not self._keyring_enabled():
-            return
+            raise RuntimeError("OS keyring (libsecret) is unavailable or disabled")
         try:
             _LibSecret.password_store_sync(
                 self._schema,
@@ -618,8 +616,8 @@ class SecretStore:
                 value,
                 None,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"Failed to store secret {key} in OS keyring") from exc
 
     def _keyring_delete(self, key: str) -> None:
         if not self._keyring_enabled():
@@ -636,44 +634,11 @@ class SecretStore:
                         {"key": key, "config_dir": str(legacy_dir)},
                     )
 
-    @staticmethod
-    def _parse_env_path(path: Path) -> dict[str, str | None]:
-        if not path.is_file():
-            return {}
-        try:
-            return dict(dotenv_values(path))
-        except Exception:
-            logger.warning("Failed to parse .env file at %s", path)
-            return {}
-
-    def _read_env_file(self) -> dict[str, str | None]:
-        primary_vals = self._parse_env_path(self.env_file)
-        if not self._allow_legacy_fallback:
-            return primary_vals
-        legacy_env = _legacy_config_dir() / ".env"
-        if legacy_env != self.env_file and legacy_env.is_file():
-            legacy_vals = self._parse_env_path(legacy_env)
-            merged = dict(legacy_vals)
-            merged.update({k: v for k, v in primary_vals.items() if v})
-            return merged
-        return primary_vals
-
-    def _ensure_env_file_permissions(self) -> None:
-        if not self.env_file.exists():
-            fd = os.open(self.env_file, os.O_CREAT | os.O_WRONLY, 0o600)
-            os.close(fd)
-        os.chmod(self.env_file, 0o600)
-
     def get_secret(self, key: str) -> str | None:
-        """Retrieve a secret from .env, libsecret, or os.environ without logging it."""
+        """Retrieve a secret from libsecret or os.environ without logging it."""
         cleaned = key.strip()
         if not _KEY_NAME_RE.match(cleaned):
             return None
-
-        env_values = self._read_env_file()
-        env_val = env_values.get(cleaned)
-        if env_val:
-            return env_val
 
         keyring_val = self._keyring_get(cleaned)
         if keyring_val:
@@ -686,7 +651,7 @@ class SecretStore:
         return None
 
     def set_secret(self, key: str, value: str) -> None:
-        """Persist a secret to config_dir/.env (chmod 0o600) and optionally libsecret."""
+        """Persist a secret to the OS keyring (libsecret)."""
         cleaned = self._validate_key(key)
         if "\n" in value or "\r" in value:
             raise ValueError("Secret value must not contain newline characters")
@@ -694,18 +659,11 @@ class SecretStore:
             self.delete_secret(cleaned)
             return
 
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        self._ensure_env_file_permissions()
-        set_key(str(self.env_file), cleaned, value)
-        os.chmod(self.env_file, 0o600)
         self._keyring_set(cleaned, value)
 
     def delete_secret(self, key: str) -> None:
-        """Remove a secret from config_dir/.env and libsecret."""
+        """Remove a secret from the OS keyring (libsecret)."""
         cleaned = self._validate_key(key)
-        if self.env_file.is_file():
-            unset_key(str(self.env_file), cleaned)
-            os.chmod(self.env_file, 0o600)
         self._keyring_delete(cleaned)
 
     def list_configured_secrets(self) -> dict[str, bool]:

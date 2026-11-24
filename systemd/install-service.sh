@@ -43,8 +43,6 @@ rm -f "${TARGET_UNIT}"
     if [[ -n "${ENV_LINE}" ]]; then
         echo "${ENV_LINE}"
     fi
-    echo "EnvironmentFile=-%h/.config/ai-pet/.env"
-    echo "EnvironmentFile=-%h/.config/bytey-ai-companion/.env"
     echo "ExecStart=${EXEC_START}"
     echo "Restart=on-failure"
     echo "RestartSec=3"

@@ -398,7 +398,7 @@ class DaemonClient:
             return ApiResult(
                 ok=False,
                 offline=offline,
-                error="Daemon offline: secrets require running daemon or .env file"
+                error="Daemon offline: secrets require running daemon and OS keyring"
                 if offline
                 else err,
             )
