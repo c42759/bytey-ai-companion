@@ -5907,13 +5907,13 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            pid_file = root / "child.pid"
+            pid_file = root / "pids.txt"
             long_cli = root / "long_cli.py"
             long_cli.write_text(
                 "import os, subprocess, sys, time\n"
-                f"with open({str(pid_file)!r}, 'w', encoding='utf-8') as fh:\n"
-                "    fh.write(str(os.getpid()))\n"
                 "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                f"with open({str(pid_file)!r}, 'w', encoding='utf-8') as fh:\n"
+                "    fh.write(f'{os.getpid()},{child.pid}')\n"
                 "time.sleep(30)\n",
                 encoding="utf-8",
             )
@@ -5921,20 +5921,33 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(
                 runner.run("claude", [sys.executable, str(long_cli)], root, timeout_seconds=30)
             )
-            for _ in range(50):
-                if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip():
-                    break
-                await asyncio.sleep(0.05)
-            self.assertTrue(pid_file.exists())
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            pids: list[int] = []
+            try:
+                for _ in range(50):
+                    if pid_file.exists():
+                        raw = pid_file.read_text(encoding="utf-8").strip()
+                        if "," in raw:
+                            pids = [int(p) for p in raw.split(",")]
+                            break
+                    await asyncio.sleep(0.05)
+                self.assertEqual(len(pids), 2)
 
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
 
-            self.assertFalse(runner.is_running)
-            with self.assertRaises(ProcessLookupError):
-                os.kill(pid, 0)
+                self.assertFalse(runner.is_running)
+                for p in pids:
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(p, 0)
+            finally:
+                for p in pids:
+                    try:
+                        os.kill(p, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        pass
 
     async def test_runner_decodes_split_utf8_incrementally(self) -> None:
         from bytey_ai_companion.agents import AgentRunner
