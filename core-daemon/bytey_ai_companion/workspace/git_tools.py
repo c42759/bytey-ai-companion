@@ -274,8 +274,9 @@ class GitToolchain:
             limit = max(s, int(end_line)) if end_line is not None else None
             try:
                 total_lines = await asyncio.to_thread(self._count_lines_up_to, target_file, limit)
-            except OSError:
-                total_lines = 0
+            except OSError as exc:
+                err = str(exc)
+                return {"ok": False, "error": err, "content": err}
             if total_lines == 0:
                 return {"ok": True, "content": "(empty file)"}
             s = min(s, total_lines)

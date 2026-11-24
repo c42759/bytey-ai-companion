@@ -6407,6 +6407,20 @@ class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(blame_res["ok"], blame_res)
         self.assertIn("line3", blame_res["content"])
 
+    async def test_blame_read_error_returns_error(self) -> None:
+        from unittest.mock import patch
+
+        git = await self._init_configured_repo()
+        locked = self.root / "locked.py"
+        locked.write_text("secret\n", encoding="utf-8")
+        self.assertTrue((await git.stage(paths=["locked.py"]))["ok"])
+        self.assertTrue((await git.commit("add locked"))["ok"])
+
+        with patch.object(git, "_count_lines_up_to", side_effect=PermissionError("Permission denied")):
+            res = await git.blame("locked.py")
+        self.assertFalse(res["ok"])
+        self.assertIn("Permission denied", res["error"])
+
 
 class TestGitDaemonIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_mcp_host_and_execute_git_tool_confirmation(self) -> None:
