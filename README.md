@@ -7,6 +7,55 @@
 
 ---
 
+## Showcase
+
+<p align="center">
+  <img src="./screenshots/2.jpg" alt="Bytey AI Companion Transcript Drawer and MCP Tool Calling" width="100%" />
+  <br />
+  <sub><strong>Transcript Drawer &amp; MCP Tools</strong> — Active provider/workspace pills, connection indicator, inline emotion badge, TTS playback controls, and collapsible tool-call results.</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./screenshots/1.jpg" alt="Notch Mode Idle Overlay" width="100%" />
+      <br />
+      <sub><strong>Notch Mode (Idle)</strong> — MacBook-style top-bar cutout with procedural Cairo eyes.</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="./screenshots/6.jpg" alt="Thinking State Rainbow Border" width="100%" />
+      <br />
+      <sub><strong>Thinking State</strong> — Circling rainbow border while processing a turn.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./screenshots/5.jpg" alt="Chat Sessions Sidebar" width="100%" />
+      <br />
+      <sub><strong>Chat Sessions Sidebar</strong> — Multi-session SQLite history with inline rename and delete.</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="./screenshots/4.jpg" alt="God Mode Active" width="100%" />
+      <br />
+      <sub><strong>God Mode</strong> — Yellow pulsing border and CLI agent delegation toggle.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./screenshots/3.jpg" alt="Auto-Accept Mode Enabled" width="100%" />
+      <br />
+      <sub><strong>Auto-Accept Toggle</strong> — Streamlined tool execution without per-action prompts.</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="./screenshots/7.jpg" alt="Libadwaita Preferences UI" width="100%" />
+      <br />
+      <sub><strong>Extension Preferences</strong> — Native 8-page Libadwaita UI synced with the daemon API.</sub>
+    </td>
+  </tr>
+</table>
+
+---
+
 ## Features
 
 ### Overlay & Visuals
