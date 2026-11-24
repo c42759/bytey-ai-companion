@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import os
 import re
 import signal
@@ -178,12 +179,12 @@ class AgentRunner:
             captured = 0
             truncated = False
             rolling_tail = ""
-            while True:
-                chunk = await stream.read(4096)
-                if not chunk:
-                    break
-                last_activity = time.monotonic()
-                text = chunk.decode("utf-8", errors="replace")
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+            def _append_text(text: str) -> None:
+                nonlocal captured, truncated, rolling_tail, last_emit
+                if not text:
+                    return
                 if not truncated:
                     remaining = capture_limit - captured
                     if remaining > 0:
@@ -195,6 +196,15 @@ class AgentRunner:
                         truncated = True
                 if on_output_tail is not None:
                     rolling_tail = (rolling_tail + text)[-300:]
+
+            while True:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    _append_text(decoder.decode(b"", final=True))
+                    break
+                last_activity = time.monotonic()
+                _append_text(decoder.decode(chunk, final=False))
+                if on_output_tail is not None:
                     now = time.monotonic()
                     if now - last_emit >= 0.6:
                         last_emit = now

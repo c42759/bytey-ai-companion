@@ -5912,6 +5912,26 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
 
+    async def test_runner_decodes_split_utf8_incrementally(self) -> None:
+        from bytey_ai_companion.agents import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Emit 4-byte UTF-8 emoji split exactly across a 4096-byte read boundary
+            cli = root / "split_utf8.py"
+            cli.write_text(
+                "import sys\n"
+                "payload = b'a' * 4094 + '🚀'.encode('utf-8') + b'done'\n"
+                "sys.stdout.buffer.write(payload)\n"
+                "sys.stdout.buffer.flush()\n",
+                encoding="utf-8",
+            )
+            runner = AgentRunner()
+            res = await runner.run("claude", [sys.executable, str(cli)], root, timeout_seconds=5)
+            self.assertEqual(res.exit_code, 0)
+            self.assertNotIn("\ufffd", res.stdout)
+            self.assertIn("🚀done", res.stdout)
+
     async def test_sync_config_reresolves_when_custom_path_cleared_or_command_changed(self) -> None:
         from bytey_ai_companion.agents import AgentRegistry
         from bytey_ai_companion.config import AgentsConfig, CustomCLIAgentConfig, ExternalAgentOverride
