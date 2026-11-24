@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -173,20 +174,39 @@ def _resolve_binary(binary: str, custom_path: str = "") -> str:
     return shutil.which(binary, path=_augmented_search_path()) or ""
 
 
-async def _terminate_and_reap(proc: asyncio.subprocess.Process | None) -> None:
-    """Terminate/kill and reap a subprocess if still running."""
-    if proc is None or proc.returncode is not None:
+async def _terminate_and_reap(
+    proc: asyncio.subprocess.Process | None,
+    pgid: int | None = None,
+) -> None:
+    """Terminate/kill the probe process group, close pipes, and reap with bounded wait."""
+    if proc is None and pgid is None:
         return
-    try:
-        proc.kill()
-    except ProcessLookupError:
-        pass
-    except Exception:
-        pass
-    try:
-        await proc.wait()
-    except Exception:
-        pass
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception:
+            pass
+    if proc is not None:
+        for stream in (proc.stdout, proc.stderr):
+            transport = getattr(stream, "_transport", None)
+            if transport is not None:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1.0)
+        except Exception:
+            pass
 
 
 async def _probe_version(binary_path: str, version_args: tuple[str, ...]) -> str:
@@ -194,6 +214,7 @@ async def _probe_version(binary_path: str, version_args: tuple[str, ...]) -> str
     if not binary_path:
         return ""
     proc: asyncio.subprocess.Process | None = None
+    pgid: int | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             binary_path,
@@ -201,7 +222,12 @@ async def _probe_version(binary_path: str, version_args: tuple[str, ...]) -> str
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
+        try:
+            pgid = os.getpgid(proc.pid)
+        except Exception:
+            pgid = proc.pid
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=2.0)
         raw = (stdout or stderr or b"").decode("utf-8", errors="replace").strip()
         if not raw:
@@ -209,13 +235,13 @@ async def _probe_version(binary_path: str, version_args: tuple[str, ...]) -> str
         first_line = raw.splitlines()[0].strip()
         return first_line[:120]
     except asyncio.TimeoutError:
-        await _terminate_and_reap(proc)
+        await _terminate_and_reap(proc, pgid)
         return ""
     except asyncio.CancelledError:
-        await _terminate_and_reap(proc)
+        await _terminate_and_reap(proc, pgid)
         raise
     except Exception:
-        await _terminate_and_reap(proc)
+        await _terminate_and_reap(proc, pgid)
         return ""
 
 
