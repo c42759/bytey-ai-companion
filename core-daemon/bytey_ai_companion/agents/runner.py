@@ -259,15 +259,38 @@ class AgentRunner:
                     await self.cancel()
                     return
 
+        stdout_task = asyncio.create_task(_read_stream(proc.stdout, stdout_chunks, "stdout"))
+        stderr_task = asyncio.create_task(_read_stream(proc.stderr, stderr_chunks, "stderr"))
+        wait_task = asyncio.create_task(proc.wait())
         watchdog_task = asyncio.create_task(_inactivity_watchdog())
         try:
-            await asyncio.gather(
-                _read_stream(proc.stdout, stdout_chunks, "stdout"),
-                _read_stream(proc.stderr, stderr_chunks, "stderr"),
-                proc.wait(),
+            done, _pending = await asyncio.wait(
+                {stdout_task, stderr_task, wait_task},
+                return_when=asyncio.ALL_COMPLETED,
             )
+            for t in done:
+                exc = t.exception()
+                if exc is not None:
+                    raise exc
         except asyncio.CancelledError:
             await self.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True),
+                    timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                for t in (stdout_task, stderr_task, wait_task):
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True)
+                for stream in (proc.stdout, proc.stderr):
+                    transport = getattr(stream, "_transport", None)
+                    if transport is not None:
+                        try:
+                            transport.close()
+                        except Exception:
+                            pass
             raise
         finally:
             if not watchdog_task.done():
