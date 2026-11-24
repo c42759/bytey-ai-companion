@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
@@ -205,6 +206,12 @@ export class TranscriptDrawer {
         const sizes = this._getIconSizes();
         if (this._closeIcon)
             this._closeIcon.icon_size = sizes.close;
+        if (this._godModeIcon)
+            this._godModeIcon.icon_size = sizes.close;
+        if (this._autoAcceptIcon)
+            this._autoAcceptIcon.icon_size = sizes.close;
+        if (this._clearIcon)
+            this._clearIcon.icon_size = sizes.close;
         if (this._sidebarToggleIcon)
             this._sidebarToggleIcon.icon_size = sizes.close;
         if (this._sidebarNewIcon)
@@ -319,41 +326,63 @@ export class TranscriptDrawer {
 
         header.add_child(new St.Widget({x_expand: true}));
 
+        const extDir = Gio.File.new_for_uri(import.meta.url).get_parent();
+        const iconSize = this._getIconSizes().close;
+        this._godModeIcon = new St.Icon({
+            gicon: Gio.FileIcon.new(
+                extDir.resolve_relative_path('icons/bytey-god-mode-symbolic.svg')
+            ),
+            icon_size: iconSize,
+        });
         this._godModeBtn = new St.Button({
             style_class: 'bytey-god-mode-btn',
-            label: 'God Mode',
             toggle_mode: true,
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
-            accessible_name: 'Toggle God Mode multi-CLI prompt delegation',
+            accessible_name: 'God Mode',
+            child: this._godModeIcon,
         });
         this._connect(this._godModeBtn, 'clicked', () => {
             this._toggleGodMode();
         });
+        this._bindHoverTooltip(this._godModeBtn, 'God Mode');
         header.add_child(this._godModeBtn);
 
+        this._autoAcceptIcon = new St.Icon({
+            gicon: Gio.FileIcon.new(
+                extDir.resolve_relative_path('icons/bytey-double-check-symbolic.svg')
+            ),
+            icon_size: iconSize,
+        });
         this._autoAcceptBtn = new St.Button({
             style_class: 'bytey-auto-accept-btn',
-            label: 'Auto-Accept',
             toggle_mode: true,
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
-            accessible_name: 'Toggle auto-accept code review and workspace actions',
+            accessible_name: 'Auto-Accept',
+            child: this._autoAcceptIcon,
         });
         this._connect(this._autoAcceptBtn, 'clicked', () => {
             this._toggleAutoAccept();
         });
+        this._bindHoverTooltip(this._autoAcceptBtn, 'Auto-Accept');
         header.add_child(this._autoAcceptBtn);
 
+        this._clearIcon = new St.Icon({
+            icon_name: 'list-add-symbolic',
+            icon_size: iconSize,
+        });
         const clearBtn = new St.Button({
             style_class: 'bytey-clear-btn',
-            label: 'New Chat',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
+            accessible_name: 'New Chat',
+            child: this._clearIcon,
         });
         this._connect(clearBtn, 'clicked', () => {
             this._callbacks.onClearChat?.();
         });
+        this._bindHoverTooltip(clearBtn, 'New Chat');
         header.add_child(clearBtn);
 
         this._closeIcon = new St.Icon({
@@ -841,16 +870,24 @@ export class TranscriptDrawer {
             this._showStatusTooltip();
     }
 
-    _showStatusTooltip() {
-        if (this._destroyed || !this._isOpen || !this._statusTooltip || !this._statusIndicator)
+    _bindHoverTooltip(actor, label) {
+        this._connect(actor, 'notify::hover', () => {
+            if (actor.hover)
+                this._showTooltip(actor, label);
+            else
+                this._hideStatusTooltip();
+        });
+    }
+
+    _showTooltip(anchorActor, label) {
+        if (this._destroyed || !this._isOpen || !this._statusTooltip || !anchorActor)
             return;
-        const label = CONNECTION_STATUS_LABELS[this._connectionState] ?? CONNECTION_STATUS_LABELS.disconnected;
         this._statusTooltip.text = label;
         this._statusTooltip.visible = true;
         this._statusTooltip.get_parent()?.set_child_above_sibling(this._statusTooltip, null);
 
-        const [ix, iy] = this._statusIndicator.get_transformed_position();
-        const [iw, ih] = this._statusIndicator.get_transformed_size();
+        const [ix, iy] = anchorActor.get_transformed_position();
+        const [iw, ih] = anchorActor.get_transformed_size();
         const [, tipW] = this._statusTooltip.get_preferred_width(-1);
         const [, tipH] = this._statusTooltip.get_preferred_height(-1);
         const w = Math.max(1, Math.ceil(tipW || 72));
@@ -862,6 +899,11 @@ export class TranscriptDrawer {
         const targetY = aboveY < area.y ? Math.round(iy + ih + 6) : aboveY;
         const clamped = this._positionManager.clampToMonitor(rawX, targetY, w, h, this._monitorIndex);
         this._statusTooltip.set_position(clamped.x, clamped.y);
+    }
+
+    _showStatusTooltip() {
+        const label = CONNECTION_STATUS_LABELS[this._connectionState] ?? CONNECTION_STATUS_LABELS.disconnected;
+        this._showTooltip(this._statusIndicator, label);
     }
 
     _hideStatusTooltip() {

@@ -280,6 +280,9 @@
 }
 
 .bytey-sidebar-toggle-btn,
+.bytey-god-mode-btn,
+.bytey-auto-accept-btn,
+.bytey-clear-btn,
 .bytey-close-btn {
   width: 1.85em;
   padding: 0;
