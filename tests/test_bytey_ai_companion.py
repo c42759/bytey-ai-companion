@@ -5751,6 +5751,30 @@ class TestWorkspaceToolchain(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client2._args, ["/tmp/ws_beta/server.py"])  # type: ignore[attr-defined]
             self.assertEqual(client2._env["PROJECT_DIR"], "/tmp/ws_beta")  # type: ignore[attr-defined]
 
+    async def test_unknown_workspace_tool_returns_error_dict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=root / "cfg",
+                data_dir=root / "data",
+                llm_router=_MockLLMRouter(),
+            )
+            daemon.config_manager.update_config({"workspace": {"active_path": str(ws)}})
+
+            async def _deny(*_a: Any, **_k: Any) -> bool:
+                return False
+
+            res = await daemon._execute_workspace_tool(
+                "nonexistent_tool", {}, daemon.config_manager.config, _deny
+            )
+            self.assertIsInstance(res, dict)
+            self.assertFalse(res["ok"])
+            self.assertIn("Unknown workspace tool", res["error"])
+
 
 class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
     """Tests for AgentRegistry, AgentRunner, God Mode API, and bytey_agent__run."""

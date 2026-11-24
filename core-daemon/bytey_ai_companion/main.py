@@ -1198,6 +1198,7 @@ class ByteyDaemon:
                 }
         except (ValueError, FileNotFoundError, NotADirectoryError, PermissionError, OSError) as exc:
             return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": f"Unknown workspace tool: {tool_name!r}"}
 
     @staticmethod
     def _build_git_tools() -> list[dict[str, Any]]:
@@ -1584,7 +1585,6 @@ class ByteyDaemon:
             return await handler()
         except (ValueError, FileNotFoundError, NotADirectoryError, PermissionError, OSError) as exc:
             return {"ok": False, "error": str(exc)}
-        return {"ok": False, "error": f"Unknown workspace tool: {tool_name!r}"}
 
     def _track_task(self, coro: Any) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
