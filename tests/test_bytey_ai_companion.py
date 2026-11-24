@@ -6195,6 +6195,37 @@ class TestGitToolchain(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await git.stage(paths=["/etc/passwd"])
 
+    async def test_large_output_bounded_and_drained(self) -> None:
+        from bytey_ai_companion.workspace.git_tools import MAX_GIT_BYTES
+
+        git = await self._init_configured_repo()
+        big_file = self.root / "big.txt"
+        big_file.write_text(("A" * 100 + "\n") * 800, encoding="utf-8")
+        self.assertTrue((await git.stage(paths=["big.txt"]))["ok"])
+        diff_res = await git.diff(staged=True)
+        self.assertTrue(diff_res["ok"])
+        self.assertIn("[Truncated at 32 KiB]", diff_res["content"])
+        self.assertLessEqual(len(diff_res["content"].encode("utf-8")), MAX_GIT_BYTES + 128)
+
+    async def test_subdirectory_of_parent_repo_is_rejected(self) -> None:
+        from bytey_ai_companion.workspace.git_tools import GitToolchain
+
+        await self._init_configured_repo()
+        sibling = self.root / "sibling.txt"
+        sibling.write_text("keep\n", encoding="utf-8")
+        sub = self.root / "sub"
+        sub.mkdir()
+        (sub / "local.txt").write_text("sub\n", encoding="utf-8")
+
+        sub_git = GitToolchain(sub)
+        self.assertFalse(await sub_git.is_repo())
+        st_res = await sub_git.status()
+        self.assertFalse(st_res["ok"])
+        self.assertIn("Not a git repository", st_res["error"])
+        stage_res = await sub_git.stage(all_files=True)
+        self.assertFalse(stage_res["ok"])
+        self.assertEqual(sibling.read_text(encoding="utf-8"), "keep\n")
+
 
 class TestGitDaemonIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_mcp_host_and_execute_git_tool_confirmation(self) -> None:

@@ -39,10 +39,31 @@ ALWAYS_CONFIRM_GIT_TOOLS: frozenset[str] = frozenset(
 )
 
 
-def _cap_output(raw: bytes) -> str:
-    if len(raw) > MAX_GIT_BYTES:
+def _cap_output(raw: bytes, truncated: bool = False) -> str:
+    if truncated or len(raw) > MAX_GIT_BYTES:
         return raw[:MAX_GIT_BYTES].decode("utf-8", errors="replace") + "\n[Truncated at 32 KiB]"
     return raw.decode("utf-8", errors="replace")
+
+
+async def _read_bounded_stream(
+    stream: asyncio.StreamReader | None, max_bytes: int
+) -> tuple[bytes, bool]:
+    """Drain stream to EOF while keeping at most max_bytes in memory."""
+    if stream is None:
+        return b"", False
+    buf = bytearray()
+    truncated = False
+    while True:
+        chunk = await stream.read(4096)
+        if not chunk:
+            break
+        if not truncated:
+            remaining = max_bytes - len(buf)
+            if remaining > 0:
+                buf.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                truncated = True
+    return bytes(buf), truncated
 
 
 class GitToolchain:
@@ -93,11 +114,19 @@ class GitToolchain:
             "-C",
             str(self.root),
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            (stdout_b, stdout_trunc), (stderr_b, stderr_trunc), _ = await asyncio.wait_for(
+                asyncio.gather(
+                    _read_bounded_stream(proc.stdout, MAX_GIT_BYTES),
+                    _read_bounded_stream(proc.stderr, MAX_GIT_BYTES),
+                    proc.wait(),
+                ),
+                timeout=timeout_s,
+            )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
@@ -111,19 +140,27 @@ class GitToolchain:
         return {
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,
-            "stdout": _cap_output(stdout_b),
-            "stderr": _cap_output(stderr_b),
+            "stdout": _cap_output(stdout_b, stdout_trunc),
+            "stderr": _cap_output(stderr_b, stderr_trunc),
             "timed_out": False,
         }
 
     async def is_repo(self) -> bool:
-        """Return True when self.root is inside a Git work tree."""
+        """Return True only when self.root is the Git worktree root."""
         res = await self._run_git(
-            ["rev-parse", "--is-inside-work-tree"],
+            ["rev-parse", "--show-toplevel"],
             timeout_s=5.0,
             require_repo=False,
         )
-        return bool(res["ok"] and res["stdout"].strip() == "true")
+        if not res["ok"]:
+            return False
+        toplevel = res["stdout"].strip()
+        if not toplevel:
+            return False
+        try:
+            return Path(toplevel).resolve() == self.root.resolve()
+        except OSError:
+            return False
 
     @staticmethod
     def format_result(res: dict[str, Any], empty_msg: str = "(ok)") -> dict[str, Any]:
