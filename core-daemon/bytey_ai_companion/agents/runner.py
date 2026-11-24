@@ -97,6 +97,7 @@ class AgentRunner:
 
     def __init__(self) -> None:
         self._active_proc: asyncio.subprocess.Process | None = None
+        self._active_pgid: int | None = None
         self._cancelled: bool = False
 
     @property
@@ -105,36 +106,63 @@ class AgentRunner:
         return self._active_proc is not None and self._active_proc.returncode is None
 
     async def cancel(self) -> bool:
-        """Terminate the active CLI process group cleanly."""
+        """Terminate the active CLI process group cleanly, even if leader already exited."""
         proc = self._active_proc
-        if proc is None or proc.returncode is not None:
+        pgid = self._active_pgid
+        if pgid is None and proc is not None and proc.returncode is None:
+            try:
+                pgid = os.getpgid(proc.pid)
+            except Exception:
+                pgid = proc.pid
+        if (proc is None or proc.returncode is not None) and pgid is None:
             return False
         self._cancelled = True
-        try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            return False
-        except Exception:
+        signalled = False
+        if pgid is not None:
             try:
-                proc.terminate()
+                os.killpg(pgid, signal.SIGTERM)
+                signalled = True
+            except ProcessLookupError:
+                self._active_pgid = None
+                if proc is None or proc.returncode is not None:
+                    return False
             except Exception:
                 pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
+        if not signalled and proc is not None and proc.returncode is None:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.terminate()
+                signalled = True
             except Exception:
+                pass
+        if proc is not None and proc.returncode is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                if pgid is not None:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        pass
                 try:
                     proc.kill()
                 except Exception:
                     pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except Exception:
+                    pass
+        elif pgid is not None and signalled:
+            # Leader exited, but descendants in pgid may still hold pipes open; escalate to SIGKILL if still alive.
+            await asyncio.sleep(0.05)
             try:
-                await proc.wait()
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             except Exception:
                 pass
-        return True
+        return signalled
 
     async def run(
         self,
@@ -162,6 +190,10 @@ class AgentRunner:
             start_new_session=True,
         )
         self._active_proc = proc
+        try:
+            self._active_pgid = os.getpgid(proc.pid)
+        except Exception:
+            self._active_pgid = proc.pid
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
@@ -245,6 +277,7 @@ class AgentRunner:
                 except asyncio.CancelledError:
                     pass
             self._active_proc = None
+            self._active_pgid = None
 
         duration_ms = int((time.monotonic() - started) * 1000)
         stdout_text = "".join(stdout_chunks)
