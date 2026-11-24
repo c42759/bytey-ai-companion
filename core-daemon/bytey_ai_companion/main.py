@@ -2597,7 +2597,7 @@ class ByteyDaemon:
                                     "summary": "Approved",
                                 }
                             )
-                            return True
+                            return not self._prompt_cancel_event.is_set()
 
                         if is_skill_tool:
                             tool_res = await self._execute_skill_tool(
