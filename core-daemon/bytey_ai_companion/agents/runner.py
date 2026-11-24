@@ -49,8 +49,25 @@ def _detect_auth_hint(agent_id: str, stderr_text: str, stdout_text: str) -> str:
     return ""
 
 
-async def _collect_git_status(cwd: Path) -> str:
+async def _kill_and_reap(proc: asyncio.subprocess.Process | None) -> None:
+    """Kill and reap a subprocess if still running."""
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    except Exception:
+        pass
+    try:
+        await proc.wait()
+    except Exception:
+        pass
+
+
+async def _collect_git_status(cwd: Path, *, timeout_s: float = 3.0) -> str:
     """Return short git status if cwd is inside a git repository."""
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "git",
@@ -61,11 +78,16 @@ async def _collect_git_status(cwd: Path) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         if proc.returncode == 0:
             return stdout.decode("utf-8", errors="replace").strip()[:4000]
+    except asyncio.TimeoutError:
+        await _kill_and_reap(proc)
+    except asyncio.CancelledError:
+        await _kill_and_reap(proc)
+        raise
     except Exception:
-        pass
+        await _kill_and_reap(proc)
     return ""
 
 

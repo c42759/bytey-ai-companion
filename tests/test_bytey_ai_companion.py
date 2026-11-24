@@ -5945,6 +5945,33 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(synced["claude"].resolved_path, str(bin_a))
             self.assertEqual(synced["mycli"].resolved_path, str(bin_b))
 
+    async def test_collect_git_status_timeout_kills_and_reaps_process(self) -> None:
+        from unittest.mock import patch
+        from bytey_ai_companion.agents import runner as runner_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_file = root / "git.pid"
+            orig_exec = asyncio.create_subprocess_exec
+
+            async def _fake_exec(*_args: Any, **_kwargs: Any) -> asyncio.subprocess.Process:
+                return await orig_exec(
+                    sys.executable,
+                    "-c",
+                    f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(30)",
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+
+            with patch.object(runner_mod.asyncio, "create_subprocess_exec", side_effect=_fake_exec):
+                out = await runner_mod._collect_git_status(root, timeout_s=0.15)
+            self.assertEqual(out, "")
+            self.assertTrue(pid_file.exists())
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
     async def test_daemon_god_mode_routes_slash_command_and_run_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
