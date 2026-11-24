@@ -107,6 +107,10 @@ class AgentRunner:
                     proc.kill()
                 except Exception:
                     pass
+            try:
+                await proc.wait()
+            except Exception:
+                pass
         return True
 
     async def run(
@@ -139,26 +143,40 @@ class AgentRunner:
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         last_emit = 0.0
+        capture_limit = max(0, int(max_output_chars))
 
         async def _read_stream(
             stream: asyncio.StreamReader | None,
             sink: list[str],
+            stream_name: str,
         ) -> None:
             nonlocal last_emit, last_activity
             if stream is None:
                 return
+            captured = 0
+            truncated = False
+            rolling_tail = ""
             while True:
                 chunk = await stream.read(4096)
                 if not chunk:
                     break
                 last_activity = time.monotonic()
                 text = chunk.decode("utf-8", errors="replace")
-                sink.append(text)
+                if not truncated:
+                    remaining = capture_limit - captured
+                    if remaining > 0:
+                        piece = text[:remaining]
+                        sink.append(piece)
+                        captured += len(piece)
+                    if len(text) > remaining:
+                        sink.append(f"\n... [{stream_name} truncated]")
+                        truncated = True
                 if on_output_tail is not None:
+                    rolling_tail = (rolling_tail + text)[-300:]
                     now = time.monotonic()
                     if now - last_emit >= 0.6:
                         last_emit = now
-                        tail = "".join(sink)[-300:].strip()
+                        tail = rolling_tail.strip()
                         if tail:
                             try:
                                 await on_output_tail(tail)
@@ -180,10 +198,13 @@ class AgentRunner:
         watchdog_task = asyncio.create_task(_inactivity_watchdog())
         try:
             await asyncio.gather(
-                _read_stream(proc.stdout, stdout_chunks),
-                _read_stream(proc.stderr, stderr_chunks),
+                _read_stream(proc.stdout, stdout_chunks, "stdout"),
+                _read_stream(proc.stderr, stderr_chunks, "stderr"),
                 proc.wait(),
             )
+        except asyncio.CancelledError:
+            await self.cancel()
+            raise
         finally:
             if not watchdog_task.done():
                 watchdog_task.cancel()
@@ -196,10 +217,6 @@ class AgentRunner:
         duration_ms = int((time.monotonic() - started) * 1000)
         stdout_text = "".join(stdout_chunks)
         stderr_text = "".join(stderr_chunks)
-        if len(stdout_text) > max_output_chars:
-            stdout_text = stdout_text[:max_output_chars] + "\n... [stdout truncated]"
-        if len(stderr_text) > max_output_chars:
-            stderr_text = stderr_text[:max_output_chars] + "\n... [stderr truncated]"
 
         session_match = _SESSION_ID_RE.search(stdout_text)
         session_id = session_match.group(1) if session_match else ""

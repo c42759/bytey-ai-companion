@@ -5845,6 +5845,73 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(res_silent.timed_out)
 
+    async def test_runner_bounds_output_during_read_and_streams_tail(self) -> None:
+        from bytey_ai_companion.agents import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            noisy_cli = root / "noisy_cli.py"
+            noisy_cli.write_text(
+                "import sys, time\n"
+                "for i in range(20):\n"
+                "    print(f'line_{i:02d}_' + ('x' * 200), flush=True)\n"
+                "    time.sleep(0.04)\n"
+                "print('FINAL_TAIL_MARKER', flush=True)\n",
+                encoding="utf-8",
+            )
+            tails: list[str] = []
+
+            async def _on_tail(tail: str) -> None:
+                tails.append(tail)
+
+            runner = AgentRunner()
+            res = await runner.run(
+                "claude",
+                [sys.executable, str(noisy_cli)],
+                root,
+                timeout_seconds=5,
+                max_output_chars=120,
+                on_output_tail=_on_tail,
+            )
+            self.assertEqual(res.exit_code, 0)
+            self.assertIn("... [stdout truncated]", res.stdout)
+            self.assertLessEqual(len(res.stdout), 160)
+            self.assertTrue(any("line_" in t for t in tails))
+
+    async def test_runner_task_cancellation_terminates_process_group(self) -> None:
+        from bytey_ai_companion.agents import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_file = root / "child.pid"
+            long_cli = root / "long_cli.py"
+            long_cli.write_text(
+                "import os, subprocess, sys, time\n"
+                f"with open({str(pid_file)!r}, 'w', encoding='utf-8') as fh:\n"
+                "    fh.write(str(os.getpid()))\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            runner = AgentRunner()
+            task = asyncio.create_task(
+                runner.run("claude", [sys.executable, str(long_cli)], root, timeout_seconds=30)
+            )
+            for _ in range(50):
+                if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip():
+                    break
+                await asyncio.sleep(0.05)
+            self.assertTrue(pid_file.exists())
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+            self.assertFalse(runner.is_running)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
     async def test_daemon_god_mode_routes_slash_command_and_run_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
