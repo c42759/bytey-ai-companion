@@ -186,6 +186,7 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "workspace_auto_load_rules": (("workspace", "auto_load_rules"), ()),
     "workspace_require_write_approval": (("workspace", "require_write_approval"), ()),
     "workspace_require_command_approval": (("workspace", "require_command_approval"), ()),
+    "agents": (("agents",), ()),
 }
 
 
@@ -905,6 +906,17 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             if self._use_flat_keys and flat_aliases:
                 patch[flat_aliases[0]] = value
                 _set_nested(self._config, (flat_aliases[0],), value)
+            elif isinstance(value, dict):
+                existing_patch = _get_nested(patch, nested_path)
+                if isinstance(existing_patch, dict):
+                    existing_patch.update(value)
+                else:
+                    _set_nested(patch, nested_path, dict(value))
+                existing_cfg = _get_nested(self._config, nested_path)
+                if isinstance(existing_cfg, dict):
+                    existing_cfg.update(value)
+                else:
+                    _set_nested(self._config, nested_path, dict(value))
             else:
                 _set_nested(patch, nested_path, value)
                 _set_nested(self._config, nested_path, value)
