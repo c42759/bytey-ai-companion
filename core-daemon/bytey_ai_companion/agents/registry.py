@@ -26,6 +26,7 @@ class CLIAgentSpec:
     autonomous_args: tuple[str, ...] = ()
     resume_args: tuple[str, ...] = ()
     version_args: tuple[str, ...] = ("--version",)
+    default_enabled: bool = True
 
 
 BUILTIN_CLI_AGENTS: tuple[CLIAgentSpec, ...] = (
@@ -242,6 +243,7 @@ class AgentRegistry:
                         binary=custom.command.strip(),
                         non_interactive_args=tuple(custom.non_interactive_args or ["-p", "{prompt}"]),
                         model_flag=custom.model_flag.strip() or "--model",
+                        default_enabled=bool(custom.enabled),
                     ),
                     True,
                 )
@@ -254,11 +256,13 @@ class AgentRegistry:
         self._specs = {spec.id: spec for spec, _ in specs}
 
         async def _inspect(spec: CLIAgentSpec, is_custom: bool) -> AgentInfo:
+            has_override = spec.id in cfg.overrides
             ov = cfg.overrides.get(spec.id, ExternalAgentOverride())
             resolved = _resolve_binary(spec.binary, ov.custom_path)
             installed = bool(resolved)
             version = await _probe_version(resolved, spec.version_args) if installed else ""
-            enabled = bool(ov.enabled) if installed else False
+            raw_enabled = ov.enabled if has_override else spec.default_enabled
+            enabled = bool(raw_enabled) if installed else False
             return AgentInfo(
                 id=spec.id,
                 display_name=spec.display_name,
@@ -289,6 +293,7 @@ class AgentRegistry:
         for spec, is_custom in self._all_specs(cfg):
             self._specs[spec.id] = spec
             prev = self._detected.get(spec.id)
+            has_override = spec.id in cfg.overrides
             ov = cfg.overrides.get(spec.id, ExternalAgentOverride())
             new_custom_path = ov.custom_path.strip()
             if not prev or new_custom_path != prev.custom_path or spec.binary != prev.binary:
@@ -297,6 +302,7 @@ class AgentRegistry:
                 resolved = prev.resolved_path
             installed = bool(resolved)
             version = prev.version if prev and installed and resolved == prev.resolved_path else ""
+            raw_enabled = ov.enabled if has_override else spec.default_enabled
             updated[spec.id] = AgentInfo(
                 id=spec.id,
                 display_name=spec.display_name,
@@ -304,7 +310,7 @@ class AgentRegistry:
                 installed=installed,
                 resolved_path=resolved,
                 version=version,
-                enabled=bool(ov.enabled) if installed else False,
+                enabled=bool(raw_enabled) if installed else False,
                 model=ov.model.strip(),
                 model_flag=spec.model_flag,
                 default_models=list(spec.default_models),

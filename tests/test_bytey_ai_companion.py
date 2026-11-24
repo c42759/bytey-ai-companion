@@ -5932,6 +5932,36 @@ class TestGodModeAndCLIAgents(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("\ufffd", res.stdout)
             self.assertIn("🚀done", res.stdout)
 
+    async def test_disabled_custom_cli_honored_in_detect_and_sync(self) -> None:
+        from bytey_ai_companion.agents import AgentRegistry
+        from bytey_ai_companion.config import AgentsConfig, CustomCLIAgentConfig, ExternalAgentOverride
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = root / "custom_tool"
+            tool.write_text("#!/bin/sh\necho 'custom 1.0'\n", encoding="utf-8")
+            tool.chmod(0o755)
+
+            reg = AgentRegistry()
+            cfg = AgentsConfig(
+                custom_agents=[
+                    CustomCLIAgentConfig(
+                        id="custom1", display_name="Custom 1", command=str(tool), enabled=False
+                    )
+                ]
+            )
+            detected = {a.id: a for a in await reg.detect_all(cfg)}
+            self.assertTrue(detected["custom1"].installed)
+            self.assertFalse(detected["custom1"].enabled)
+
+            synced = {a.id: a for a in reg.sync_config(cfg)}
+            self.assertFalse(synced["custom1"].enabled)
+
+            # Explicit per-agent override takes precedence
+            cfg.overrides["custom1"] = ExternalAgentOverride(enabled=True)
+            synced_ov = {a.id: a for a in reg.sync_config(cfg)}
+            self.assertTrue(synced_ov["custom1"].enabled)
+
     async def test_sync_config_reresolves_when_custom_path_cleared_or_command_changed(self) -> None:
         from bytey_ai_companion.agents import AgentRegistry
         from bytey_ai_companion.config import AgentsConfig, CustomCLIAgentConfig, ExternalAgentOverride
