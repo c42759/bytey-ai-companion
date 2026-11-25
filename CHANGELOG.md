@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-25
+
+### Added
+
+- Configurable island width (`island_width`, `140–450px`), drawer opacity (`chat_opacity`, `10–100%`), and persistent sidebar toggle (`chat_sidebar_open`) across `core-daemon`, `settings-ui`, and `gnome-extension` (`ec9ef5d`, `f92f8ae`).
+- `BYTEY / ECHO` procedural eye expressions (muted, love-blink, annoyed, sleepy), assistant `avatar.png`, and animated activity borders (`THINKING` rainbow, `TOOL_CALLING` 2-tone green, `God Mode` gold) (`ec9ef5d`, `f92f8ae`).
+
+### Changed
+
+- Constrained chat drawer width to `30%–90%` of screen width (`260–3000px` config bounds) and removed box shadows across island states and drawer (`ec9ef5d`, `f92f8ae`).
+
 ## [1.2.0] - 2026-11-25
 
 ### Added
@@ -83,7 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `PLAN.md` (`5f16fb1`).
 - Removed floating mode option from right-click context menu (`f253fd7`).
 
-[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/c42759/bytey-ai-companion/releases/tag/v1.0.0

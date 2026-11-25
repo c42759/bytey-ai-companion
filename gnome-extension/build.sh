@@ -62,6 +62,7 @@ assert meta.get("url"), "metadata.json missing url"
 assert meta.get("settings-schema"), "metadata.json missing settings-schema"
 assert meta.get("shell-version"), "metadata.json missing shell-version"
 for icon_rel in (
+    "icons/avatar.png",
     "icons/bytey-ai-companion.svg",
     "icons/bytey-ai-companion-symbolic.svg",
     "icons/bytey-double-check-symbolic.svg",
@@ -69,8 +70,9 @@ for icon_rel in (
 ):
     icon_path = ext_dir / icon_rel
     assert icon_path.is_file(), f"Missing icon file: {icon_path}"
-    root = ET.parse(icon_path).getroot()
-    assert root.tag.endswith("svg"), f"Invalid SVG root tag in {icon_rel}: {root.tag}"
+    if icon_rel.endswith(".svg"):
+        root = ET.parse(icon_path).getroot()
+        assert root.tag.endswith("svg"), f"Invalid SVG root tag in {icon_rel}: {root.tag}"
 PY
 
   glib-compile-schemas --strict --dry-run "${EXT_DIR}/schemas"
@@ -90,6 +92,7 @@ files = [
     "contextMenu.js",
     "extension.js",
     "eyeRenderer.js",
+    "icons/avatar.png",
     "icons/bytey-ai-companion-symbolic.svg",
     "icons/bytey-ai-companion.svg",
     "icons/bytey-double-check-symbolic.svg",

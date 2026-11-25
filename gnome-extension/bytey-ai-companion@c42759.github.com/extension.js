@@ -118,6 +118,9 @@ export default class ByteyExtension extends Extension {
             onRenameSession: (sessionId, title) => this._handleRenameSession(sessionId, title),
             onCreateSession: () => this._handleNewChat(),
             onToggleSidebar: isOpen => {
+                this._patchConfig({
+                    visuals: {chat_sidebar_open: Boolean(isOpen)},
+                }).catch(() => {});
                 if (isOpen)
                     this._refreshSessionsList().catch(() => {});
             },

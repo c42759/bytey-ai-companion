@@ -764,11 +764,16 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         const drawerGroup = new Adw.PreferencesGroup({title: 'Chat Drawer'});
         const densityRow = makeComboRow('Chat Density', CHAT_DENSITIES);
-        const chatWidthRow = makeSpinRow('Chat Width (px)', 260, 900, 10);
+        const islandWidthRow = makeSpinRow('Island Width (px)', 140, 450, 4);
+        drawerGroup.add(islandWidthRow);
+
+        const chatWidthRow = makeSpinRow('Chat Width (px)', 260, 3000, 10);
         const chatHeightRow = makeSpinRow('Chat Height (px)', 220, 900, 10);
+        const chatOpacityRow = makeSpinRow('Chat Opacity (%)', 10, 100, 5);
         drawerGroup.add(densityRow);
         drawerGroup.add(chatWidthRow);
         drawerGroup.add(chatHeightRow);
+        drawerGroup.add(chatOpacityRow);
         visualsPage.add(drawerGroup);
 
         const testAnimGroup = new Adw.PreferencesGroup({
@@ -2477,8 +2482,10 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 }
 
                 setComboText(densityRow, visuals.chat_density ?? 'comfortable');
+                islandWidthRow.set_value(Number(visuals.island_width ?? 140));
                 chatWidthRow.set_value(Number(visuals.chat_width ?? 380));
                 chatHeightRow.set_value(Number(visuals.chat_height ?? 420));
+                chatOpacityRow.set_value(Number(visuals.chat_opacity ?? 96));
 
                 posModeRow.set_selected(positionModeIndexForValue(visuals.position_mode ?? 'fixed'));
                 monitorRow.set_value(Number(visuals.monitor_index ?? 0));
@@ -2960,12 +2967,20 @@ export default class ByteyPreferences extends ExtensionPreferences {
             patchConfig({visuals: {chat_density: comboText(densityRow)}}, 'Saved chat density');
         }));
 
+        islandWidthRow.connect('notify::value', () => onUserChange(() => {
+            patchConfig({visuals: {island_width: Math.round(islandWidthRow.get_value())}}, 'Saved island width');
+        }));
+
         chatWidthRow.connect('notify::value', () => onUserChange(() => {
             patchConfig({visuals: {chat_width: Math.round(chatWidthRow.get_value())}}, 'Saved chat width');
         }));
 
         chatHeightRow.connect('notify::value', () => onUserChange(() => {
             patchConfig({visuals: {chat_height: Math.round(chatHeightRow.get_value())}}, 'Saved chat height');
+        }));
+
+        chatOpacityRow.connect('notify::value', () => onUserChange(() => {
+            patchConfig({visuals: {chat_opacity: Math.round(chatOpacityRow.get_value())}}, 'Saved chat opacity');
         }));
 
         previewAnimBtn.connect('clicked', async () => {

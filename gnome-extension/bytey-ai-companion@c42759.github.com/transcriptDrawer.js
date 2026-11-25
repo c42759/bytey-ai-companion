@@ -1202,9 +1202,10 @@ export class TranscriptDrawer {
 
         const rawWidth = Number(config.visuals?.chat_width ?? config.chat_width);
         const rawHeight = Number(config.visuals?.chat_height ?? config.chat_height);
+        const {minW, maxW} = this._getDrawerWidthBounds();
         let sizeChanged = false;
-        if (Number.isFinite(rawWidth) && rawWidth >= DRAWER_MIN_WIDTH && !this._resizing) {
-            const clampedW = Math.max(DRAWER_MIN_WIDTH, Math.min(DRAWER_MAX_WIDTH, Math.round(rawWidth)));
+        if (Number.isFinite(rawWidth) && rawWidth >= 100 && !this._resizing) {
+            const clampedW = Math.max(minW, Math.min(maxW, Math.round(rawWidth)));
             if (clampedW !== this._drawerWidth) {
                 this._drawerWidth = clampedW;
                 sizeChanged = true;
@@ -1223,6 +1224,22 @@ export class TranscriptDrawer {
         const rawDensity = String(config.visuals?.chat_density ?? config.chat_density ?? '').toLowerCase().trim();
         if (DENSITY_ORDER.includes(rawDensity))
             this._applyDensity(rawDensity);
+
+        const rawOpacity = Number(config.visuals?.chat_opacity ?? config.chat_opacity);
+        if (Number.isFinite(rawOpacity) && this._container) {
+            const pct = Math.max(10, Math.min(100, Math.round(rawOpacity)));
+            this._container.set_style(`background-color: rgba(22, 24, 29, ${(pct / 100).toFixed(2)});`);
+        }
+
+        const wantSidebar = Boolean(config.visuals?.chat_sidebar_open ?? config.chat_sidebar_open ?? false);
+        if (wantSidebar !== this._sidebarOpen && this._sidebarBox && this._container) {
+            this._sidebarOpen = wantSidebar;
+            this._sidebarBox.visible = wantSidebar;
+            this._sidebarBox.width = wantSidebar ? this._getSidebarWidth() : 0;
+            this._applyDrawerSize();
+            if (wantSidebar)
+                this._callbacks.onToggleSidebar?.(true);
+        }
 
         const wsCfg = config.workspace ?? {};
         const requireWrite = wsCfg.require_write_approval ?? true;
@@ -1310,9 +1327,10 @@ export class TranscriptDrawer {
         const inLowerHalf = this._positionManager.isInLowerHalf(b.y, b.height, this._monitorIndex);
         const heightDelta = inLowerHalf ? -dy : dy;
 
+        const {minW, maxW} = this._getDrawerWidthBounds();
         const nextW = Math.max(
-            DRAWER_MIN_WIDTH,
-            Math.min(DRAWER_MAX_WIDTH, Math.round(this._resizeStartSize[0] + dx * 1.5))
+            minW,
+            Math.min(maxW, Math.round(this._resizeStartSize[0] + dx * 1.5))
         );
         const nextH = Math.max(
             DRAWER_MIN_HEIGHT,
@@ -1519,9 +1537,17 @@ export class TranscriptDrawer {
         });
     }
 
+    _getDrawerWidthBounds() {
+        const area = this._positionManager.getWorkArea(this._monitorIndex);
+        const screenW = Math.max(320, Number(area?.width ?? 1920));
+        const minW = Math.round(screenW * 0.30);
+        const maxW = Math.max(minW, Math.round(screenW * 0.90));
+        return {minW, maxW};
+    }
+
     _getEffectiveSize() {
         const area = this._positionManager.getWorkArea(this._monitorIndex);
-        const maxAvailW = Math.max(DRAWER_MIN_WIDTH, (area?.width ?? 1920) - 16);
+        const {minW, maxW} = this._getDrawerWidthBounds();
         const maxAvailH = Math.max(DRAWER_MIN_HEIGHT, (area?.height ?? 1080) - 16);
 
         let targetW = this._drawerWidth;
@@ -1533,7 +1559,7 @@ export class TranscriptDrawer {
         }
 
         return {
-            width: Math.min(maxAvailW, Math.max(DRAWER_MIN_WIDTH, targetW)),
+            width: Math.min(maxW, Math.max(minW, targetW)),
             height: Math.min(maxAvailH, Math.max(DRAWER_MIN_HEIGHT, this._drawerHeight)),
         };
     }
@@ -2549,7 +2575,7 @@ export class TranscriptDrawer {
         if (!isUser) {
             const avatarIcon = new St.Icon({
                 gicon: Gio.FileIcon.new(
-                    extDir.resolve_relative_path('icons/bytey-ai-companion.svg')
+                    extDir.resolve_relative_path('icons/avatar.png')
                 ),
                 icon_size: 26,
             });

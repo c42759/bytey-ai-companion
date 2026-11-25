@@ -57,6 +57,7 @@ export class EyeRenderer {
         this._emotion = 'neutral';
         this._animationMode = 'full';
         this._cursorTracking = true;
+        this._godMode = false;
         this._eyeColor = [0.97, 0.98, 1.0, 1.0];
         this._eyeColorHex = '#F7FAFF';
 
@@ -256,6 +257,14 @@ export class EyeRenderer {
             this._drawingArea.destroy();
             this._drawingArea = null;
         }
+    }
+
+    setGodMode(enabled) {
+        const next = Boolean(enabled);
+        if (this._godMode === next)
+            return;
+        this._godMode = next;
+        this._queueRepaint();
     }
 
     _normalizeEmotion(emotion) {
@@ -581,328 +590,245 @@ export class EyeRenderer {
         const blink = this._getBlinkFactor();
 
         const cx = width / 2;
-        const cy = height / 2;
-        const baseW = Math.max(8, Math.min(width * 0.14, height * 0.46));
-        const baseH = Math.max(10, height * 0.58);
-        const sep = Math.max(baseW * 1.05, Math.min(width * 0.16, height * 0.68));
+        const cy = height * 0.43;
+        const baseW = Math.max(7, Math.min(width * 0.12, height * 0.42));
+        const baseH = Math.max(9, height * 0.48);
+        const sep = Math.max(baseW * 1.1, Math.min(width * 0.145, height * 0.56));
         const edgePadX = Math.max(4, width * 0.04);
-        const maxTravelX = Math.max(6, (width / 2) - sep - (baseW * 0.55) - edgePadX);
-        const maxTravelY = Math.max(3, (height / 2) - (baseH * 0.52) - 2);
+        const maxTravelX = Math.max(4, (width / 2) - sep - (baseW * 0.6) - edgePadX);
+        const maxTravelY = Math.max(2, (height * 0.4) - (baseH * 0.48));
 
         let offsetX = 0;
         let offsetY = 0;
-        let leftScaleX = 1.0;
-        let leftScaleY = 1.0;
-        let rightScaleX = 1.0;
-        let rightScaleY = 1.0;
-        let leftDy = 0;
-        let rightDy = 0;
-        let leftTilt = 0;
-        let rightTilt = 0;
-        let radiusRatio = 0.5;
-        let alpha = 0.98 * this._eyeColor[3];
-        let color = [this._eyeColor[0], this._eyeColor[1], this._eyeColor[2]];
+        if (state === 'IDLE' && isFull && this._cursorTracking) {
+            offsetX = this._gazeX * maxTravelX;
+            offsetY = this._gazeY * maxTravelY;
+        } else if ((state === 'THINKING' || state === 'TOOL_CALLING') && isFull) {
+            offsetX = Math.sin(this._phase * 3.4) * (maxTravelX * 0.35);
+        }
 
         const mic = isFull ? this._smoothMicLevel : 0.45;
         const tts = isFull ? this._smoothTtsLevel : 0.5;
+        const speakScale = state === 'SPEAKING'
+            ? (isFull ? (1.0 + 0.45 * tts + 0.12 * Math.sin(this._phase * 11.0)) : 1.15)
+            : 1.0;
 
-        // 1. State baseline geometry
-        switch (state) {
-        case 'LISTENING': {
-            const auraStrength = isFull ? (0.25 + 0.65 * mic) : 0.45;
-            const pulse = isFull ? (1.0 + 0.16 * mic + 0.04 * Math.sin(this._phase * 6.0)) : 1.1;
-            leftScaleX = 1.06 * pulse;
-            rightScaleX = 1.06 * pulse;
-            leftScaleY = 1.12 * pulse * blink;
-            rightScaleY = 1.12 * pulse * blink;
-            this._drawListeningAura(cr, cx - sep, cy, baseH * 0.95, auraStrength);
-            this._drawListeningAura(cr, cx + sep, cy, baseH * 0.95, auraStrength);
-            break;
-        }
-        case 'THINKING': {
-            const orbX = isFull ? Math.sin(this._phase * 2.8) * (maxTravelX * 0.75) : maxTravelX * 0.35;
-            const orbY = isFull ? (-maxTravelY * 0.55 + Math.cos(this._phase * 5.6) * (maxTravelY * 0.35)) : -maxTravelY * 0.45;
-            offsetX = orbX;
-            offsetY = orbY;
-            leftScaleY = 0.92;
-            rightScaleY = 0.92;
-            break;
-        }
-        case 'TOOL_CALLING': {
-            radiusRatio = 0.24;
-            leftScaleX = 1.08;
-            rightScaleX = 1.08;
-            leftScaleY = 0.72;
-            rightScaleY = 0.72;
-            if (isFull)
-                offsetX = Math.sin(this._phase * 4.2) * (maxTravelX * 0.45);
-            break;
-        }
-        case 'SPEAKING': {
-            const pulse = isFull
-                ? (0.72 + 0.55 * tts + 0.08 * Math.sin(this._phase * 11.0))
-                : 0.95;
-            leftScaleY = Math.max(0.32, Math.min(1.22, pulse)) * blink;
-            rightScaleY = Math.max(0.32, Math.min(1.22, pulse)) * blink;
-            leftScaleX = 1.05;
-            rightScaleX = 1.05;
-            break;
-        }
-        case 'MUTED': {
-            alpha = 0.48 * this._eyeColor[3];
-            leftScaleY = 0.36;
-            rightScaleY = 0.36;
-            offsetY = height * 0.06;
-            break;
-        }
-        case 'ERROR': {
-            color = [1.0, 0.353, 0.373];
-            leftScaleX = 1.08;
-            rightScaleX = 1.08;
-            leftScaleY = 0.46;
-            rightScaleY = 0.46;
-            leftTilt = 0.24;
-            rightTilt = -0.24;
-            break;
-        }
-        case 'IDLE':
-        default: {
-            if (isFull && this._cursorTracking) {
-                offsetX = this._gazeX * maxTravelX;
-                offsetY = this._gazeY * maxTravelY;
-            }
-            leftScaleY = blink;
-            rightScaleY = blink;
-            break;
-        }
-        }
+        const white = [0.98, 0.99, 1.0];
+        const alpha = (state === 'MUTED' ? 0.52 : 0.98) * this._eyeColor[3];
+        const mouthX = cx + offsetX * 0.6;
+        const mouthY = height * 0.80 + offsetY * 0.35;
+        const mouthW = Math.max(10, baseW * 1.35 * (state === 'SPEAKING' ? Math.min(1.35, speakScale) : 1.0));
+        const mouthH = Math.max(2.4, height * 0.09);
 
-        // 2. Emotion modulation (when not muted/tool-locked, or explicit error emotion)
-        if (emotion === 'error') {
-            color = [1.0, 0.353, 0.373];
-            leftScaleX = 1.08;
-            rightScaleX = 1.08;
-            leftScaleY = 0.46;
-            rightScaleY = 0.46;
-            leftTilt = 0.24;
-            rightTilt = -0.24;
-        } else if (state !== 'MUTED' && state !== 'ERROR') {
-            const faceCy = height * 0.42;
-            const mouthX = cx + offsetX * 0.7;
-            const mouthY = height * 0.74 + offsetY * 0.5;
-            const blushY = faceCy + height * 0.18 + offsetY * 0.7;
-            const blushSpread = sep + baseW * 0.78;
-            const speakMouthScale = state === 'SPEAKING'
-                ? (isFull ? (1.0 + 0.45 * tts + 0.1 * Math.sin(this._phase * 12.0)) : 1.15)
-                : 1.0;
-
-            if (emotion === 'happy' && !this._blinking) {
-                const bounceY = isFull ? Math.sin(this._phase * 6.0) * (height * 0.04) : 0;
-                this._drawHappyArcs(
-                    cr,
-                    cx - sep + offsetX,
-                    faceCy + offsetY + bounceY,
-                    cx + sep + offsetX,
-                    faceCy + offsetY + bounceY,
-                    baseW * 0.7,
-                    color,
-                    alpha
-                );
-                this._drawBlushCheeks(cr, cx + offsetX, blushY + bounceY * 0.6, blushSpread, baseW * 0.52, alpha);
-                this._drawMouth(cr, mouthX, mouthY + bounceY * 0.6, 'open_smile', baseW * 0.62 * speakMouthScale, color, alpha);
-                if (isFull) {
-                    const s1 = 0.4 + 0.6 * Math.abs(Math.sin(this._phase * 3.4));
-                    const s2 = 0.4 + 0.6 * Math.abs(Math.cos(this._phase * 2.7));
-                    this._drawSparkle(cr, cx - sep - baseW * 1.15, faceCy - height * 0.16, 2.6 * s1, color, alpha * s1);
-                    this._drawSparkle(cr, cx + sep + baseW * 1.15, faceCy - height * 0.2, 2.9 * s2, color, alpha * s2);
-                }
-                return;
-            }
-            if (emotion === 'love' && !this._blinking) {
-                const beat = isFull ? (1.0 + 0.12 * Math.max(0, Math.sin(this._phase * 5.2))) : 1.05;
-                this._drawHeartEyes(
-                    cr,
-                    cx - sep + offsetX,
-                    faceCy + offsetY,
-                    cx + sep + offsetX,
-                    faceCy + offsetY,
-                    Math.min(baseW, baseH) * 0.54 * beat,
-                    color,
-                    alpha
-                );
-                this._drawBlushCheeks(cr, cx + offsetX, blushY, blushSpread, baseW * 0.52, alpha);
-                this._drawMouth(cr, mouthX, mouthY, state === 'SPEAKING' ? 'open_smile' : 'smile', baseW * 0.56 * speakMouthScale, color, alpha);
-                if (isFull) {
-                    const t = (this._phase * 0.7) % 1.0;
-                    const floatY = (faceCy - height * 0.12) - t * (height * 0.28);
-                    const floatAlpha = alpha * Math.sin(t * Math.PI);
-                    this._drawMiniHeart(cr, cx + sep + baseW * 1.05, floatY, 2.6, floatAlpha);
-                }
-                return;
-            }
-            if (emotion === 'astonished' && !this._blinking) {
-                const tremorX = isFull ? Math.sin(this._phase * 22.0) * 1.0 : 0;
-                const tremorY = isFull ? Math.cos(this._phase * 19.0) * 0.7 : 0;
-                const pulse = isFull ? (1.0 + 0.05 * Math.sin(this._phase * 10.0)) : 1.0;
-                this._drawAstonishedEyes(
-                    cr,
-                    cx - sep + offsetX + tremorX,
-                    faceCy + offsetY + tremorY,
-                    cx + sep + offsetX + tremorX,
-                    faceCy + offsetY + tremorY,
-                    baseW * 0.62 * pulse,
-                    baseH * 0.68 * pulse,
-                    color,
-                    alpha
-                );
-                this._drawMouth(cr, mouthX + tremorX * 0.5, mouthY + tremorY * 0.5, 'o', baseW * 0.34 * speakMouthScale, color, alpha);
-                return;
-            }
-            if (emotion === 'surprised' && !this._blinking) {
-                this._drawSurprisedRings(
-                    cr,
-                    cx - sep + offsetX,
-                    faceCy + offsetY,
-                    cx + sep + offsetX,
-                    faceCy + offsetY,
-                    Math.min(baseW, baseH) * 0.62,
-                    color,
-                    alpha
-                );
-                this._drawMouth(cr, mouthX, mouthY, 'o', baseW * 0.3 * speakMouthScale, color, alpha);
-                return;
-            }
-            if (emotion === 'focus') {
-                const scanX = isFull ? Math.sin(this._phase * 3.8) * (maxTravelX * 0.22) : 0;
-                this._drawHalfMoonEye(
-                    cr,
-                    cx - sep + offsetX + scanX,
-                    faceCy + offsetY,
-                    baseW * 1.05,
-                    baseH * 0.56,
-                    0,
-                    color,
-                    alpha
-                );
-                this._drawHalfMoonEye(
-                    cr,
-                    cx + sep + offsetX + scanX,
-                    faceCy + offsetY,
-                    baseW * 1.05,
-                    baseH * 0.56,
-                    0,
-                    color,
-                    alpha
-                );
-                this._drawMouth(cr, mouthX + scanX * 0.5, mouthY, state === 'SPEAKING' ? 'o' : 'flat', baseW * (state === 'SPEAKING' ? 0.26 * speakMouthScale : 0.48), color, alpha);
-                return;
-            }
-            if (emotion === 'annoyed') {
-                const glanceX = isFull ? Math.sin(this._phase * 1.8) * (maxTravelX * 0.35) : 0;
-                const annoyedColor = [1.0, 0.72, 0.38];
-                this._drawHalfMoonEye(
-                    cr,
-                    cx - sep + offsetX + glanceX,
-                    faceCy + offsetY,
-                    baseW * 1.06,
-                    baseH * 0.5,
-                    0.18,
-                    annoyedColor,
-                    alpha
-                );
-                this._drawHalfMoonEye(
-                    cr,
-                    cx + sep + offsetX + glanceX,
-                    faceCy + offsetY,
-                    baseW * 1.06,
-                    baseH * 0.5,
-                    -0.18,
-                    annoyedColor,
-                    alpha
-                );
-                this._drawMouth(cr, mouthX + glanceX * 0.4, mouthY, state === 'SPEAKING' ? 'o' : 'flat', baseW * (state === 'SPEAKING' ? 0.26 * speakMouthScale : 0.5), annoyedColor, alpha);
-                return;
-            }
-            if (emotion === 'curious') {
-                leftScaleX *= 1.15;
-                leftScaleY *= 1.12;
-                leftDy -= height * 0.05;
-                leftTilt -= 0.09;
-
-                rightScaleX *= 0.86;
-                rightScaleY *= 0.78;
-                rightDy += height * 0.04;
-                rightTilt += 0.07;
-            } else if (emotion === 'sleepy') {
-                const bob = isFull ? Math.sin(this._phase * 1.6) * (height * 0.03) : 0;
-                const sleepyAlpha = Math.min(alpha, 0.78 * this._eyeColor[3]);
-                this._drawSleepyV(
-                    cr,
-                    cx - sep + offsetX,
-                    faceCy + offsetY + bob,
-                    baseW * 0.85,
-                    color,
-                    sleepyAlpha
-                );
-                this._drawSleepyV(
-                    cr,
-                    cx + sep + offsetX,
-                    faceCy + offsetY + bob,
-                    baseW * 0.85,
-                    color,
-                    sleepyAlpha
-                );
-                this._drawMouth(cr, mouthX, mouthY + bob * 0.6, state === 'SPEAKING' ? 'o' : 'dot', baseW * 0.22 * speakMouthScale, color, sleepyAlpha);
-                if (isFull) {
-                    const t = (this._phase * 0.55) % 1.0;
-                    const zX = cx + sep + baseW * 0.95 + t * 5.0;
-                    const zY = (faceCy - height * 0.08) - t * (height * 0.26);
-                    const zAlpha = sleepyAlpha * Math.sin(t * Math.PI);
-                    this._drawFloatingZ(cr, zX, zY, 4.5 + t * 1.5, color, zAlpha);
-                }
-                return;
-            }
-        }
-
-        // 3. Draw left & right eyes
-        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
-
-        if (state === 'MUTED' || emotion === 'sleepy') {
-            this._drawDroopingLidEye(
-                cr,
-                cx - sep + offsetX,
-                cy + offsetY + leftDy,
-                baseW * leftScaleX,
-                baseH * leftScaleY
-            );
-            this._drawDroopingLidEye(
-                cr,
-                cx + sep + offsetX,
-                cy + offsetY + rightDy,
-                baseW * rightScaleX,
-                baseH * rightScaleY
-            );
+        // 1. Muted state: neutral capsule eyes with black fill and white stroke
+        if (state === 'MUTED') {
+            this._drawOutlineCapsule(cr, cx - sep + offsetX, cy + offsetY, baseW * 0.95, baseH, [0, 0, 0], white, 1.6, 0.95 * this._eyeColor[3]);
+            this._drawOutlineCapsule(cr, cx + sep + offsetX, cy + offsetY, baseW * 0.95, baseH, [0, 0, 0], white, 1.6, 0.95 * this._eyeColor[3]);
             return;
         }
 
-        this._fillTransformedCapsule(
-            cr,
-            cx - sep + offsetX,
-            cy + offsetY + leftDy,
-            baseW * leftScaleX,
-            baseH * leftScaleY,
-            leftTilt,
-            radiusRatio
-        );
-        this._fillTransformedCapsule(
-            cr,
-            cx + sep + offsetX,
-            cy + offsetY + rightDy,
-            baseW * rightScaleX,
-            baseH * rightScaleY,
-            rightTilt,
-            radiusRatio
-        );
+        // 2. Error state or error emotion: X · X + coral-red mouth bar
+        if (state === 'ERROR' || emotion === 'error') {
+            const errRed = [0.97, 0.44, 0.44];
+            const xSize = Math.min(baseW * 0.95, baseH * 0.72);
+            this._drawEchoXEye(cr, cx - sep + offsetX, cy + offsetY, xSize, white, alpha);
+            this._drawEchoXEye(cr, cx + sep + offsetX, cy + offsetY, xSize, white, alpha);
+            this._drawEchoDot(cr, cx + offsetX, cy + offsetY, Math.max(1.8, baseW * 0.2), errRed, alpha);
+            this._drawEchoMouthBar(cr, mouthX, mouthY, mouthW, mouthH, errRed, alpha);
+            return;
+        }
+
+        // 3. Activity states: Processing (THINKING/TOOL_CALLING) or God Mode (determined white eyes)
+        const isProcessing = state === 'THINKING' || state === 'TOOL_CALLING';
+        const isGodActivity = this._godMode && (emotion === 'neutral' || isProcessing);
+        if (isProcessing || isGodActivity) {
+            const eyeW = baseW * 1.25;
+            const eyeH = baseH * 0.76 * (state === 'IDLE' ? blink : 1.0);
+            this._drawEchoDeterminedEye(cr, cx - sep + offsetX, cy + offsetY, eyeW, eyeH, 0.20, white, alpha);
+            this._drawEchoDeterminedEye(cr, cx + sep + offsetX, cy + offsetY, eyeW, eyeH, -0.20, white, alpha);
+            return;
+        }
+
+        // 4. Sleepy: lower semi-circle white eyes + indigo bar + 2 sleep dots
+        if (emotion === 'sleepy') {
+            const indigo = [0.39, 0.40, 0.95];
+            const bob = isFull ? Math.sin(this._phase * 1.6) * (height * 0.025) : 0;
+            const arcR = baseW * 0.68;
+            this._drawLowerSemiCircleEye(cr, cx - sep + offsetX, cy + offsetY + bob - arcR * 0.15, arcR, white, alpha);
+            this._drawLowerSemiCircleEye(cr, cx + sep + offsetX, cy + offsetY + bob - arcR * 0.15, arcR, white, alpha);
+            this._drawEchoMouthBar(cr, mouthX, mouthY + bob * 0.5, mouthW, mouthH, indigo, alpha);
+            const p = isFull ? (0.55 + 0.45 * Math.sin(this._phase * 2.2)) : 0.9;
+            this._drawEchoDot(cr, cx + sep + baseW * 1.3, cy - baseH * 0.45, 1.5, indigo, alpha * p);
+            this._drawEchoDot(cr, cx + sep + baseW * 1.75, cy - baseH * 0.65, 2.0, indigo, alpha * p);
+            return;
+        }
+
+        // 5. Happy: upward white arc eyes + mint-green cheek dots + mint-green mouth bar
+        if (emotion === 'happy' && !this._blinking) {
+            const mint = [0.29, 0.87, 0.50];
+            const bounce = isFull ? Math.sin(this._phase * 5.5) * (height * 0.03) : 0;
+            this._drawHappyArcs(cr, cx - sep + offsetX, cy + offsetY + bounce, cx + sep + offsetX, cy + offsetY + bounce, baseW * 0.85, white, alpha);
+            this._drawEchoDot(cr, cx - sep - baseW * 0.85 + offsetX, cy + baseH * 0.35 + offsetY + bounce, 1.8, mint, alpha);
+            this._drawEchoDot(cr, cx + sep + baseW * 0.85 + offsetX, cy + baseH * 0.35 + offsetY + bounce, 1.8, mint, alpha);
+            this._drawEchoMouthBar(cr, mouthX, mouthY + bounce * 0.5, mouthW, mouthH, mint, alpha);
+            return;
+        }
+
+        // 6. Love: white heart eyes (keep hearts during blink) + pink cheek dashes + pink mouth bar
+        if (emotion === 'love') {
+            const pink = [0.96, 0.45, 0.71];
+            const beat = isFull ? (1.0 + 0.1 * Math.max(0, Math.sin(this._phase * 5.2))) : 1.04;
+            cr.save();
+            cr.translate(0, cy + offsetY);
+            cr.scale(1, blink);
+            cr.translate(0, -(cy + offsetY));
+            this._drawHeartEyes(cr, cx - sep + offsetX, cy + offsetY, cx + sep + offsetX, cy + offsetY, Math.min(baseW, baseH) * 0.64 * beat, white, alpha);
+            cr.restore();
+            this._drawEchoMouthBar(cr, cx - sep - baseW * 0.78 + offsetX, cy + baseH * 0.42 + offsetY, baseW * 0.55, mouthH * 0.85, pink, alpha);
+            this._drawEchoMouthBar(cr, cx + sep + baseW * 0.78 + offsetX, cy + baseH * 0.42 + offsetY, baseW * 0.55, mouthH * 0.85, pink, alpha);
+            this._drawEchoMouthBar(cr, mouthX, mouthY, mouthW, mouthH, pink, alpha);
+            return;
+        }
+
+        // 7. Curious: tall left pill + smaller round right eye + purple bar + top-right sparkle
+        if (emotion === 'curious') {
+            const purple = [0.65, 0.55, 0.98];
+            cr.setSourceRGBA(white[0], white[1], white[2], alpha);
+            this._fillTransformedCapsule(cr, cx - sep + offsetX, cy - height * 0.03 + offsetY, baseW * 0.95, baseH * 1.12 * blink, 0, 0.5);
+            this._fillTransformedCapsule(cr, cx + sep + offsetX, cy + height * 0.04 + offsetY, baseW * 0.92, baseW * 0.92 * blink, 0, 0.5);
+            this._drawEchoMouthBar(cr, mouthX, mouthY, mouthW, mouthH, purple, alpha);
+            const sp = isFull ? (0.65 + 0.35 * Math.sin(this._phase * 3.5)) : 1.0;
+            this._drawSparkle(cr, cx + sep + baseW * 1.5, cy - baseH * 0.55, 3.2 * sp, purple, alpha * sp);
+            return;
+        }
+
+        // 8. Surprised / Astonished: 2 large round white eyes + amber bar + 2 amber ticks
+        if (emotion === 'surprised' || emotion === 'astonished') {
+            const amber = [0.98, 0.75, 0.14];
+            const d = Math.max(baseW * 1.05, baseH * 0.78);
+            cr.setSourceRGBA(white[0], white[1], white[2], alpha);
+            this._fillTransformedCapsule(cr, cx - sep + offsetX, cy + offsetY, d, d * blink, 0, 0.5);
+            this._fillTransformedCapsule(cr, cx + sep + offsetX, cy + offsetY, d, d * blink, 0, 0.5);
+            this._drawEchoMouthBar(cr, mouthX, mouthY, mouthW, mouthH, amber, alpha);
+            this._drawEchoExclamationTicks(cr, cx + sep + baseW * 1.35, cy - baseH * 0.5, 4.0, amber, alpha);
+            return;
+        }
+
+        // 9. Focus (angled) & Annoyed (horizontal, no rotation)
+        if (emotion === 'focus' || emotion === 'annoyed') {
+            const cyan = [0.13, 0.83, 0.93];
+            const tiltL = emotion === 'annoyed' ? 0 : 0.20;
+            const tiltR = emotion === 'annoyed' ? 0 : -0.20;
+            this._drawEchoDeterminedEye(cr, cx - sep + offsetX, cy + offsetY, baseW * 1.25, baseH * 0.76 * blink, tiltL, white, alpha);
+            this._drawEchoDeterminedEye(cr, cx + sep + offsetX, cy + offsetY, baseW * 1.25, baseH * 0.76 * blink, tiltR, white, alpha);
+            this._drawEchoMouthBar(cr, mouthX, mouthY, mouthW, mouthH, cyan, alpha);
+            return;
+        }
+
+        // 9. Neutral / Default (including LISTENING / SPEAKING): 2 tall white pill eyes + cyan-blue bar
+        const blue = [0.38, 0.65, 0.98];
+        if (state === 'LISTENING') {
+            const auraStrength = isFull ? (0.25 + 0.65 * mic) : 0.45;
+            this._drawListeningAura(cr, cx - sep + offsetX, cy + offsetY, baseH * 0.9, auraStrength);
+            this._drawListeningAura(cr, cx + sep + offsetX, cy + offsetY, baseH * 0.9, auraStrength);
+        }
+        const pulseY = state === 'SPEAKING'
+            ? (isFull ? Math.max(0.4, Math.min(1.18, 0.78 + 0.4 * tts + 0.08 * Math.sin(this._phase * 10.0))) : 0.95)
+            : 1.0;
+        cr.setSourceRGBA(white[0], white[1], white[2], alpha);
+        this._fillTransformedCapsule(cr, cx - sep + offsetX, cy + offsetY, baseW * 0.95, baseH * blink * pulseY, 0, 0.5);
+        this._fillTransformedCapsule(cr, cx + sep + offsetX, cy + offsetY, baseW * 0.95, baseH * blink * pulseY, 0, 0.5);
+        this._drawEchoMouthBar(cr, mouthX, mouthY, mouthW, mouthH, blue, alpha);
+    }
+
+    _drawEchoMouthBar(cr, x, y, w, h, rgb, alpha) {
+        cr.save();
+        cr.setSourceRGBA(rgb[0], rgb[1], rgb[2], alpha);
+        this._fillTransformedCapsule(cr, x, y, w, h, 0, 0.5);
+        cr.restore();
+    }
+
+    _drawEchoDot(cr, x, y, r, rgb, alpha) {
+        cr.save();
+        cr.setSourceRGBA(rgb[0], rgb[1], rgb[2], alpha);
+        cr.arc(x, y, r, 0, 2 * Math.PI);
+        cr.fill();
+        cr.restore();
+    }
+
+    _drawEchoXEye(cr, x, y, size, rgb, alpha) {
+        const half = size * 0.46;
+        cr.save();
+        cr.setSourceRGBA(rgb[0], rgb[1], rgb[2], alpha);
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setLineWidth(Math.max(2.6, size * 0.34));
+        cr.moveTo(x - half, y - half);
+        cr.lineTo(x + half, y + half);
+        cr.moveTo(x + half, y - half);
+        cr.lineTo(x - half, y + half);
+        cr.stroke();
+        cr.restore();
+    }
+
+    _drawEchoExclamationTicks(cr, x, y, size, rgb, alpha) {
+        cr.save();
+        cr.setSourceRGBA(rgb[0], rgb[1], rgb[2], alpha);
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setLineWidth(1.8);
+        cr.moveTo(x, y + size * 0.35);
+        cr.lineTo(x + size * 0.35, y - size * 0.45);
+        cr.moveTo(x + size * 0.65, y + size * 0.65);
+        cr.lineTo(x + size * 1.15, y + size * 0.15);
+        cr.stroke();
+        cr.restore();
+    }
+
+    _drawEchoDeterminedEye(cr, x, y, w, h, tilt, rgb, alpha) {
+        const r = Math.max(1.5, Math.min(w, h) * 0.45);
+        cr.save();
+        cr.translate(x, y);
+        cr.rotate(tilt);
+        cr.setSourceRGBA(rgb[0], rgb[1], rgb[2], alpha);
+        cr.newSubPath();
+        cr.moveTo(-w / 2, -h * 0.25);
+        cr.lineTo(w / 2, -h * 0.25);
+        cr.lineTo(w / 2, h / 2 - r);
+        cr.arc(w / 2 - r, h / 2 - r, r, 0, Math.PI / 2);
+        cr.lineTo(-w / 2 + r, h / 2);
+        cr.arc(-w / 2 + r, h / 2 - r, r, Math.PI / 2, Math.PI);
+        cr.closePath();
+        cr.fill();
+        cr.restore();
+    }
+
+    _drawOutlineCapsule(cr, x, y, w, h, fillRgb, strokeRgb, lineWidth, alpha) {
+        const r = Math.min(w, h) * 0.5;
+        const hw = w / 2;
+        const hh = h / 2;
+        cr.save();
+        cr.translate(x, y);
+        cr.newSubPath();
+        cr.arc(-hw + r, -hh + r, r, Math.PI, 1.5 * Math.PI);
+        cr.arc(hw - r, -hh + r, r, 1.5 * Math.PI, 0);
+        cr.arc(hw - r, hh - r, r, 0, Math.PI / 2);
+        cr.arc(-hw + r, hh - r, r, Math.PI / 2, Math.PI);
+        cr.closePath();
+        cr.setSourceRGBA(fillRgb[0], fillRgb[1], fillRgb[2], alpha);
+        cr.fillPreserve();
+        cr.setSourceRGBA(strokeRgb[0], strokeRgb[1], strokeRgb[2], alpha);
+        cr.setLineWidth(lineWidth);
+        cr.stroke();
+        cr.restore();
+    }
+
+    _drawLowerSemiCircleEye(cr, x, y, radius, rgb, alpha) {
+        cr.save();
+        cr.setSourceRGBA(rgb[0], rgb[1], rgb[2], alpha);
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setLineWidth(Math.max(2.6, radius * 0.42));
+        cr.arc(x, y, radius, 0.12 * Math.PI, 0.88 * Math.PI);
+        cr.stroke();
+        cr.restore();
     }
 
     _drawListeningAura(cr, x, y, radius, strength) {
