@@ -716,6 +716,7 @@ class LLMRouter:
         return {
             "content": content,
             "emotion": emotion,
+            "emotion_explicit": parser.emotion is not None,
             "title": parser.captured_title,
             "tool_calls": tool_calls,
             "raw_assistant_message": _build_raw_assistant_message(

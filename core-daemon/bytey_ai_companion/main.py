@@ -2625,7 +2625,9 @@ class ByteyDaemon:
                         chat_kwargs["context_size"] = effective_context_size
                     result = await self.llm_router.generate_chat(**chat_kwargs)
                     last_result = result
-                    if result.get("emotion"):
+                    if result.get("emotion_explicit") or (
+                        result.get("emotion") and result["emotion"] != "neutral"
+                    ):
                         final_emotion = str(result["emotion"])
                     tool_calls = result.get("tool_calls") or []
                     if not tool_calls:
@@ -2864,7 +2866,9 @@ class ByteyDaemon:
                         wrapup_kwargs["context_size"] = effective_context_size
                     wrapup_res = await self.llm_router.generate_chat(**wrapup_kwargs)
                     last_result = wrapup_res
-                    if wrapup_res.get("emotion"):
+                    if wrapup_res.get("emotion_explicit") or (
+                        wrapup_res.get("emotion") and wrapup_res["emotion"] != "neutral"
+                    ):
                         final_emotion = str(wrapup_res["emotion"])
 
                 if final_emotion == "neutral":
@@ -2887,7 +2891,9 @@ class ByteyDaemon:
                     await self.tts_player.enqueue_sentence(tail)
 
                 raw_content = "".join(accumulated_parts).strip()
-                _, parsed_title, clean_reply = parse_reply_tags(raw_content)
+                parsed_emotion, parsed_title, clean_reply = parse_reply_tags(raw_content)
+                if parsed_emotion and final_emotion == "neutral":
+                    final_emotion = parsed_emotion
                 clean_reply = clean_reply.strip()
                 cleaned_parts: list[dict[str, Any]] = []
                 for part in message_parts:

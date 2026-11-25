@@ -1164,6 +1164,56 @@ class TestChunkerAndEmotions(unittest.TestCase):
                 self.assertEqual(titles, ["Async Tips"])
                 self.assertEqual(out, "Use gather.")
 
+    def test_emotion_stream_parser_mid_stream_aliases_and_brackets(self) -> None:
+        # Mid-stream emotion tag after prose (chunked & char-by-char)
+        for mode in ("chunked", "char"):
+            with self.subTest(mode=mode):
+                seen: list[str] = []
+                parser = EmotionStreamParser(on_emotion=seen.append)
+                chunks = (
+                    ["Let me check that. ", "[em", "otion:", "foc", "us] ", "Here are the specs."]
+                    if mode == "chunked"
+                    else list("Let me check that. [emotion:focus] Here are the specs.")
+                )
+                out = "".join(parser.feed(c) for c in chunks) + parser.flush()
+                self.assertEqual(parser.emotion, "focus")
+                self.assertEqual(seen, ["focus"])
+                self.assertEqual(out, "Let me check that. Here are the specs.")
+
+        # Alias tag [emotion:sorry] maps to neutral and is stripped
+        alias_seen: list[str] = []
+        alias_parser = EmotionStreamParser(on_emotion=alias_seen.append)
+        alias_out = (
+            "".join(alias_parser.feed(c) for c in ["[emotion:sorry]\n", "I am so sorry."])
+            + alias_parser.flush()
+        )
+        self.assertEqual(alias_parser.emotion, "neutral")
+        self.assertEqual(alias_seen, ["neutral"])
+        self.assertEqual(alias_out, "I am so sorry.")
+
+        # Unknown tag is still stripped without leaking raw [emotion:...]
+        unk_seen: list[str] = []
+        unk_parser = EmotionStreamParser(on_emotion=unk_seen.append)
+        unk_out = "".join(unk_parser.feed(c) for c in ["Hi [emotion:xyzzy] there!"]) + unk_parser.flush()
+        self.assertIsNone(unk_parser.emotion)
+        self.assertEqual(unk_seen, [])
+        self.assertEqual(unk_out, "Hi there!")
+
+        # Non-tag brackets remain untouched
+        bracket_parser = EmotionStreamParser()
+        bracket_out = (
+            "".join(bracket_parser.feed(c) for c in ["  [not a tag] and [link](url)."])
+            + bracket_parser.flush()
+        )
+        self.assertIsNone(bracket_parser.emotion)
+        self.assertEqual(bracket_out, "  [not a tag] and [link](url).")
+
+        # parse_reply_tags handles inline tags and aliases
+        em, ti, clean = parse_reply_tags("Checked! [emotion:sorry] My bad. [title: Laptop Specs]")
+        self.assertEqual(em, "neutral")
+        self.assertEqual(ti, "Laptop Specs")
+        self.assertEqual(clean, "Checked! My bad.")
+
 
 class TestSchemaSyncAndMCP(unittest.IsolatedAsyncioTestCase):
     """Test schema_sync round-trips and MCPClientManager against a real stdio server."""
