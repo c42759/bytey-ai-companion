@@ -6768,5 +6768,29 @@ class TestVisualsConfigBounds(unittest.TestCase):
         self.assertTrue(VisualsConfig(chat_sidebar_open=True).chat_sidebar_open)
 
 
+class TestModelDiscoverySorting(unittest.IsolatedAsyncioTestCase):
+    async def test_discover_models_sorts_case_insensitively_a_to_z(self) -> None:
+        from bytey_ai_companion.llm.router import LLMRouter
+
+        router = LLMRouter(ConfigManager())
+        router._discover_ollama_models = unittest.mock.AsyncMock(
+            return_value={
+                "models": [
+                    {"id": "qwen2.5:7b", "name": "qwen2.5:7b"},
+                    {"id": "Llama3.2:3b", "name": "Llama3.2:3b"},
+                    {"id": "gemma2:9b", "name": "gemma2:9b"},
+                    {"id": "deepseek-r1:8b", "name": "deepseek-r1:8b"},
+                ],
+                "error": None,
+            }
+        )
+        res = await router.discover_models(provider="ollama")
+        ids = [m["id"] for m in res["models"]]
+        self.assertEqual(
+            ids,
+            ["deepseek-r1:8b", "gemma2:9b", "Llama3.2:3b", "qwen2.5:7b"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

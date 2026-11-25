@@ -24,7 +24,7 @@ const DENSITY_SCALE_FACTORS = {
     comfortable: 1.0,
     spacious: 1.08,
 };
-const ENTRY_MAX_LINES = 5;
+const ENTRY_MAX_LINES = 6;
 
 const CONNECTION_STATES = ['connected', 'error', 'disconnected'];
 const CONNECTION_STATUS_LABELS = {
@@ -578,6 +578,7 @@ export class TranscriptDrawer {
             x_expand: true,
         });
         this._entry.clutter_text.set_single_line_mode(false);
+        this._entry.clutter_text.set_activatable(false);
         this._entry.clutter_text.set_line_wrap(true);
         this._entry.clutter_text.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR);
 
@@ -585,6 +586,7 @@ export class TranscriptDrawer {
             style_class: 'bytey-entry-scroll',
             hscrollbar_policy: St.PolicyType.NEVER,
             vscrollbar_policy: St.PolicyType.NEVER,
+            overlay_scrollbars: false,
             x_expand: true,
             y_align: Clutter.ActorAlign.END,
         });
@@ -610,6 +612,10 @@ export class TranscriptDrawer {
         this._connect(this._entry.clutter_text, 'text-changed', () => {
             this._syncEntryHeight();
             this._updateSkillSuggestions();
+        });
+
+        this._connect(this._entry.clutter_text, 'cursor-changed', () => {
+            this._scrollEntryToCursor();
         });
 
         this._connect(this._entry.clutter_text, 'key-press-event', (_actor, event) => {
@@ -647,7 +653,7 @@ export class TranscriptDrawer {
                 if (event.get_state() & Clutter.ModifierType.SHIFT_MASK) {
                     const ct = this._entry.clutter_text;
                     ct.delete_selection();
-                    ct.insert_unichar(0x0A);
+                    ct.insert_text('\n', ct.get_cursor_position());
                     return Clutter.EVENT_STOP;
                 }
                 this._submitEntry();
@@ -742,6 +748,35 @@ export class TranscriptDrawer {
         this._entryScroll.vscrollbar_policy = natH > maxH
             ? St.PolicyType.AUTOMATIC
             : St.PolicyType.NEVER;
+        if (natH > maxH)
+            this._scrollEntryToCursor();
+    }
+
+    _scrollEntryToCursor() {
+        if (this._destroyed || !this._entry || !this._entryScroll)
+            return;
+        if (this._entryScroll.vscrollbar_policy !== St.PolicyType.AUTOMATIC)
+            return;
+        const vadj = this._entryScroll.vadjustment;
+        if (!vadj)
+            return;
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            if (this._destroyed || !this._entry || !this._entryScroll)
+                return GLib.SOURCE_REMOVE;
+            const ct = this._entry.clutter_text;
+            const [ok, _x, y, lineH] = ct.position_to_coords(ct.get_cursor_position());
+            if (!ok)
+                return GLib.SOURCE_REMOVE;
+            const pad = 6;
+            const cur = vadj.value;
+            const page = vadj.page_size;
+            const maxVal = Math.max(0, vadj.upper - page);
+            if (y - pad < cur)
+                vadj.value = Math.max(0, y - pad);
+            else if (y + lineH + pad > cur + page)
+                vadj.value = Math.min(maxVal, y + lineH + pad - page);
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _buildSkillSuggest(parent) {
@@ -1969,6 +2004,69 @@ export class TranscriptDrawer {
             this._modelMenuBox.visible = false;
     }
 
+    _populateSearchableMenu(menuBox, placeholder, items, renderItemFn, footerFn = null) {
+        menuBox.destroy_all_children();
+        const searchEntry = new St.Entry({
+            style_class: 'bytey-menu-search',
+            hint_text: placeholder,
+            can_focus: true,
+            reactive: true,
+            x_expand: true,
+        });
+        menuBox.add_child(searchEntry);
+
+        const listBox = new St.BoxLayout({
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+        });
+        const scrollView = new St.ScrollView({
+            style_class: 'bytey-menu-scroll',
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+            overlay_scrollbars: false,
+            x_expand: true,
+        });
+        scrollView.set_child(listBox);
+        menuBox.add_child(scrollView);
+
+        const rebuildList = query => {
+            listBox.destroy_all_children();
+            const q = String(query || '').trim().toLowerCase();
+            const filtered = q
+                ? items.filter(it => it.searchText.includes(q))
+                : items;
+            if (filtered.length === 0) {
+                listBox.add_child(new St.Label({
+                    style_class: 'bytey-workspace-menu-item',
+                    text: 'No matches',
+                }));
+                return;
+            }
+            for (const item of filtered)
+                listBox.add_child(renderItemFn(item));
+        };
+
+        searchEntry.clutter_text.connect('text-changed', () => {
+            rebuildList(searchEntry.get_text());
+        });
+        searchEntry.clutter_text.connect('key-press-event', (_actor, event) => {
+            if (event.get_key_symbol() === Clutter.KEY_Escape) {
+                menuBox.visible = false;
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+
+        rebuildList('');
+        if (footerFn)
+            footerFn(menuBox);
+        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            if (!this._destroyed && menuBox.visible)
+                searchEntry.clutter_text.grab_key_focus();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     async _toggleModelMenu() {
         if (!this._modelMenuBox || this._destroyed)
             return;
@@ -1996,34 +2094,46 @@ export class TranscriptDrawer {
         }
         if (this._destroyed || !this._modelMenuBox)
             return;
-        this._modelMenuBox.destroy_all_children();
-        if (models.length === 0) {
+        const names = models
+            .map(m => String(m?.id ?? m?.name ?? m ?? '').trim())
+            .filter(Boolean);
+        const uniqueSorted = [...new Set(names)].sort((a, b) =>
+            a.localeCompare(b, undefined, {sensitivity: 'base'})
+        );
+        if (uniqueSorted.length === 0) {
+            this._modelMenuBox.destroy_all_children();
             this._modelMenuBox.add_child(new St.Label({
                 style_class: 'bytey-workspace-menu-item',
                 text: 'No models available',
             }));
             return;
         }
-        for (const m of models) {
-            const name = String(m?.name ?? m?.id ?? m ?? '').trim();
-            if (!name)
-                continue;
-            const isActive = name === this._activeModel;
-            const btn = new St.Button({
-                style_class: isActive
-                    ? 'bytey-workspace-menu-item bytey-workspace-menu-item-active'
-                    : 'bytey-workspace-menu-item',
-                label: isActive ? `✓ ${name}` : name,
-                x_expand: true,
-                x_align: Clutter.ActorAlign.START,
-                can_focus: true,
-            });
-            btn.connect('clicked', () => {
-                this._hideModelMenu();
-                this._callbacks.onSelectModel?.(name);
-            });
-            this._modelMenuBox.add_child(btn);
-        }
+        const entries = uniqueSorted.map(name => ({
+            name,
+            searchText: name.toLowerCase(),
+        }));
+        this._populateSearchableMenu(
+            this._modelMenuBox,
+            'Filter models…',
+            entries,
+            entry => {
+                const isActive = entry.name === this._activeModel;
+                const btn = new St.Button({
+                    style_class: isActive
+                        ? 'bytey-workspace-menu-item bytey-workspace-menu-item-active'
+                        : 'bytey-workspace-menu-item',
+                    label: isActive ? `✓ ${entry.name}` : entry.name,
+                    x_expand: true,
+                    x_align: Clutter.ActorAlign.START,
+                    can_focus: true,
+                });
+                btn.connect('clicked', () => {
+                    this._hideModelMenu();
+                    this._callbacks.onSelectModel?.(entry.name);
+                });
+                return btn;
+            }
+        );
     }
 
     _toggleWorkspaceMenu() {
@@ -2043,64 +2153,83 @@ export class TranscriptDrawer {
     _rebuildWorkspaceMenu() {
         if (!this._workspaceMenuBox || this._destroyed)
             return;
-        this._workspaceMenuBox.destroy_all_children();
-
         const ws = this._workspace ?? {active_path: '', recent_paths: []};
         const recent = ws.recent_paths ?? [];
+        const entries = recent.map(path => {
+            const parts = path.replace(/\/+$/, '').split('/');
+            const base = parts[parts.length - 1] || path;
+            return {
+                path,
+                base,
+                searchText: `${base} ${path}`.toLowerCase(),
+            };
+        });
 
-        if (recent.length > 0) {
-            for (const path of recent) {
-                const isActive = path === ws.active_path;
-                const parts = path.replace(/\/+$/, '').split('/');
-                const base = parts[parts.length - 1] || path;
+        const addFooter = box => {
+            if (recent.length > 0) {
+                box.add_child(new St.Widget({
+                    style_class: 'bytey-workspace-menu-sep',
+                    x_expand: true,
+                }));
+            }
+            const settingsBtn = new St.Button({
+                style_class: 'bytey-workspace-menu-item',
+                label: 'Open Workspace Settings…',
+                x_expand: true,
+                x_align: Clutter.ActorAlign.START,
+                can_focus: true,
+            });
+            settingsBtn.connect('clicked', () => {
+                this._hideWorkspaceMenu();
+                this._callbacks.onOpenWorkspaceSettings?.();
+            });
+            box.add_child(settingsBtn);
+
+            if (ws.active_path) {
+                const clearBtn = new St.Button({
+                    style_class: 'bytey-workspace-menu-item bytey-workspace-menu-clear',
+                    label: 'Clear Workspace',
+                    x_expand: true,
+                    x_align: Clutter.ActorAlign.START,
+                    can_focus: true,
+                });
+                clearBtn.connect('clicked', () => {
+                    this._hideWorkspaceMenu();
+                    this._callbacks.onSelectWorkspace?.('');
+                });
+                box.add_child(clearBtn);
+            }
+        };
+
+        if (entries.length === 0) {
+            this._workspaceMenuBox.destroy_all_children();
+            addFooter(this._workspaceMenuBox);
+            return;
+        }
+
+        this._populateSearchableMenu(
+            this._workspaceMenuBox,
+            'Filter workspaces…',
+            entries,
+            entry => {
+                const isActive = entry.path === ws.active_path;
                 const btn = new St.Button({
                     style_class: isActive
                         ? 'bytey-workspace-menu-item bytey-workspace-menu-item-active'
                         : 'bytey-workspace-menu-item',
-                    label: isActive ? `✓ ${base}  (${path})` : `📁 ${base}  (${path})`,
+                    label: isActive ? `✓ ${entry.base}  (${entry.path})` : `📁 ${entry.base}  (${entry.path})`,
                     x_expand: true,
                     x_align: Clutter.ActorAlign.START,
                     can_focus: true,
                 });
                 btn.connect('clicked', () => {
                     this._hideWorkspaceMenu();
-                    this._callbacks.onSelectWorkspace?.(path);
+                    this._callbacks.onSelectWorkspace?.(entry.path);
                 });
-                this._workspaceMenuBox.add_child(btn);
-            }
-            this._workspaceMenuBox.add_child(new St.Widget({
-                style_class: 'bytey-workspace-menu-sep',
-                x_expand: true,
-            }));
-        }
-
-        const settingsBtn = new St.Button({
-            style_class: 'bytey-workspace-menu-item',
-            label: 'Open Workspace Settings…',
-            x_expand: true,
-            x_align: Clutter.ActorAlign.START,
-            can_focus: true,
-        });
-        settingsBtn.connect('clicked', () => {
-            this._hideWorkspaceMenu();
-            this._callbacks.onOpenWorkspaceSettings?.();
-        });
-        this._workspaceMenuBox.add_child(settingsBtn);
-
-        if (ws.active_path) {
-            const clearBtn = new St.Button({
-                style_class: 'bytey-workspace-menu-item bytey-workspace-menu-clear',
-                label: 'Clear Workspace',
-                x_expand: true,
-                x_align: Clutter.ActorAlign.START,
-                can_focus: true,
-            });
-            clearBtn.connect('clicked', () => {
-                this._hideWorkspaceMenu();
-                this._callbacks.onSelectWorkspace?.('');
-            });
-            this._workspaceMenuBox.add_child(clearBtn);
-        }
+                return btn;
+            },
+            addFooter
+        );
     }
 
     /**

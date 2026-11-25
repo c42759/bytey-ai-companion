@@ -261,7 +261,7 @@ def _make_string_combo(
     subtitle: str,
     items: tuple[str, ...] | list[str],
     *,
-    searchable: bool = False,
+    searchable: bool = True,
 ) -> Adw.ComboRow:
     row = Adw.ComboRow(title=title, enable_search=searchable)
     if subtitle:
@@ -1283,7 +1283,8 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
 
             current = self.model_entry_row.get_text().strip()
             if current and current not in names:
-                names.insert(0, current)
+                names.append(current)
+            names = sorted({n for n in names if n}, key=lambda s: (s.casefold(), s))
             if not names:
                 names = [current or ""]
 
@@ -1898,6 +1899,8 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             perm_row = Adw.ComboRow(
                 title="Permission Mode",
                 subtitle=presets,
+                enable_search=True,
+                expression=Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"),
                 model=Gtk.StringList.new(perm_modes),
             )
             cur_perm = str(agent.get("permission_mode") or "accept_edits")
@@ -2447,6 +2450,8 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self.workspace_recent_row = Adw.ComboRow(
             title="Recent Work Folders",
             subtitle="Quickly switch to a previously used folder",
+            enable_search=True,
+            expression=Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"),
             model=Gtk.StringList.new(["None"]),
         )
         self.workspace_recent_row.connect("notify::selected", self._on_workspace_recent_selected)
