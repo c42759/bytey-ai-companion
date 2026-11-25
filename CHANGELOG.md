@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-25
+
+### Added
+
+- Rich Markdown rendering in GNOME Shell transcript drawer (`transcriptDrawer.js`, `stylesheet.css`): headings (`#`–`######`), bold (`**`/`__`), italic (`*`/`_`), bold+italic (`***`/`___`), strikethrough (`~~`), inline code spans, `[text](url)` links, unordered/ordered lists with indentation, blockquotes (`>`), and horizontal rules (`---`/`***`/`___`), with safe Pango markup escaping for streaming replies (`422a007`).
+
+### Fixed
+
+- Duplicate MCP server URL validation across `core-daemon` (`schema_sync.py`, `config.py`), `settings-ui` (`window.py`), and `gnome-extension` (`prefs.js`) so no two configured servers can share the same normalized URL (`b039196`).
+
 ## [1.4.0] - 2026-11-25
 
 ### Added
@@ -109,7 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `PLAN.md` (`5f16fb1`).
 - Removed floating mode option from right-click context menu (`f253fd7`).
 
-[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.1.0...v1.2.0

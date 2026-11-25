@@ -611,6 +611,74 @@
   color: #f8fafc;
 }
 
+.bytey-md-heading {
+  font-weight: 700;
+  color: #ffffff;
+  margin-top: 0.25em;
+  margin-bottom: 0.1em;
+}
+
+.bytey-md-h1 {
+  font-size: 1.32em;
+}
+
+.bytey-md-h2 {
+  font-size: 1.2em;
+}
+
+.bytey-md-h3 {
+  font-size: 1.1em;
+}
+
+.bytey-md-h4,
+.bytey-md-h5,
+.bytey-md-h6 {
+  font-size: 1.02em;
+  color: #e2e8f0;
+}
+
+.bytey-md-list-row {
+  spacing: 0.45em;
+  padding-left: 0.25em;
+}
+
+.bytey-md-list-indent-1 {
+  padding-left: 1.15em;
+}
+
+.bytey-md-list-indent-2 {
+  padding-left: 2.05em;
+}
+
+.bytey-md-list-indent-3 {
+  padding-left: 2.95em;
+}
+
+.bytey-md-list-indent-4 {
+  padding-left: 3.85em;
+}
+
+.bytey-md-list-marker {
+  font-weight: 700;
+  color: #38bdf8;
+  min-width: 1.1em;
+}
+
+.bytey-md-blockquote {
+  border-left-width: 3px;
+  border-color: rgba(56, 189, 248, 0.65);
+  background-color: rgba(15, 23, 42, 0.45);
+  border-radius: 0.35em;
+  padding: 0.35em 0.6em;
+  spacing: 0.25em;
+}
+
+.bytey-md-hr {
+  height: 1px;
+  background-color: rgba(148, 163, 184, 0.3);
+  margin: 0.3em 0;
+}
+
 .bytey-code-block {
   background-color: rgba(2, 6, 23, 0.72);
   border: 1px solid rgba(148, 163, 184, 0.25);

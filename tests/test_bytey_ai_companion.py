@@ -3213,6 +3213,63 @@ assert.strictEqual(drawerB._messages[2].tool_calls.length, 1);
             failure_context="node transcriptDrawer updateToolCall test failed",
         )
 
+    def test_markdown_rendering_blocks_and_inline_markup(self) -> None:
+        ext_dir = REPO_ROOT / "gnome-extension" / "bytey-ai-companion@c42759.github.com"
+        drawer_js = (ext_dir / "transcriptDrawer.js").read_text(encoding="utf-8")
+        css_text = (ext_dir / "stylesheet.css").read_text(encoding="utf-8")
+
+        for selector in (
+            ".bytey-md-heading",
+            ".bytey-md-h1",
+            ".bytey-md-h2",
+            ".bytey-md-h3",
+            ".bytey-md-list-row",
+            ".bytey-md-list-marker",
+            ".bytey-md-blockquote",
+            ".bytey-md-hr",
+        ):
+            self.assertIn(selector, css_text)
+
+        fmt_method = self._extract_js_method(drawer_js, "_formatInlineMarkup(text) {")
+        blocks_method = self._extract_js_method(drawer_js, "_parseMarkdownBlocks(text) {")
+        self._run_node_script(
+            r"""
+const assert = require('assert');
+const [fmtMethod, blocksMethod] = process.argv.slice(1);
+const GLib = {
+    markup_escape_text(s) {
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    },
+};
+const methods = new Function('GLib', `return ({ ${fmtMethod}, ${blocksMethod} });`)(GLib);
+
+const inline = methods._formatInlineMarkup('***both*** **bold** *italic* ~~old~~ `x < y` [site](https://example.com) **unclosed');
+assert.ok(inline.includes('<b><i>both</i></b>'));
+assert.ok(inline.includes('<b>bold</b>'));
+assert.ok(inline.includes('<i>italic</i>'));
+assert.ok(inline.includes('<s>old</s>'));
+assert.ok(inline.includes('<tt><span background="#1e293b" foreground="#e2e8f0"> x &lt; y </span></tt>'));
+assert.ok(inline.includes('<span foreground="#38bdf8" underline="single">site</span>'));
+assert.ok(inline.endsWith('**unclosed'));
+
+const blocks = methods._parseMarkdownBlocks('# Title\n\n* First\n  1. Nested\n> Quote\n---\nTail');
+assert.deepStrictEqual(
+    blocks.map(b => b.type),
+    ['heading', 'list_item', 'list_item', 'blockquote', 'hr', 'paragraph']
+);
+assert.strictEqual(blocks[0].level, 1);
+assert.strictEqual(blocks[1].marker, '•');
+assert.strictEqual(blocks[2].indent, 1);
+assert.strictEqual(blocks[2].marker, '1.');
+""",
+            fmt_method,
+            blocks_method,
+            failure_context="node transcriptDrawer markdown rendering test failed",
+        )
+
     def test_drawer_header_alignment_and_connection_status_indicator(self) -> None:
         css_text = (GNOME_EXT_DIR / "stylesheet.css").read_text(encoding="utf-8")
         self.assertNotIn(".bytey-status-dot-online", css_text)
