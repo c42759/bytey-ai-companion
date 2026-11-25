@@ -6755,5 +6755,13 @@ class TestAttachments(unittest.IsolatedAsyncioTestCase):
                 await daemon.stop()
 
 
+class TestVisualsConfigBounds(unittest.TestCase):
+    def test_island_width_default_and_clamping(self) -> None:
+        self.assertEqual(VisualsConfig().island_width, 140)
+        self.assertEqual(VisualsConfig(island_width=50).island_width, 140)
+        self.assertEqual(VisualsConfig(island_width=900).island_width, 450)
+        self.assertEqual(VisualsConfig(island_width=240).island_width, 240)
+
+
 if __name__ == "__main__":
     unittest.main()

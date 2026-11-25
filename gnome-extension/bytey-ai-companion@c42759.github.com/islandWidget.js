@@ -409,17 +409,23 @@ export class IslandWidget {
      *
      * @returns {{ x: number, y: number, width: number, height: number }}
      */
+    _getIslandWidth() {
+        const raw = Number(this._visualsConfig.island_width ?? 140);
+        if (!Number.isFinite(raw))
+            return 140;
+        return Math.max(140, Math.min(450, Math.round(raw)));
+    }
+
     getBounds() {
+        const fixedW = this._getIslandWidth();
         if (!this._island)
-            return {x: 0, y: 0, width: 120, height: 38};
-        const [, natW] = this._island.get_preferred_width(-1);
+            return {x: 0, y: 0, width: fixedW, height: 38};
         const [, natH] = this._island.get_preferred_height(-1);
-        const w = Math.max(this._island.width || 0, natW || 120);
         const h = Math.max(this._island.height || 0, natH || 38);
         return {
             x: this._island.x,
             y: this._island.y,
-            width: w,
+            width: fixedW,
             height: h,
         };
     }
@@ -572,6 +578,7 @@ export class IslandWidget {
 
         this._syncNotchMode();
         this._syncCustomColors();
+        this._island.width = this._getIslandWidth();
         this._syncRainbowTimer();
         this._bgCanvas?.queue_repaint();
         this._borderCanvas?.queue_repaint();
@@ -680,6 +687,7 @@ export class IslandWidget {
         if (this._godMode === next)
             return;
         this._godMode = next;
+        this._eyeRenderer?.setGodMode(next);
         this._syncRainbowTimer();
         this._borderCanvas?.queue_repaint();
     }
@@ -687,7 +695,9 @@ export class IslandWidget {
     _shouldRunRainbow() {
         if (this._destroyed || (this._visualsConfig.animation_mode ?? 'full') !== 'full')
             return false;
-        return this._state === 'THINKING' || (this._godMode && this._state === 'IDLE');
+        return this._state === 'THINKING' ||
+            this._state === 'TOOL_CALLING' ||
+            (this._godMode && this._state !== 'ERROR');
     }
 
     _syncRainbowTimer() {
@@ -865,7 +875,7 @@ export class IslandWidget {
 
             const mode = this._visualsConfig.animation_mode ?? 'full';
             const isNotch = this._isNotchMode();
-            if (this._state === 'THINKING' && mode !== 'disabled') {
+            if ((this._state === 'THINKING' || this._state === 'TOOL_CALLING') && mode !== 'disabled') {
                 if (isNotch) {
                     this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'full');
                     this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'full');
@@ -875,7 +885,7 @@ export class IslandWidget {
                 }
                 return;
             }
-            if (this._godMode && this._state === 'IDLE' && mode !== 'disabled') {
+            if (this._godMode && this._state !== 'ERROR' && mode !== 'disabled') {
                 if (isNotch) {
                     this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'yellow');
                     this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'yellow');
@@ -984,6 +994,7 @@ export class IslandWidget {
         this._statusLabel.text = showLabel ? this._labelText : '';
         this._statusLabel.visible = showLabel;
 
+        this._island.width = this._getIslandWidth();
         if (EXPANDED_STATES.has(this._state) || showLabel)
             this._island.add_style_class_name('bytey-island-expanded');
     }

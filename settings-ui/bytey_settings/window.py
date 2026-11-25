@@ -170,6 +170,7 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "offset_y": (("visuals", "offset_y"), ("offset_y",)),
     "float_x": (("visuals", "float_x"), ("float_x",)),
     "float_y": (("visuals", "float_y"), ("float_y",)),
+    "island_width": (("visuals", "island_width"), ("island_width",)),
     "chat_width": (("visuals", "chat_width"), ("chat_width",)),
     "chat_height": (("visuals", "chat_height"), ("chat_height",)),
     "chat_density": (("visuals", "chat_density"), ("chat_density",)),
@@ -3508,7 +3509,18 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         )
         chat_group.add(self.chat_density_row)
 
-        self.chat_width_row = Adw.SpinRow.new_with_range(260, 900, 10)
+        self.island_width_row = Adw.SpinRow.new_with_range(140, 450, 4)
+        self.island_width_row.set_title("Island Width (px)")
+        self.island_width_row.set_subtitle("Fixed capsule width across all animations (140–450 px)")
+        self.island_width_row.connect(
+            "notify::value",
+            lambda *_: self._patch_debounced(
+                "island_width", lambda: {"island_width": int(self.island_width_row.get_value())}
+            ),
+        )
+        chat_group.add(self.island_width_row)
+
+        self.chat_width_row = Adw.SpinRow.new_with_range(260, 3000, 10)
         self.chat_width_row.set_title("Chat Width (px)")
         self.chat_width_row.connect(
             "notify::value",
@@ -3966,6 +3978,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
                 btn.set_rgba(rgba)
                 row.set_subtitle(_rgba_to_hex(rgba))
             _set_combo_text(self.chat_density_row, str(self._read_field("chat_density", "comfortable")))
+            self.island_width_row.set_value(float(self._read_field("island_width", 140)))
             self.chat_width_row.set_value(float(self._read_field("chat_width", 380)))
             self.chat_height_row.set_value(float(self._read_field("chat_height", 420)))
             pos_mode = str(self._read_field("position_mode", "fixed"))

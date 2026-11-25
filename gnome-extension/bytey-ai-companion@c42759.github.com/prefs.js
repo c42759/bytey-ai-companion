@@ -764,7 +764,10 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         const drawerGroup = new Adw.PreferencesGroup({title: 'Chat Drawer'});
         const densityRow = makeComboRow('Chat Density', CHAT_DENSITIES);
-        const chatWidthRow = makeSpinRow('Chat Width (px)', 260, 900, 10);
+        const islandWidthRow = makeSpinRow('Island Width (px)', 140, 450, 4);
+        drawerGroup.add(islandWidthRow);
+
+        const chatWidthRow = makeSpinRow('Chat Width (px)', 260, 3000, 10);
         const chatHeightRow = makeSpinRow('Chat Height (px)', 220, 900, 10);
         drawerGroup.add(densityRow);
         drawerGroup.add(chatWidthRow);
@@ -2477,6 +2480,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 }
 
                 setComboText(densityRow, visuals.chat_density ?? 'comfortable');
+                islandWidthRow.set_value(Number(visuals.island_width ?? 140));
                 chatWidthRow.set_value(Number(visuals.chat_width ?? 380));
                 chatHeightRow.set_value(Number(visuals.chat_height ?? 420));
 
@@ -2958,6 +2962,10 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         densityRow.connect('notify::selected', () => onUserChange(() => {
             patchConfig({visuals: {chat_density: comboText(densityRow)}}, 'Saved chat density');
+        }));
+
+        islandWidthRow.connect('notify::value', () => onUserChange(() => {
+            patchConfig({visuals: {island_width: Math.round(islandWidthRow.get_value())}}, 'Saved island width');
         }));
 
         chatWidthRow.connect('notify::value', () => onUserChange(() => {

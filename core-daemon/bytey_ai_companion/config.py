@@ -296,6 +296,7 @@ class VisualsConfig(BaseModel):
     offset_y: int = 12
     float_x: int = 500
     float_y: int = 40
+    island_width: int = 140
     chat_width: int = 380
     chat_height: int = 420
     chat_density: str = "comfortable"
@@ -311,6 +312,15 @@ class VisualsConfig(BaseModel):
             return "fixed"
         normalized = str(value).strip().lower()
         return normalized if normalized in VALID_POSITION_MODES else "fixed"
+
+    @field_validator("island_width", mode="before")
+    @classmethod
+    def _validate_island_width(cls, value: Any) -> int:
+        try:
+            num = int(round(float(value)))
+        except (TypeError, ValueError):
+            return 140
+        return max(140, min(450, num))
 
     @field_validator("eye_color", "background_color", "border_color", mode="before")
     @classmethod

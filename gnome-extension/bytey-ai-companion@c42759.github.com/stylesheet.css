@@ -6,7 +6,7 @@
   border: 0px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
   padding: 0px;
-  min-width: 112px;
+  min-width: 140px;
   min-height: 38px;
   transition: 180ms ease;
 }
@@ -21,7 +21,6 @@
 }
 
 .bytey-island-expanded {
-  min-width: 164px;
   min-height: 42px;
 }
 
@@ -104,7 +103,7 @@
   background-color: rgba(22, 24, 29, 0.96);
   border-radius: 1.15em;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.68);
+  box-shadow: none;
   padding: 0.85em;
   spacing: 0.6em;
   font-size: 1em;
@@ -484,6 +483,7 @@
 .bytey-avatar-assistant {
   width: 2em;
   height: 2em;
+  border-radius: 999px;
   padding-top: 0.1em;
 }
 
