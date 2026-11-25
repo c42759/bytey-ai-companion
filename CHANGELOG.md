@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-25
+
+### Added
+
+- File and image attachment support with per-session storage (`<data_dir>/attachments/<session_id>/`), Wayland portal file picker, composer/message attachment chips, and multimodal `images` routing across OpenAI-compatible, Ollama, Gemini, and Anthropic providers (`6bd413d`).
+- Interleaved `parts` (`text` / `tool_call`) message persistence in `storage.py` and ordered segment rendering in `transcriptDrawer.js` (`aa46beb`).
+- Workspace `.agents` rules and specialized agent skills (`release`, `code-review`, `security`, `testing`, `architecture`, `documentation`, `unslop`, `backend`, `database`) (`d0f6210`).
+- README screenshots (`screenshots/1.jpg`–`7.jpg`) (`0521b41`).
+
+### Changed
+
+- Redesigned transcript drawer header, model dropdown, grouped collapsible tool call layout, message timestamps, and composer bar (`aa46beb`, `6bd413d`).
+
 ## [1.1.0] - 2026-11-24
 
 ### Added
@@ -70,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `PLAN.md` (`5f16fb1`).
 - Removed floating mode option from right-click context menu (`f253fd7`).
 
-[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/c42759/bytey-ai-companion/releases/tag/v1.0.0

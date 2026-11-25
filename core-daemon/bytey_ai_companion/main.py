@@ -8,9 +8,12 @@ import json
 import time
 import uuid
 import shlex
+import shutil
+import base64
 import inspect
 import asyncio
 import logging
+import mimetypes
 import signal
 
 from typing import Any
@@ -2106,21 +2109,130 @@ class ByteyDaemon:
         finally:
             self._pending_confirmations.pop(call_id, None)
 
+    _MAX_ATTACHMENTS = 5
+    _MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+    _MAX_TEXT_ATTACHMENT_BYTES = 64 * 1024
+    _IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
+    _TEXT_EXTENSIONS = frozenset(
+        {
+            ".txt", ".md", ".py", ".js", ".ts", ".jsx", ".tsx", ".json",
+            ".yaml", ".yml", ".toml", ".csv", ".log", ".sh", ".bash",
+            ".css", ".html", ".htm", ".xml", ".sql", ".ini", ".cfg", ".conf",
+        }
+    )
+
+    def _attachments_dir(self, session_id: str) -> Path:
+        safe_sid = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(session_id))
+        return self.storage.db_path.parent / "attachments" / safe_sid
+
+    async def _process_attachments(
+        self, session_id: str, raw_attachments: list[dict[str, Any]] | None
+    ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+        """Store attachments under data_dir/attachments/<sid>/ and prepare LLM context."""
+        if not raw_attachments:
+            return [], [], []
+        items = [a for a in raw_attachments if isinstance(a, dict)][: self._MAX_ATTACHMENTS]
+        if not items:
+            return [], [], []
+
+        dest_dir = self._attachments_dir(session_id)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        parts: list[dict[str, Any]] = []
+        text_blocks: list[str] = []
+        images: list[dict[str, Any]] = []
+
+        for item in items:
+            src_path_raw = str(item.get("path") or "").strip()
+            b64_raw = str(item.get("data_base64") or "").strip()
+            raw_name = str(item.get("name") or (Path(src_path_raw).name if src_path_raw else "attachment")).strip()
+            safe_name = "".join(c if c.isalnum() or c in (".", "-", "_") else "_" for c in Path(raw_name).name) or "file"
+
+            raw_bytes: bytes | None = None
+            if src_path_raw:
+                src_path = Path(src_path_raw).expanduser()
+                if not src_path.is_file():
+                    continue
+                size = src_path.stat().st_size
+                if size > self._MAX_ATTACHMENT_BYTES:
+                    continue
+                raw_bytes = await asyncio.to_thread(src_path.read_bytes)
+            elif b64_raw:
+                try:
+                    raw_bytes = base64.b64decode(b64_raw, validate=True)
+                except Exception:
+                    continue
+                if len(raw_bytes) > self._MAX_ATTACHMENT_BYTES:
+                    continue
+            else:
+                continue
+
+            stored_file = dest_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
+            await asyncio.to_thread(stored_file.write_bytes, raw_bytes)
+
+            guessed_mime, _ = mimetypes.guess_type(safe_name)
+            mime_type = str(item.get("mime_type") or guessed_mime or "application/octet-stream").lower()
+            parts.append(
+                {
+                    "type": "attachment",
+                    "name": safe_name,
+                    "mime_type": mime_type,
+                    "size": len(raw_bytes),
+                    "stored_path": str(stored_file),
+                }
+            )
+
+            ext = Path(safe_name).suffix.lower()
+            if mime_type in self._IMAGE_MIME_TYPES:
+                images.append(
+                    {
+                        "mime_type": mime_type,
+                        "data_base64": base64.b64encode(raw_bytes).decode("ascii"),
+                    }
+                )
+            elif mime_type.startswith("text/") or ext in self._TEXT_EXTENSIONS or mime_type in (
+                "application/json",
+                "application/xml",
+                "application/javascript",
+            ):
+                snippet = raw_bytes[: self._MAX_TEXT_ATTACHMENT_BYTES].decode("utf-8", errors="replace")
+                truncated = "\n...[truncated]" if len(raw_bytes) > self._MAX_TEXT_ATTACHMENT_BYTES else ""
+                text_blocks.append(
+                    f'<attachment name="{safe_name}" path="{stored_file}">\n{snippet}{truncated}\n</attachment>'
+                )
+            else:
+                text_blocks.append(
+                    f'<attachment name="{safe_name}" mime_type="{mime_type}" size="{len(raw_bytes)}" path="{stored_file}" />'
+                )
+
+        return parts, text_blocks, images
+
     async def handle_user_prompt(
         self,
         prompt_text: str,
         *,
         input_mode: str = "text",
         session_id: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Run a full user turn: persist message, call LLM + MCP tools, stream TTS."""
         text = (prompt_text or "").strip()
-        if not text:
+        if not text and not attachments:
             raise ValueError("Prompt text cannot be empty")
 
         async with self._chat_lock:
             await self.tts_player.barge_in()
             sid = await self._ensure_active_session(session_id)
+
+            att_parts, att_text_blocks, att_images = await self._process_attachments(
+                sid, attachments
+            )
+            if not text and not att_parts:
+                raise ValueError("Prompt text cannot be empty")
+            user_parts: list[dict[str, Any]] = []
+            if text:
+                user_parts.append({"type": "text", "text": text})
+            user_parts.extend(att_parts)
 
             user_msg = await self.storage.add_message(
                 sid,
@@ -2128,6 +2240,7 @@ class ByteyDaemon:
                 content=text,
                 input_mode=input_mode,
                 emotion="neutral",
+                parts=user_parts,
             )
             session_obj = await self.storage.get_session(sid)
             needs_auto_title = session_obj is not None and session_obj.get("title") == "New Chat"
@@ -2139,6 +2252,7 @@ class ByteyDaemon:
                     "role": "user",
                     "source": input_mode,
                     "text": text,
+                    "parts": user_parts,
                     "is_final": True,
                 }
             )
@@ -2256,6 +2370,21 @@ class ByteyDaemon:
                 for m in history
                 if m.get("content")
             ]
+            if att_text_blocks or att_images:
+                att_suffix = "\n\n" + "\n\n".join(att_text_blocks) if att_text_blocks else ""
+                if llm_messages and llm_messages[-1].get("role") == "user":
+                    if att_suffix:
+                        llm_messages[-1]["content"] = str(llm_messages[-1]["content"]) + att_suffix
+                    if att_images:
+                        llm_messages[-1]["images"] = att_images
+                else:
+                    entry_att: dict[str, Any] = {
+                        "role": "user",
+                        "content": (text + att_suffix).strip() or "Please inspect the attached file(s).",
+                    }
+                    if att_images:
+                        entry_att["images"] = att_images
+                    llm_messages.append(entry_att)
 
             assistant_msg = await self.storage.add_message(
                 sid,
@@ -2435,6 +2564,7 @@ class ByteyDaemon:
 
             final_emotion = "neutral"
             accumulated_parts: list[str] = []
+            message_parts: list[dict[str, Any]] = []
             last_result: dict[str, Any] | None = None
 
             async def on_emotion(tag: str) -> None:
@@ -2447,6 +2577,10 @@ class ByteyDaemon:
                 if not delta:
                     return
                 accumulated_parts.append(delta)
+                if message_parts and message_parts[-1].get("type") == "text":
+                    message_parts[-1]["text"] += delta
+                else:
+                    message_parts.append({"type": "text", "text": delta})
                 await self.ipc.connection_manager.broadcast(
                     {
                         "type": "transcript_delta",
@@ -2556,6 +2690,7 @@ class ByteyDaemon:
                             status="running",
                             call_id=call_id,
                         )
+                        message_parts.append({"type": "tool_call", "call_id": call_id})
                         await self._set_state("TOOL_CALLING", emotion=final_emotion, label=tool_name)
                         await self.ipc.connection_manager.broadcast(
                             {
@@ -2694,7 +2829,12 @@ class ByteyDaemon:
                     await self._set_state("THINKING", emotion=final_emotion)
 
                 if cancelled:
-                    accumulated_parts.append("\n\n[Stopped by user.]")
+                    stop_note = "\n\n[Stopped by user.]"
+                    accumulated_parts.append(stop_note)
+                    if message_parts and message_parts[-1].get("type") == "text":
+                        message_parts[-1]["text"] += stop_note
+                    else:
+                        message_parts.append({"type": "text", "text": stop_note})
                 elif hit_round_cap:
                     await self._set_state("THINKING", emotion=final_emotion)
                     _compact_older_tool_messages(llm_messages)
@@ -2749,8 +2889,25 @@ class ByteyDaemon:
                 raw_content = "".join(accumulated_parts).strip()
                 _, parsed_title, clean_reply = parse_reply_tags(raw_content)
                 clean_reply = clean_reply.strip()
+                cleaned_parts: list[dict[str, Any]] = []
+                for part in message_parts:
+                    if part.get("type") == "text":
+                        _, _, cleaned_seg = parse_reply_tags(str(part.get("text") or ""))
+                        cleaned_seg = cleaned_seg.strip()
+                        if cleaned_seg:
+                            if cleaned_parts and cleaned_parts[-1].get("type") == "text":
+                                cleaned_parts[-1]["text"] += f"\n\n{cleaned_seg}"
+                            else:
+                                cleaned_parts.append({"type": "text", "text": cleaned_seg})
+                    elif part.get("type") == "tool_call" and part.get("call_id"):
+                        cleaned_parts.append(
+                            {"type": "tool_call", "call_id": str(part["call_id"])}
+                        )
                 updated_msg = await self.storage.update_message(
-                    assistant_id, content=clean_reply, emotion=final_emotion
+                    assistant_id,
+                    content=clean_reply,
+                    emotion=final_emotion,
+                    parts=cleaned_parts,
                 )
                 if needs_auto_title:
                     captured_title = (
@@ -2769,6 +2926,7 @@ class ByteyDaemon:
                         "role": "assistant",
                         "source": input_mode,
                         "text": clean_reply,
+                        "parts": cleaned_parts,
                         "emotion": final_emotion,
                         "is_final": True,
                     }
@@ -3549,7 +3707,10 @@ class ByteyDaemon:
             text = str(body.get("content") or body.get("text") or "").strip()
             mode = str(body.get("input_mode") or body.get("source") or "text")
             sid = body.get("session_id")
-            return await self.handle_user_prompt(text, input_mode=mode, session_id=sid)
+            atts = body.get("attachments") if isinstance(body.get("attachments"), list) else None
+            return await self.handle_user_prompt(
+                text, input_mode=mode, session_id=sid, attachments=atts
+            )
 
         title = str((body or {}).get("title") or "New Chat")
         session = await self.storage.create_session(title=title)
@@ -3628,6 +3789,7 @@ class ByteyDaemon:
     async def _route_delete_session(self, req: IPCRequest) -> dict[str, Any]:
         sid = req.path_params["session_id"]
         await self.storage.delete_session(sid)
+        shutil.rmtree(self._attachments_dir(sid), ignore_errors=True)
         if self._active_session_id == sid:
             self._active_session_id = None
         new_sid = await self._ensure_active_session()
@@ -3639,7 +3801,10 @@ class ByteyDaemon:
         text = str(body.get("content") or body.get("text") or body.get("prompt") or "").strip()
         mode = str(body.get("input_mode") or body.get("source") or "text")
         sid = req.path_params.get("session_id")
-        res = await self.handle_user_prompt(text, input_mode=mode, session_id=sid)
+        atts = body.get("attachments") if isinstance(body.get("attachments"), list) else None
+        res = await self.handle_user_prompt(
+            text, input_mode=mode, session_id=sid, attachments=atts
+        )
         if isinstance(res, IPCResponse):
             return res  # type: ignore[return-value]
         return res
@@ -3649,7 +3814,10 @@ class ByteyDaemon:
         text = str(body.get("content") or body.get("text") or body.get("prompt") or "").strip()
         mode = str(body.get("input_mode") or body.get("source") or "text")
         sid = body.get("session_id")
-        res = await self.handle_user_prompt(text, input_mode=mode, session_id=sid)
+        atts = body.get("attachments") if isinstance(body.get("attachments"), list) else None
+        res = await self.handle_user_prompt(
+            text, input_mode=mode, session_id=sid, attachments=atts
+        )
         if isinstance(res, IPCResponse):
             return res  # type: ignore[return-value]
         return res

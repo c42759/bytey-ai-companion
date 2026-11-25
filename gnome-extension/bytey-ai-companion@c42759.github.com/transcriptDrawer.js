@@ -266,6 +266,13 @@ export class TranscriptDrawer {
         });
         header.add_child(this._sidebarToggleBtn);
 
+        const extDir = Gio.File.new_for_uri(import.meta.url).get_parent();
+        const iconSize = this._getIconSizes().close;
+
+        this._providerIcon = new St.Icon({
+            icon_name: 'application-x-executable-symbolic',
+            icon_size: iconSize - 2,
+        });
         this._providerLabel = new St.Label({
             style_class: 'bytey-provider-pill-label',
             text: 'ollama',
@@ -273,30 +280,62 @@ export class TranscriptDrawer {
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._providerLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-
-        this._providerPill = new St.Bin({
-            style_class: 'bytey-provider-pill',
+        const providerChevron = new St.Icon({
+            icon_name: 'pan-down-symbolic',
+            icon_size: iconSize - 3,
+        });
+        const providerRow = new St.BoxLayout({
+            style_class: 'bytey-pill-row',
             y_align: Clutter.ActorAlign.CENTER,
-            child: this._providerLabel,
+        });
+        providerRow.add_child(this._providerIcon);
+        providerRow.add_child(this._providerLabel);
+        providerRow.add_child(providerChevron);
+
+        this._providerPill = new St.Button({
+            style_class: 'bytey-provider-pill',
+            can_focus: true,
+            y_align: Clutter.ActorAlign.CENTER,
+            accessible_name: 'Select model',
+            child: providerRow,
+        });
+        this._connect(this._providerPill, 'clicked', () => {
+            this._toggleModelMenu();
         });
         header.add_child(this._providerPill);
 
+        const wsIcon = new St.Icon({
+            icon_name: 'folder-symbolic',
+            icon_size: iconSize - 2,
+        });
         this._workspaceLabel = new St.Label({
             style_class: 'bytey-workspace-pill-label',
-            text: 'No Workspace',
+            text: 'Workspace',
             x_align: Clutter.ActorAlign.START,
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._workspaceLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        const wsChevron = new St.Icon({
+            icon_name: 'pan-down-symbolic',
+            icon_size: iconSize - 3,
+        });
+        const wsRow = new St.BoxLayout({
+            style_class: 'bytey-pill-row',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        wsRow.add_child(wsIcon);
+        wsRow.add_child(this._workspaceLabel);
+        wsRow.add_child(wsChevron);
 
         this._workspacePill = new St.Button({
             style_class: 'bytey-workspace-pill',
             can_focus: true,
             y_align: Clutter.ActorAlign.CENTER,
             accessible_name: 'Select workspace',
-            child: this._workspaceLabel,
+            child: wsRow,
         });
         this._connect(this._workspacePill, 'clicked', () => {
+            this._hideModelMenu();
             this._toggleWorkspaceMenu();
         });
         header.add_child(this._workspacePill);
@@ -326,8 +365,6 @@ export class TranscriptDrawer {
 
         header.add_child(new St.Widget({x_expand: true}));
 
-        const extDir = Gio.File.new_for_uri(import.meta.url).get_parent();
-        const iconSize = this._getIconSizes().close;
         this._godModeIcon = new St.Icon({
             gicon: Gio.FileIcon.new(
                 extDir.resolve_relative_path('icons/bytey-god-mode-symbolic.svg')
@@ -399,6 +436,14 @@ export class TranscriptDrawer {
         header.add_child(closeBtn);
 
         this._container.add_child(header);
+
+        this._modelMenuBox = new St.BoxLayout({
+            style_class: 'bytey-workspace-menu',
+            orientation: Clutter.Orientation.VERTICAL,
+            visible: false,
+            x_expand: true,
+        });
+        this._container.add_child(this._modelMenuBox);
 
         this._workspaceMenuBox = new St.BoxLayout({
             style_class: 'bytey-workspace-menu',
@@ -512,6 +557,14 @@ export class TranscriptDrawer {
     }
 
     _buildFooter(parent) {
+        this._pendingAttachments = [];
+        this._attachStrip = new St.BoxLayout({
+            style_class: 'bytey-attach-strip',
+            x_expand: true,
+            visible: false,
+        });
+        parent.add_child(this._attachStrip);
+
         const footer = new St.BoxLayout({
             style_class: 'bytey-drawer-footer',
             x_expand: true,
@@ -606,18 +659,21 @@ export class TranscriptDrawer {
         footer.add_child(this._entryScroll);
 
         const iconSizes = this._getIconSizes();
-        this._sendIcon = new St.Icon({
-            icon_name: 'mail-send-symbolic',
+        this._attachIcon = new St.Icon({
+            icon_name: 'mail-attachment-symbolic',
             icon_size: iconSizes.mic,
         });
-        const sendBtn = new St.Button({
-            style_class: 'bytey-send-btn',
+        this._attachBtn = new St.Button({
+            style_class: 'bytey-attach-btn',
             can_focus: true,
             y_align: Clutter.ActorAlign.END,
-            child: this._sendIcon,
+            accessible_name: 'Attach files',
+            child: this._attachIcon,
         });
-        this._connect(sendBtn, 'clicked', () => this._submitEntry());
-        footer.add_child(sendBtn);
+        this._connect(this._attachBtn, 'clicked', () => {
+            this._pickAttachments();
+        });
+        footer.add_child(this._attachBtn);
 
         this._micIcon = new St.Icon({
             icon_name: 'audio-input-microphone-symbolic',
@@ -633,6 +689,19 @@ export class TranscriptDrawer {
             this._callbacks.onManualMic?.();
         });
         footer.add_child(this._micBtn);
+
+        this._sendIcon = new St.Icon({
+            icon_name: 'mail-send-symbolic',
+            icon_size: iconSizes.mic,
+        });
+        const sendBtn = new St.Button({
+            style_class: 'bytey-send-btn',
+            can_focus: true,
+            y_align: Clutter.ActorAlign.END,
+            child: this._sendIcon,
+        });
+        this._connect(sendBtn, 'clicked', () => this._submitEntry());
+        footer.add_child(sendBtn);
 
         const gripLabel = new St.Label({
             style_class: 'bytey-resize-grip-label',
@@ -822,14 +891,188 @@ export class TranscriptDrawer {
         this._skillSuggestBox?.hide();
     }
 
+    _renderAttachStrip() {
+        if (!this._attachStrip || this._destroyed)
+            return;
+        this._attachStrip.destroy_all_children();
+        if (this._pendingAttachments.length === 0) {
+            this._attachStrip.visible = false;
+            return;
+        }
+        this._attachStrip.visible = true;
+        for (let idx = 0; idx < this._pendingAttachments.length; idx++) {
+            const att = this._pendingAttachments[idx];
+            const chip = new St.BoxLayout({
+                style_class: 'bytey-attach-chip',
+                y_align: Clutter.ActorAlign.CENTER,
+            });
+            chip.add_child(new St.Label({
+                text: `📎 ${att.name}`,
+                y_align: Clutter.ActorAlign.CENTER,
+            }));
+            const rmBtn = new St.Button({
+                style_class: 'bytey-attach-chip-remove',
+                label: '✕',
+                can_focus: true,
+                y_align: Clutter.ActorAlign.CENTER,
+            });
+            rmBtn.connect('clicked', () => {
+                this._pendingAttachments.splice(idx, 1);
+                this._renderAttachStrip();
+            });
+            chip.add_child(rmBtn);
+            this._attachStrip.add_child(chip);
+        }
+    }
+
+    _beginAttachmentPick() {
+        if (this._destroyed || !this._container)
+            return;
+        this._restoreDrawerAfterPick = Boolean(this._isOpen && this._container.visible);
+        if (this._restoreDrawerAfterPick)
+            this._container.visible = false;
+    }
+
+    _endAttachmentPick() {
+        if (this._destroyed || !this._container)
+            return;
+        if (this._restoreDrawerAfterPick && this._isOpen) {
+            this._container.visible = true;
+            this._entry?.clutter_text?.grab_key_focus();
+        }
+        this._restoreDrawerAfterPick = false;
+    }
+
+    _pickAttachments() {
+        if (this._destroyed)
+            return;
+        this._beginAttachmentPick();
+        try {
+            const token = `bytey_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+            const senderName = Gio.DBus.session.get_unique_name()
+                .replace(/^:/, '')
+                .replace(/\./g, '_');
+            const reqPath = `/org/freedesktop/portal/desktop/request/${senderName}/${token}`;
+
+            let subId = 0;
+            subId = Gio.DBus.session.signal_subscribe(
+                'org.freedesktop.portal.Desktop',
+                'org.freedesktop.portal.Request',
+                'Response',
+                reqPath,
+                null,
+                Gio.DBusSignalFlags.NONE,
+                (_conn, _sender, _path, _iface, _sig, params) => {
+                    if (subId) {
+                        Gio.DBus.session.signal_unsubscribe(subId);
+                        subId = 0;
+                    }
+                    this._endAttachmentPick();
+                    if (this._destroyed)
+                        return;
+                    const [response, results] = params.deep_unpack();
+                    if (response !== 0 || !results?.uris)
+                        return;
+                    const rawUris = results.uris instanceof GLib.Variant
+                        ? results.uris.deep_unpack()
+                        : results.uris;
+                    const uris = Array.isArray(rawUris) ? rawUris : [];
+                    const paths = [];
+                    for (const uri of uris) {
+                        const filePath = Gio.File.new_for_uri(String(uri)).get_path();
+                        if (filePath)
+                            paths.push(filePath);
+                    }
+                    this._addAttachmentPaths(paths);
+                }
+            );
+
+            Gio.DBus.session.call(
+                'org.freedesktop.portal.Desktop',
+                '/org/freedesktop/portal/desktop',
+                'org.freedesktop.portal.FileChooser',
+                'OpenFile',
+                new GLib.Variant('(ssa{sv})', [
+                    '',
+                    'Attach files',
+                    {
+                        handle_token: new GLib.Variant('s', token),
+                        multiple: new GLib.Variant('b', true),
+                    },
+                ]),
+                null,
+                Gio.DBusCallFlags.NONE,
+                -1,
+                null,
+                (conn, res) => {
+                    try {
+                        conn.call_finish(res);
+                    } catch (_err) {
+                        if (subId) {
+                            Gio.DBus.session.signal_unsubscribe(subId);
+                            subId = 0;
+                        }
+                        this._pickAttachmentsZenity();
+                    }
+                }
+            );
+        } catch (_e) {
+            this._pickAttachmentsZenity();
+        }
+    }
+
+    _addAttachmentPaths(paths) {
+        if (this._destroyed || !Array.isArray(paths))
+            return;
+        for (const filePath of paths) {
+            if (this._pendingAttachments.length >= 5)
+                break;
+            if (!filePath)
+                continue;
+            const name = GLib.path_get_basename(filePath);
+            if (!this._pendingAttachments.some(a => a.path === filePath))
+                this._pendingAttachments.push({path: filePath, name});
+        }
+        this._renderAttachStrip();
+    }
+
+    _pickAttachmentsZenity() {
+        if (this._destroyed)
+            return;
+        try {
+            const proc = Gio.Subprocess.new(
+                ['zenity', '--file-selection', '--multiple', '--separator=\n', '--title=Attach files'],
+                Gio.SubprocessFlags.STDOUT_PIPE
+            );
+            proc.communicate_utf8_async(null, null, (p, res) => {
+                try {
+                    const [, stdout] = p.communicate_utf8_finish(res);
+                    if (p.get_successful() && stdout) {
+                        const paths = stdout.split('\n').map(s => s.trim()).filter(Boolean);
+                        this._addAttachmentPaths(paths);
+                    }
+                } catch (_err) {
+                    // User cancelled or zenity unavailable.
+                } finally {
+                    this._endAttachmentPick();
+                }
+            });
+        } catch (_e) {
+            this._endAttachmentPick();
+        }
+    }
+
     _submitEntry() {
         const text = (this._entry.text ?? '').trim();
-        if (!text)
+        const attachments = this._pendingAttachments.map(a => ({path: a.path, name: a.name}));
+        if (!text && attachments.length === 0)
             return;
         this._hideSkillSuggestions();
         this._entry.text = '';
+        this._pendingAttachments = [];
+        this._renderAttachStrip();
         this._syncEntryHeight();
-        this._callbacks.onSendText?.(text);
+        this._callbacks.onSendText?.(text, attachments);
     }
 
     /**
@@ -953,7 +1196,9 @@ export class TranscriptDrawer {
         if (Number.isInteger(monIdx))
             this._monitorIndex = monIdx;
 
-        this._providerLabel.text = model ? `${provider} · ${model}` : String(provider);
+        this._activeProvider = String(provider || 'ollama');
+        this._activeModel = String(model || '');
+        this._providerLabel.text = this._activeModel || this._activeProvider;
 
         const rawWidth = Number(config.visuals?.chat_width ?? config.chat_width);
         const rawHeight = Number(config.visuals?.chat_height ?? config.chat_height);
@@ -1584,6 +1829,7 @@ export class TranscriptDrawer {
                 role,
                 input_mode: source,
                 content: initialText,
+                parts: Array.isArray(event.parts) ? event.parts : undefined,
                 emotion: emotion ?? 'neutral',
                 tool_calls: event.tool_calls ?? [],
             });
@@ -1595,6 +1841,25 @@ export class TranscriptDrawer {
 
             if (incomingDelta !== null) {
                 nextContent = existing + incomingDelta;
+                const lastPart = record.msg.parts[record.msg.parts.length - 1];
+                if (lastPart && lastPart.type === 'text') {
+                    lastPart.text += incomingDelta;
+                    const lastSeg = record.segments[record.segments.length - 1];
+                    if (lastSeg && lastSeg.type === 'text') {
+                        this._renderMessageBody(lastSeg.bodyBox, lastPart.text);
+                    } else {
+                        const bodyBox = this._createBodyBox();
+                        record.contentBox.add_child(bodyBox);
+                        this._renderMessageBody(bodyBox, lastPart.text);
+                        record.segments.push({type: 'text', bodyBox});
+                    }
+                } else {
+                    record.msg.parts.push({type: 'text', text: incomingDelta});
+                    const bodyBox = this._createBodyBox();
+                    record.contentBox.add_child(bodyBox);
+                    this._renderMessageBody(bodyBox, incomingDelta);
+                    record.segments.push({type: 'text', bodyBox});
+                }
             } else if (isFinal) {
                 if (incomingText.length > 0) {
                     const looksLikeShortTail = existing.length > 16 &&
@@ -1602,21 +1867,41 @@ export class TranscriptDrawer {
                         !incomingText.startsWith(existing.slice(0, Math.min(8, existing.length)));
                     nextContent = looksLikeShortTail ? (existing + incomingText) : incomingText;
                 }
+                if (Array.isArray(event.parts)) {
+                    record.msg.parts = this._normalizeParts(
+                        event.parts,
+                        nextContent,
+                        record.msg.tool_calls
+                    );
+                } else {
+                    record.msg.parts = this._normalizeParts(
+                        null,
+                        nextContent,
+                        record.msg.tool_calls
+                    );
+                }
+                this._rebuildMessageContent(record);
             } else if (incomingText.length > 0) {
                 if (existing.length >= 2 && incomingText.startsWith(existing))
                     nextContent = incomingText;
                 else
                     nextContent = existing + incomingText;
+                record.msg.parts = this._normalizeParts(
+                    null,
+                    nextContent,
+                    record.msg.tool_calls
+                );
+                this._rebuildMessageContent(record);
             }
 
             record.msg.content = nextContent;
-            this._renderMessageBody(record.bodyBox, nextContent);
             if (emotion)
                 this._updateEmotionBadge(record, emotion);
+            const hasText = this._getMessageText(record.msg).trim().length > 0;
             if (record.replayBtn)
-                record.replayBtn.visible = nextContent.trim().length > 0;
+                record.replayBtn.visible = hasText;
             if (record.copyBtn)
-                record.copyBtn.visible = nextContent.trim().length > 0;
+                record.copyBtn.visible = hasText;
         }
 
         this._scheduleScrollToBottom();
@@ -1641,16 +1926,78 @@ export class TranscriptDrawer {
             if (activePath) {
                 const parts = activePath.replace(/\/+$/, '').split('/');
                 const base = parts[parts.length - 1] || activePath;
-                this._workspaceLabel.text = `📁 ${base}`;
+                this._workspaceLabel.text = base;
                 if (this._workspacePill)
                     this._workspacePill.accessible_name = `Workspace: ${activePath}`;
             } else {
-                this._workspaceLabel.text = 'No Workspace';
+                this._workspaceLabel.text = 'Workspace';
                 if (this._workspacePill)
                     this._workspacePill.accessible_name = 'No Workspace';
             }
         }
         this._rebuildWorkspaceMenu();
+    }
+
+    _hideModelMenu() {
+        if (this._modelMenuBox)
+            this._modelMenuBox.visible = false;
+    }
+
+    async _toggleModelMenu() {
+        if (!this._modelMenuBox || this._destroyed)
+            return;
+        this._hideWorkspaceMenu();
+        const nextVisible = !this._modelMenuBox.visible;
+        if (!nextVisible) {
+            this._modelMenuBox.visible = false;
+            return;
+        }
+        this._modelMenuBox.destroy_all_children();
+        const loadingLabel = new St.Label({
+            style_class: 'bytey-workspace-menu-item',
+            text: 'Loading models…',
+        });
+        this._modelMenuBox.add_child(loadingLabel);
+        this._modelMenuBox.visible = true;
+
+        let models = [];
+        try {
+            const res = await this._callbacks.onListModels?.(this._activeProvider || 'ollama');
+            if (Array.isArray(res))
+                models = res;
+        } catch (_e) {
+            models = [];
+        }
+        if (this._destroyed || !this._modelMenuBox)
+            return;
+        this._modelMenuBox.destroy_all_children();
+        if (models.length === 0) {
+            this._modelMenuBox.add_child(new St.Label({
+                style_class: 'bytey-workspace-menu-item',
+                text: 'No models available',
+            }));
+            return;
+        }
+        for (const m of models) {
+            const name = String(m?.name ?? m?.id ?? m ?? '').trim();
+            if (!name)
+                continue;
+            const isActive = name === this._activeModel;
+            const btn = new St.Button({
+                style_class: isActive
+                    ? 'bytey-workspace-menu-item bytey-workspace-menu-item-active'
+                    : 'bytey-workspace-menu-item',
+                label: isActive ? `✓ ${name}` : name,
+                x_expand: true,
+                x_align: Clutter.ActorAlign.START,
+                can_focus: true,
+            });
+            btn.connect('clicked', () => {
+                this._hideModelMenu();
+                this._callbacks.onSelectModel?.(name);
+            });
+            this._modelMenuBox.add_child(btn);
+        }
     }
 
     _toggleWorkspaceMenu() {
@@ -1785,7 +2132,20 @@ export class TranscriptDrawer {
 
         if (msgRecord) {
             msgRecord.msg.tool_calls.push(tool);
-            this._appendToolWidget(msgRecord.toolBox, tool);
+            const hasPart = msgRecord.msg.parts.some(
+                p => p.type === 'tool_call' && p.call_id === tool.id
+            );
+            if (!hasPart)
+                msgRecord.msg.parts.push({type: 'tool_call', call_id: tool.id});
+
+            const lastSeg = msgRecord.segments[msgRecord.segments.length - 1];
+            let targetGroup = lastSeg && lastSeg.type === 'tool_group' ? lastSeg.group : null;
+            if (!targetGroup) {
+                targetGroup = this._createToolGroup();
+                msgRecord.contentBox.add_child(targetGroup.container);
+                msgRecord.segments.push({type: 'tool_group', group: targetGroup});
+            }
+            this._appendToolWidget(targetGroup.listBox, tool, targetGroup);
             this._scheduleScrollToBottom();
         }
     }
@@ -2059,6 +2419,58 @@ export class TranscriptDrawer {
         this._messagesBox.add_child(emptyLabel);
     }
 
+    _normalizeParts(rawParts, content, toolCalls) {
+        const parts = [];
+        if (Array.isArray(rawParts) && rawParts.length > 0) {
+            for (const item of rawParts) {
+                if (!item || typeof item !== 'object')
+                    continue;
+                if (item.type === 'text') {
+                    const text = String(item.text ?? '');
+                    if (text)
+                        parts.push({type: 'text', text});
+                } else if (item.type === 'tool_call') {
+                    const callId = String(item.call_id ?? '').trim();
+                    if (callId)
+                        parts.push({type: 'tool_call', call_id: callId});
+                } else if (item.type === 'attachment') {
+                    const name = String(item.name ?? '').trim();
+                    if (name) {
+                        parts.push({
+                            type: 'attachment',
+                            name,
+                            mime_type: String(item.mime_type ?? 'application/octet-stream'),
+                            size: Number(item.size ?? 0),
+                            stored_path: String(item.stored_path ?? ''),
+                        });
+                    }
+                }
+            }
+        }
+        if (parts.length > 0)
+            return parts;
+        if (content)
+            parts.push({type: 'text', text: content});
+        for (const tc of toolCalls) {
+            if (tc && tc.id)
+                parts.push({type: 'tool_call', call_id: tc.id});
+        }
+        return parts;
+    }
+
+    _getMessageText(msg) {
+        if (!msg)
+            return '';
+        if (Array.isArray(msg.parts) && msg.parts.length > 0) {
+            const textSegments = msg.parts
+                .filter(p => p && p.type === 'text' && String(p.text ?? '').length > 0)
+                .map(p => String(p.text));
+            if (textSegments.length > 0)
+                return textSegments.join('\n\n');
+        }
+        return String(msg.content ?? '');
+    }
+
     _normalizeMessage(raw) {
         const id = String(raw.id ?? raw.message_id ?? `msg-${Date.now()}-${Math.random()}`);
         const role = String(raw.role ?? 'assistant').toLowerCase() === 'user' ? 'user' : 'assistant';
@@ -2067,7 +2479,20 @@ export class TranscriptDrawer {
         const emotion = String(raw.emotion ?? 'neutral').toLowerCase();
         const rawTools = Array.isArray(raw.tool_calls) ? raw.tool_calls : [];
         const toolCalls = rawTools.map(t => this._normalizeTool({...t, message_id: id}));
-        return {id, role, input_mode: inputMode, content, emotion, tool_calls: toolCalls};
+        const parts = this._normalizeParts(raw.parts, content, toolCalls);
+        const createdAt = raw.created_at ? String(raw.created_at) : null;
+        return {id, role, input_mode: inputMode, content, parts, emotion, tool_calls: toolCalls, created_at: createdAt};
+    }
+
+    _formatTimestamp(iso) {
+        if (!iso) {
+            const now = new Date();
+            return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        }
+        const dt = new Date(iso);
+        if (Number.isNaN(dt.getTime()))
+            return '';
+        return `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`;
     }
 
     _normalizeTool(raw) {
@@ -2113,32 +2538,59 @@ export class TranscriptDrawer {
         this._clearEmptyState();
 
         const isUser = msg.role === 'user';
-        const bubble = new St.BoxLayout({
-            style_class: isUser ? 'bytey-msg-user' : 'bytey-msg-assistant',
-            orientation: Clutter.Orientation.VERTICAL,
+        const timeStr = this._formatTimestamp(msg.created_at);
+        const extDir = Gio.File.new_for_uri(import.meta.url).get_parent();
+
+        const row = new St.BoxLayout({
+            style_class: isUser ? 'bytey-msg-row-user' : 'bytey-msg-row-assistant',
             x_expand: true,
         });
+
+        if (!isUser) {
+            const avatarIcon = new St.Icon({
+                gicon: Gio.FileIcon.new(
+                    extDir.resolve_relative_path('icons/bytey-ai-companion.svg')
+                ),
+                icon_size: 26,
+            });
+            const avatarBin = new St.Bin({
+                style_class: 'bytey-avatar-assistant',
+                y_align: Clutter.ActorAlign.START,
+                child: avatarIcon,
+            });
+            row.add_child(avatarBin);
+        } else {
+            row.add_child(new St.Widget({x_expand: true}));
+        }
 
         const metaRow = new St.BoxLayout({
             style_class: 'bytey-msg-meta',
             x_expand: true,
         });
 
-        const roleLabel = new St.Label({
-            style_class: 'bytey-msg-role',
-            text: isUser ? 'You' : this._petName,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        metaRow.add_child(roleLabel);
-
         if (isUser) {
-            const isVoice = msg.input_mode === 'voice';
-            const srcBadge = new St.Label({
-                style_class: `bytey-source-badge ${isVoice ? 'bytey-source-voice' : 'bytey-source-text'}`,
-                text: isVoice ? 'Voice' : 'Text',
+            metaRow.add_child(new St.Widget({x_expand: true}));
+            if (timeStr) {
+                metaRow.add_child(new St.Label({
+                    style_class: 'bytey-msg-time',
+                    text: timeStr,
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
+            }
+        } else {
+            const roleLabel = new St.Label({
+                style_class: 'bytey-msg-role',
+                text: this._petName,
                 y_align: Clutter.ActorAlign.CENTER,
             });
-            metaRow.add_child(srcBadge);
+            metaRow.add_child(roleLabel);
+            if (timeStr) {
+                metaRow.add_child(new St.Label({
+                    style_class: 'bytey-msg-time',
+                    text: timeStr,
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
+            }
         }
 
         const emotionLabel = new St.Label({
@@ -2149,8 +2601,8 @@ export class TranscriptDrawer {
         });
         metaRow.add_child(emotionLabel);
 
-        const spacer = new St.Widget({x_expand: true});
-        metaRow.add_child(spacer);
+        if (!isUser)
+            metaRow.add_child(new St.Widget({x_expand: true}));
 
         const iconSizes = this._getIconSizes();
 
@@ -2179,7 +2631,7 @@ export class TranscriptDrawer {
                     (this._speakingStatus === 'playing' || this._speakingStatus === 'paused')) {
                     this._callbacks.onTogglePauseTts?.();
                 } else {
-                    const text = (msg.content ?? '').trim();
+                    const text = this._getMessageText(msg).trim();
                     if (text)
                         this._callbacks.onReplayTts?.(msg.id, text);
                 }
@@ -2195,14 +2647,14 @@ export class TranscriptDrawer {
             style_class: 'bytey-copy-btn',
             can_focus: true,
             accessible_name: 'Copy markdown',
-            visible: (msg.content ?? '').trim().length > 0,
+            visible: this._getMessageText(msg).trim().length > 0,
             y_align: Clutter.ActorAlign.CENTER,
             child: copyIcon,
         });
         copyBtn.connect('clicked', () => {
             St.Clipboard.get_default().set_text(
                 St.ClipboardType.CLIPBOARD,
-                String(msg.content ?? '')
+                this._getMessageText(msg)
             );
             copyIcon.icon_name = 'emblem-ok-symbolic';
             this._copyResetTimers ??= new Set();
@@ -2270,35 +2722,56 @@ export class TranscriptDrawer {
         metaRow.add_child(confirmDeleteBtn);
         metaRow.add_child(cancelDeleteBtn);
 
-        bubble.add_child(metaRow);
-
-        const bodyBox = new St.BoxLayout({
-            style_class: 'bytey-msg-body',
+        const contentBox = new St.BoxLayout({
+            style_class: 'bytey-msg-content',
             orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
-        this._renderMessageBody(bodyBox, msg.content);
-        bubble.add_child(bodyBox);
 
-        const toolBox = new St.BoxLayout({
-            style_class: 'bytey-tool-list',
-            orientation: Clutter.Orientation.VERTICAL,
-            x_expand: true,
-            visible: msg.tool_calls.length > 0,
-        });
-        bubble.add_child(toolBox);
+        if (isUser) {
+            const userCol = new St.BoxLayout({
+                style_class: 'bytey-msg-user-col',
+                orientation: Clutter.Orientation.VERTICAL,
+                x_align: Clutter.ActorAlign.END,
+            });
+            userCol.add_child(metaRow);
+            const userBubble = new St.BoxLayout({
+                style_class: 'bytey-msg-user',
+                orientation: Clutter.Orientation.VERTICAL,
+            });
+            userBubble.add_child(contentBox);
+            userCol.add_child(userBubble);
+            row.add_child(userCol);
 
-        for (const tool of msg.tool_calls)
-            this._appendToolWidget(toolBox, tool);
+            const userIcon = new St.Icon({
+                icon_name: 'avatar-default-symbolic',
+                icon_size: 16,
+            });
+            const userAvatar = new St.Bin({
+                style_class: 'bytey-avatar-user',
+                y_align: Clutter.ActorAlign.END,
+                child: userIcon,
+            });
+            row.add_child(userAvatar);
+        } else {
+            const bodyCol = new St.BoxLayout({
+                style_class: 'bytey-msg-assistant',
+                orientation: Clutter.Orientation.VERTICAL,
+                x_expand: true,
+            });
+            bodyCol.add_child(metaRow);
+            bodyCol.add_child(contentBox);
+            row.add_child(bodyCol);
+        }
 
-        this._messagesBox.add_child(bubble);
+        this._messagesBox.add_child(row);
 
         const record = {
             msg,
-            box: bubble,
-            bodyBox,
+            box: row,
+            contentBox,
+            segments: [],
             emotionLabel,
-            toolBox,
             replayBtn,
             replayIcon,
             copyBtn,
@@ -2310,8 +2783,157 @@ export class TranscriptDrawer {
             cancelDeleteBtn,
             cancelDeleteIcon,
         };
+        this._rebuildMessageContent(record);
         this._messageWidgets.set(msg.id, record);
         return record;
+    }
+
+    _createBodyBox() {
+        return new St.BoxLayout({
+            style_class: 'bytey-msg-body',
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+        });
+    }
+
+    _createToolGroup() {
+        const container = new St.BoxLayout({
+            style_class: 'bytey-tool-group',
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+        });
+        const summaryLabel = new St.Label({
+            style_class: 'bytey-tool-group-summary',
+            text: '',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        summaryLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        const summaryChevron = new St.Icon({
+            icon_name: 'pan-down-symbolic',
+            icon_size: 14,
+        });
+        const summaryRow = new St.BoxLayout({
+            style_class: 'bytey-tool-group-row',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        summaryRow.add_child(summaryLabel);
+        summaryRow.add_child(summaryChevron);
+
+        const summaryBtn = new St.Button({
+            style_class: 'bytey-tool-group-bar',
+            x_expand: true,
+            can_focus: true,
+            child: summaryRow,
+        });
+        const listBox = new St.BoxLayout({
+            style_class: 'bytey-tool-list',
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+            visible: false,
+        });
+        container.add_child(summaryBtn);
+        container.add_child(listBox);
+
+        const group = {
+            container,
+            summaryBtn,
+            summaryLabel,
+            summaryChevron,
+            listBox,
+            tools: [],
+            expanded: false,
+            userToggled: false,
+        };
+        summaryBtn.connect('clicked', () => {
+            group.userToggled = true;
+            group.expanded = !group.expanded;
+            this._refreshToolGroup(group);
+        });
+        return group;
+    }
+
+    _refreshToolGroup(group) {
+        if (!group)
+            return;
+        const chips = group.tools.map(t => {
+            let icon = '⋯';
+            if (t.status === 'ok')
+                icon = '✓';
+            else if (t.status === 'error' || t.status === 'denied')
+                icon = '✕';
+            else if (t.status === 'awaiting_confirm')
+                icon = '?';
+            return `${icon} ${t.tool}`;
+        });
+        group.summaryLabel.text = chips.join('  ·  ');
+
+        const hasActive = group.tools.some(
+            t => t.status === 'running' || t.status === 'awaiting_confirm'
+        );
+        if (!group.userToggled)
+            group.expanded = hasActive;
+
+        group.listBox.visible = group.expanded;
+        group.summaryChevron.icon_name = group.expanded ? 'pan-up-symbolic' : 'pan-down-symbolic';
+    }
+
+    _rebuildMessageContent(record) {
+        if (!record || !record.contentBox)
+            return;
+        for (const tool of record.msg.tool_calls) {
+            if (tool?.id)
+                this._toolWidgets.delete(tool.id);
+        }
+        record.contentBox.destroy_all_children();
+        record.segments = [];
+
+        const toolsById = new Map();
+        for (const tool of record.msg.tool_calls) {
+            if (tool?.id)
+                toolsById.set(tool.id, tool);
+        }
+
+        const parts = this._normalizeParts(
+            record.msg.parts,
+            record.msg.content,
+            record.msg.tool_calls
+        );
+        record.msg.parts = parts;
+
+        for (const part of parts) {
+            if (part.type === 'text') {
+                const bodyBox = this._createBodyBox();
+                record.contentBox.add_child(bodyBox);
+                this._renderMessageBody(bodyBox, part.text);
+                record.segments.push({type: 'text', bodyBox});
+            } else if (part.type === 'tool_call') {
+                const tool = toolsById.get(part.call_id);
+                if (!tool)
+                    continue;
+                const lastSeg = record.segments[record.segments.length - 1];
+                let targetGroup = lastSeg && lastSeg.type === 'tool_group' ? lastSeg.group : null;
+                if (!targetGroup) {
+                    targetGroup = this._createToolGroup();
+                    record.contentBox.add_child(targetGroup.container);
+                    record.segments.push({type: 'tool_group', group: targetGroup});
+                }
+                this._appendToolWidget(targetGroup.listBox, tool, targetGroup);
+            } else if (part.type === 'attachment') {
+                const chip = new St.BoxLayout({
+                    style_class: 'bytey-msg-attachment-chip',
+                    x_align: Clutter.ActorAlign.START,
+                });
+                chip.add_child(new St.Label({
+                    text: `📎 ${part.name}`,
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
+                record.contentBox.add_child(chip);
+                record.segments.push({type: 'attachment', chip});
+            }
+        }
     }
 
     _syncDeleteMessageConfirm() {
@@ -2533,7 +3155,7 @@ export class TranscriptDrawer {
         record.emotionLabel.visible = record.msg.role !== 'user' && clean !== 'neutral';
     }
 
-    _appendToolWidget(toolBox, tool) {
+    _appendToolWidget(toolBox, tool, group = null) {
         toolBox.visible = true;
 
         const badge = new St.BoxLayout({
@@ -2630,6 +3252,7 @@ export class TranscriptDrawer {
 
         const record = {
             tool,
+            group,
             badge,
             titleLabel,
             statusLabel,
@@ -2665,6 +3288,8 @@ export class TranscriptDrawer {
         });
 
         this._toolWidgets.set(tool.id, record);
+        if (group)
+            group.tools.push(tool);
         this._refreshToolWidget(record);
         toolBox.add_child(badge);
     }
@@ -2706,6 +3331,8 @@ export class TranscriptDrawer {
         }
         detailsLabel.visible = record.expanded && detailText.length > 0;
         confirmRow.visible = awaiting;
+        if (record.group)
+            this._refreshToolGroup(record.group);
     }
 
     _formatToolStatus(status) {

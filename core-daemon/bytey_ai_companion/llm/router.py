@@ -742,7 +742,25 @@ class LLMRouter:
         for msg in messages:
             role = msg.get("role", "user")
             if role in ("user", "system"):
-                wire_messages.append({"role": role, "content": _stringify_content(msg.get("content"))})
+                text_val = _stringify_content(msg.get("content"))
+                images = msg.get("images") if role == "user" else None
+                if isinstance(images, list) and images:
+                    parts_content: list[dict[str, Any]] = []
+                    if text_val:
+                        parts_content.append({"type": "text", "text": text_val})
+                    for img in images:
+                        b64 = str((img or {}).get("data_base64") or "")
+                        mime = str((img or {}).get("mime_type") or "image/png")
+                        if b64:
+                            parts_content.append(
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                                }
+                            )
+                    wire_messages.append({"role": role, "content": parts_content or text_val})
+                else:
+                    wire_messages.append({"role": role, "content": text_val})
             elif role == "assistant":
                 tcs = _extract_message_tool_calls(msg)
                 entry: dict[str, Any] = {
@@ -886,7 +904,20 @@ class LLMRouter:
         for msg in messages:
             role = msg.get("role", "user")
             if role in ("user", "system"):
-                wire_messages.append({"role": role, "content": _stringify_content(msg.get("content"))})
+                entry_u: dict[str, Any] = {
+                    "role": role,
+                    "content": _stringify_content(msg.get("content")),
+                }
+                images = msg.get("images") if role == "user" else None
+                if isinstance(images, list) and images:
+                    b64_list = [
+                        str((img or {}).get("data_base64") or "")
+                        for img in images
+                        if isinstance(img, dict) and img.get("data_base64")
+                    ]
+                    if b64_list:
+                        entry_u["images"] = b64_list
+                wire_messages.append(entry_u)
             elif role == "assistant":
                 tcs = _extract_message_tool_calls(msg)
                 entry: dict[str, Any] = {
@@ -1021,12 +1052,23 @@ class LLMRouter:
             if role == "system":
                 continue
             if role == "user":
-                contents.append(
-                    _genai_types.Content(
-                        role="user",
-                        parts=[_genai_types.Part.from_text(text=_stringify_content(msg.get("content")))],
-                    )
-                )
+                u_parts: list[Any] = [
+                    _genai_types.Part.from_text(text=_stringify_content(msg.get("content")))
+                ]
+                images = msg.get("images")
+                if isinstance(images, list):
+                    import base64 as _b64
+
+                    for img in images:
+                        b64 = str((img or {}).get("data_base64") or "")
+                        mime = str((img or {}).get("mime_type") or "image/png")
+                        if b64:
+                            u_parts.append(
+                                _genai_types.Part.from_bytes(
+                                    data=_b64.b64decode(b64), mime_type=mime
+                                )
+                            )
+                contents.append(_genai_types.Content(role="user", parts=u_parts))
             elif role == "assistant":
                 tcs = _extract_message_tool_calls(msg)
                 for tc in tcs:
@@ -1187,7 +1229,29 @@ class LLMRouter:
                 if sys_text:
                     extra_system.append(sys_text)
             elif role == "user":
-                wire_messages.append({"role": "user", "content": _stringify_content(msg.get("content"))})
+                u_text = _stringify_content(msg.get("content"))
+                images = msg.get("images")
+                if isinstance(images, list) and images:
+                    u_blocks: list[dict[str, Any]] = []
+                    for img in images:
+                        b64 = str((img or {}).get("data_base64") or "")
+                        mime = str((img or {}).get("mime_type") or "image/png")
+                        if b64:
+                            u_blocks.append(
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": mime,
+                                        "data": b64,
+                                    },
+                                }
+                            )
+                    if u_text:
+                        u_blocks.append({"type": "text", "text": u_text})
+                    wire_messages.append({"role": "user", "content": u_blocks or u_text})
+                else:
+                    wire_messages.append({"role": "user", "content": u_text})
             elif role == "assistant":
                 blocks: list[dict[str, Any]] = []
                 text = _stringify_content(msg.get("content"))

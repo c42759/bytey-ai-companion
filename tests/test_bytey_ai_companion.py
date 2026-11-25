@@ -6518,5 +6518,242 @@ class TestGitDaemonIntegration(unittest.IsolatedAsyncioTestCase):
                 await daemon.stop()
 
 
+class TestInterleavedMessageParts(unittest.IsolatedAsyncioTestCase):
+    async def test_storage_persists_parts_and_falls_back_for_legacy_rows(self) -> None:
+        from bytey_ai_companion.storage import StorageManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "bytey.db"
+            storage = StorageManager(db_path)
+            await storage.init_db()
+            try:
+                sess = await storage.create_session("Parts Test")
+                sid = sess["id"]
+
+                # Interleaved parts persisted and returned in order
+                msg = await storage.add_message(
+                    sid,
+                    role="assistant",
+                    content="Before\n\nAfter",
+                    parts=[
+                        {"type": "text", "text": "Before"},
+                        {"type": "tool_call", "call_id": "call-1"},
+                        {"type": "text", "text": "After"},
+                    ],
+                )
+                await storage.add_tool_call(
+                    message_id=msg["id"],
+                    server_name="srv",
+                    tool_name="ping",
+                    arguments_json="{}",
+                    status="ok",
+                    call_id="call-1",
+                )
+                listed = await storage.list_messages(sid)
+                self.assertEqual(len(listed), 1)
+                self.assertEqual(
+                    listed[0]["parts"],
+                    [
+                        {"type": "text", "text": "Before"},
+                        {"type": "tool_call", "call_id": "call-1"},
+                        {"type": "text", "text": "After"},
+                    ],
+                )
+
+                # Legacy row (empty parts_json) reconstructs [text, ...tool_calls]
+                legacy_msg = await storage.add_message(
+                    sid, role="assistant", content="Legacy body"
+                )
+                await storage.add_tool_call(
+                    message_id=legacy_msg["id"],
+                    server_name="srv",
+                    tool_name="old_tool",
+                    arguments_json="{}",
+                    status="ok",
+                    call_id="call-legacy",
+                )
+                listed2 = await storage.list_messages(sid)
+                self.assertEqual(
+                    listed2[1]["parts"],
+                    [
+                        {"type": "text", "text": "Legacy body"},
+                        {"type": "tool_call", "call_id": "call-legacy"},
+                    ],
+                )
+            finally:
+                await storage.close()
+
+    async def test_prompt_turn_interleaves_text_and_tool_calls(self) -> None:
+        class _TwoRoundToolRouter:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def generate_chat(self, **kwargs: Any) -> dict[str, Any]:
+                on_text_chunk = kwargs.get("on_text_chunk")
+                self.calls += 1
+                if self.calls == 1:
+                    if on_text_chunk:
+                        await on_text_chunk("[emotion:curious] Checking status...")
+                    return {
+                        "content": "[emotion:curious] Checking status...",
+                        "emotion": "curious",
+                        "tool_calls": [
+                            {
+                                "id": "tc-1",
+                                "name": "bytey_workspace__list_files",
+                                "arguments": {"path": "."},
+                            }
+                        ],
+                        "raw_assistant_message": {
+                            "role": "assistant",
+                            "content": "Checking status...",
+                        },
+                    }
+                if on_text_chunk:
+                    await on_text_chunk("Done checking!")
+                return {
+                    "content": "Done checking!",
+                    "emotion": "happy",
+                    "tool_calls": [],
+                    "raw_assistant_message": {
+                        "role": "assistant",
+                        "content": "Done checking!",
+                    },
+                }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            ws = tmp / "ws"
+            ws.mkdir()
+            (ws / "a.txt").write_text("hi", encoding="utf-8")
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=tmp / "cfg",
+                data_dir=tmp / "data",
+                enable_voice_capture=False,
+                llm_router=_TwoRoundToolRouter(),
+            )
+            daemon.config_manager.update_config(
+                {
+                    "workspace": {"active_path": str(ws), "require_write_approval": False},
+                    "voice_out": {"tts_provider": "disabled"},
+                }
+            )
+            broadcasts: list[dict[str, Any]] = []
+            orig_broadcast = daemon.ipc.connection_manager.broadcast
+
+            async def _capture_broadcast(payload: dict[str, Any]) -> None:
+                broadcasts.append(payload)
+                await orig_broadcast(payload)
+
+            daemon.ipc.connection_manager.broadcast = _capture_broadcast  # type: ignore[method-assign]
+            await daemon.start()
+            try:
+                sess = await daemon.storage.get_or_create_active_session()
+                await daemon.handle_user_prompt(
+                    "list files", session_id=sess["id"], input_mode="text"
+                )
+                msgs = await daemon.storage.list_messages(sess["id"])
+                assistant = [m for m in msgs if m["role"] == "assistant"][-1]
+                self.assertEqual(len(assistant["tool_calls"]), 1)
+                call_id = assistant["tool_calls"][0]["id"]
+                self.assertEqual(
+                    assistant["parts"],
+                    [
+                        {"type": "text", "text": "Checking status..."},
+                        {"type": "tool_call", "call_id": call_id},
+                        {"type": "text", "text": "Done checking!"},
+                    ],
+                )
+                final_deltas = [
+                    b for b in broadcasts
+                    if b.get("type") == "transcript_delta"
+                    and b.get("is_final") is True
+                    and b.get("role") == "assistant"
+                ]
+                self.assertEqual(len(final_deltas), 1)
+                self.assertEqual(final_deltas[0]["parts"], assistant["parts"])
+            finally:
+                await daemon.stop()
+
+
+class TestAttachments(unittest.IsolatedAsyncioTestCase):
+    async def test_text_and_image_attachments_stored_per_session_and_cleaned_up(self) -> None:
+        from bytey_ai_companion.llm.router import LLMRouter
+
+        captured_messages: list[list[dict[str, Any]]] = []
+
+        class _CaptureRouter(LLMRouter):
+            async def generate_chat(self, **kwargs: Any) -> dict[str, Any]:
+                captured_messages.append(list(kwargs.get("messages") or []))
+                on_text_chunk = kwargs.get("on_text_chunk")
+                if on_text_chunk:
+                    await on_text_chunk("Got your files.")
+                return {"content": "Got your files.", "emotion": "happy", "tool_calls": []}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            src_txt = tmp / "notes.py"
+            src_txt.write_text("print('hello attachment')\n", encoding="utf-8")
+            # Minimal 1x1 PNG bytes
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+                b"\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00"
+                b"\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            src_img = tmp / "shot.png"
+            src_img.write_bytes(png_bytes)
+
+            data_dir = tmp / "data"
+            daemon = ByteyDaemon(
+                host="127.0.0.1",
+                port=0,
+                config_dir=tmp / "cfg",
+                data_dir=data_dir,
+                enable_voice_capture=False,
+                llm_router=_CaptureRouter(),
+            )
+            daemon.config_manager.update_config({"voice_out": {"tts_provider": "disabled"}})
+            await daemon.start()
+            try:
+                sess = await daemon.storage.get_or_create_active_session()
+                sid = sess["id"]
+                await daemon.handle_user_prompt(
+                    "Check these",
+                    session_id=sid,
+                    input_mode="text",
+                    attachments=[
+                        {"path": str(src_txt), "name": "notes.py"},
+                        {"path": str(src_img), "name": "shot.png"},
+                    ],
+                )
+                att_dir = daemon._attachments_dir(sid)
+                self.assertTrue(att_dir.is_dir())
+                stored_files = list(att_dir.iterdir())
+                self.assertEqual(len(stored_files), 2)
+
+                msgs = await daemon.storage.list_messages(sid)
+                user_msg = [m for m in msgs if m["role"] == "user"][-1]
+                att_parts = [p for p in user_msg["parts"] if p["type"] == "attachment"]
+                self.assertEqual(len(att_parts), 2)
+                self.assertEqual({p["name"] for p in att_parts}, {"notes.py", "shot.png"})
+
+                self.assertEqual(len(captured_messages), 1)
+                last_u = [m for m in captured_messages[0] if m["role"] == "user"][-1]
+                self.assertIn("print('hello attachment')", last_u["content"])
+                self.assertEqual(len(last_u.get("images") or []), 1)
+                self.assertEqual(last_u["images"][0]["mime_type"], "image/png")
+
+                # Deleting session cleans up attachments directory
+                base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+                async with httpx.AsyncClient(base_url=base_url) as client:
+                    del_resp = await client.delete(f"/api/v1/sessions/{sid}")
+                    self.assertEqual(del_resp.status_code, 200)
+                self.assertFalse(att_dir.exists())
+            finally:
+                await daemon.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
