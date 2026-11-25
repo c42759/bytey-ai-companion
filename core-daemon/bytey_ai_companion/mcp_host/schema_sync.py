@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from pydantic import BaseModel
 
@@ -49,6 +49,48 @@ def _validate_str_dict(val: Any, field: str, server_name: str) -> dict[str, str]
             )
         out[k] = v
     return out
+
+
+def normalize_mcp_url(url: str) -> str:
+    """Return a canonical representation of an MCP server URL for duplicate checks."""
+    cleaned = url.strip()
+    if not cleaned:
+        return ""
+    parsed = urlparse(cleaned)
+    if not parsed.scheme or not parsed.netloc:
+        return cleaned.rstrip("/")
+    path = parsed.path.rstrip("/")
+    return urlunparse((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        path,
+        parsed.params,
+        parsed.query,
+        "",
+    ))
+
+
+def validate_unique_mcp_urls(servers: dict[str, Any]) -> None:
+    """Raise ValueError if two MCP servers configure the same normalized URL."""
+    seen_urls: dict[str, str] = {}
+    for name, entry in servers.items():
+        if isinstance(entry, BaseModel):
+            raw_url = getattr(entry, "url", "")
+        elif isinstance(entry, dict):
+            raw_url = entry.get("url", "")
+        else:
+            continue
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            continue
+        canon = normalize_mcp_url(raw_url)
+        if not canon:
+            continue
+        existing_name = seen_urls.get(canon)
+        if existing_name is not None:
+            raise ValueError(
+                f"MCP server '{name}' URL duplicates existing server '{existing_name}' ({raw_url.strip()!r})"
+            )
+        seen_urls[canon] = str(name)
 
 
 def to_mcp_servers_json(servers: dict[str, Any]) -> str:
@@ -221,4 +263,5 @@ def from_mcp_servers_json(
             "disabled_tools": disabled_tools,
         }
 
+    validate_unique_mcp_urls(result)
     return result
