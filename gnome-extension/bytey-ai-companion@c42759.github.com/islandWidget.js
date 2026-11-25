@@ -744,6 +744,14 @@ export class IslandWidget {
             const b = (21 + (138 - 21) * blend) / 255;
             return [r, g, b];
         }
+        if (palette === 'green') {
+            const blend = 0.5 - 0.5 * Math.cos(2 * Math.PI * phasePos);
+            // Interpolate between green (#22C55E) and light green (#86EFAC)
+            const r = (34 + (134 - 34) * blend) / 255;
+            const g = (197 + (239 - 197) * blend) / 255;
+            const b = (94 + (172 - 94) * blend) / 255;
+            return [r, g, b];
+        }
         return _hslToRgb(phasePos, sat, light);
     }
 
@@ -875,13 +883,23 @@ export class IslandWidget {
 
             const mode = this._visualsConfig.animation_mode ?? 'full';
             const isNotch = this._isNotchMode();
-            if ((this._state === 'THINKING' || this._state === 'TOOL_CALLING') && mode !== 'disabled') {
+            if (this._state === 'THINKING' && mode !== 'disabled') {
                 if (isNotch) {
                     this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'full');
                     this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'full');
                 } else {
                     this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'full');
                     this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'full');
+                }
+                return;
+            }
+            if (this._state === 'TOOL_CALLING' && mode !== 'disabled') {
+                if (isNotch) {
+                    this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'green');
+                    this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'green');
+                } else {
+                    this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'green');
+                    this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'green');
                 }
                 return;
             }

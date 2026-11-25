@@ -769,9 +769,11 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         const chatWidthRow = makeSpinRow('Chat Width (px)', 260, 3000, 10);
         const chatHeightRow = makeSpinRow('Chat Height (px)', 220, 900, 10);
+        const chatOpacityRow = makeSpinRow('Chat Opacity (%)', 10, 100, 5);
         drawerGroup.add(densityRow);
         drawerGroup.add(chatWidthRow);
         drawerGroup.add(chatHeightRow);
+        drawerGroup.add(chatOpacityRow);
         visualsPage.add(drawerGroup);
 
         const testAnimGroup = new Adw.PreferencesGroup({
@@ -2483,6 +2485,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 islandWidthRow.set_value(Number(visuals.island_width ?? 140));
                 chatWidthRow.set_value(Number(visuals.chat_width ?? 380));
                 chatHeightRow.set_value(Number(visuals.chat_height ?? 420));
+                chatOpacityRow.set_value(Number(visuals.chat_opacity ?? 96));
 
                 posModeRow.set_selected(positionModeIndexForValue(visuals.position_mode ?? 'fixed'));
                 monitorRow.set_value(Number(visuals.monitor_index ?? 0));
@@ -2974,6 +2977,10 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         chatHeightRow.connect('notify::value', () => onUserChange(() => {
             patchConfig({visuals: {chat_height: Math.round(chatHeightRow.get_value())}}, 'Saved chat height');
+        }));
+
+        chatOpacityRow.connect('notify::value', () => onUserChange(() => {
+            patchConfig({visuals: {chat_opacity: Math.round(chatOpacityRow.get_value())}}, 'Saved chat opacity');
         }));
 
         previewAnimBtn.connect('clicked', async () => {

@@ -174,6 +174,7 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "chat_width": (("visuals", "chat_width"), ("chat_width",)),
     "chat_height": (("visuals", "chat_height"), ("chat_height",)),
     "chat_density": (("visuals", "chat_density"), ("chat_density",)),
+    "chat_opacity": (("visuals", "chat_opacity"), ("chat_opacity",)),
     "skills_enabled": (("skills", "enabled"), ("skills_enabled",)),
     "skills_allow_script_execution": (
         ("skills", "allow_script_execution"),
@@ -3539,6 +3540,17 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             ),
         )
         chat_group.add(self.chat_height_row)
+
+        self.chat_opacity_row = Adw.SpinRow.new_with_range(10, 100, 5)
+        self.chat_opacity_row.set_title("Chat Opacity (%)")
+        self.chat_opacity_row.set_subtitle("Drawer background opacity (10–100%)")
+        self.chat_opacity_row.connect(
+            "notify::value",
+            lambda *_: self._patch_debounced(
+                "chat_opacity", lambda: {"chat_opacity": int(self.chat_opacity_row.get_value())}
+            ),
+        )
+        chat_group.add(self.chat_opacity_row)
         page.add(chat_group)
 
         test_anim_group = Adw.PreferencesGroup(
@@ -3981,6 +3993,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self.island_width_row.set_value(float(self._read_field("island_width", 140)))
             self.chat_width_row.set_value(float(self._read_field("chat_width", 380)))
             self.chat_height_row.set_value(float(self._read_field("chat_height", 420)))
+            self.chat_opacity_row.set_value(float(self._read_field("chat_opacity", 96)))
             pos_mode = str(self._read_field("position_mode", "fixed"))
             self._set_position_mode_selection(pos_mode)
             self._sync_position_groups(pos_mode)

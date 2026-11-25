@@ -1225,6 +1225,22 @@ export class TranscriptDrawer {
         if (DENSITY_ORDER.includes(rawDensity))
             this._applyDensity(rawDensity);
 
+        const rawOpacity = Number(config.visuals?.chat_opacity ?? config.chat_opacity);
+        if (Number.isFinite(rawOpacity) && this._container) {
+            const pct = Math.max(10, Math.min(100, Math.round(rawOpacity)));
+            this._container.set_style(`background-color: rgba(22, 24, 29, ${(pct / 100).toFixed(2)});`);
+        }
+
+        const wantSidebar = Boolean(config.visuals?.chat_sidebar_open ?? config.chat_sidebar_open ?? false);
+        if (wantSidebar !== this._sidebarOpen && this._sidebarBox && this._container) {
+            this._sidebarOpen = wantSidebar;
+            this._sidebarBox.visible = wantSidebar;
+            this._sidebarBox.width = wantSidebar ? this._getSidebarWidth() : 0;
+            this._applyDrawerSize();
+            if (wantSidebar)
+                this._callbacks.onToggleSidebar?.(true);
+        }
+
         const wsCfg = config.workspace ?? {};
         const requireWrite = wsCfg.require_write_approval ?? true;
         const requireCmd = wsCfg.require_command_approval ?? true;

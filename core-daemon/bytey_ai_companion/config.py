@@ -300,6 +300,8 @@ class VisualsConfig(BaseModel):
     chat_width: int = 380
     chat_height: int = 420
     chat_density: str = "comfortable"
+    chat_opacity: int = 96
+    chat_sidebar_open: bool = False
     eye_color: str = DEFAULT_EYE_COLOR
     background_color: str = DEFAULT_BG_COLOR
     border_color: str = DEFAULT_BORDER_COLOR
@@ -321,6 +323,15 @@ class VisualsConfig(BaseModel):
         except (TypeError, ValueError):
             return 140
         return max(140, min(450, num))
+
+    @field_validator("chat_opacity", mode="before")
+    @classmethod
+    def _validate_chat_opacity(cls, value: Any) -> int:
+        try:
+            num = int(round(float(value)))
+        except (TypeError, ValueError):
+            return 96
+        return max(10, min(100, num))
 
     @field_validator("eye_color", "background_color", "border_color", mode="before")
     @classmethod
