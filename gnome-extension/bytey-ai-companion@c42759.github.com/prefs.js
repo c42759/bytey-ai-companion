@@ -97,8 +97,16 @@ function normalizeUrl(raw) {
     return /^https?:\/\/\S+$/i.test(stripped) ? stripped : null;
 }
 
-function makeComboRow(title, items) {
+function makeSearchableComboRow(props) {
     return new Adw.ComboRow({
+        enable_search: true,
+        expression: Gtk.PropertyExpression.new(Gtk.StringObject, null, 'string'),
+        ...props,
+    });
+}
+
+function makeComboRow(title, items) {
+    return makeSearchableComboRow({
         title,
         model: Gtk.StringList.new(items),
     });
@@ -843,10 +851,9 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
         const {row: kokoroApiKeyRow, badge: kokoroApiKeyBadge} = makeSecretRow('Kokoro API Key');
         const {row: elevenlabsApiKeyRow, badge: elevenlabsApiKeyBadge} = makeSecretRow('ElevenLabs API Key');
-        const elevenlabsVoiceRow = new Adw.ComboRow({
+        const elevenlabsVoiceRow = makeSearchableComboRow({
             title: 'ElevenLabs Voice',
             subtitle: 'Select a voice or refresh from your ElevenLabs account',
-            enable_search: true,
             model: Gtk.StringList.new(DEFAULT_ELEVENLABS_VOICES.map(v => `${v.name} — ${v.id}`)),
         });
         const elevenlabsRefreshBtn = new Gtk.Button({
@@ -866,15 +873,14 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
         elevenlabsModelRow.set_text('eleven_flash_v2_5');
 
-        const piperLangRow = new Adw.ComboRow({
+        const piperLangRow = makeSearchableComboRow({
             title: 'Piper Language',
             subtitle: 'Filter voice models by language',
             model: Gtk.StringList.new(['All Languages']),
         });
-        const piperModelRow = new Adw.ComboRow({
+        const piperModelRow = makeSearchableComboRow({
             title: 'Piper Voice Model',
             subtitle: 'Local CPU neural voice model',
-            enable_search: true,
             model: Gtk.StringList.new(['en_US-lessac-medium']),
         });
         const piperRefreshBtn = new Gtk.Button({
@@ -896,7 +902,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
         piperCustomModelRow.set_text(DEFAULT_PIPER_MODEL);
 
-        const piperPresetRow = new Adw.ComboRow({
+        const piperPresetRow = makeSearchableComboRow({
             title: 'Voice Style (Funny Presets)',
             subtitle: 'Quick presets for normal or funny voices',
             model: Gtk.StringList.new(PIPER_VOICE_PRESETS.map(p => p.label)),
@@ -980,14 +986,13 @@ export default class ByteyPreferences extends ExtensionPreferences {
             show_apply_button: true,
         });
         const {row: aiApiKeyRow, badge: aiApiKeyBadge} = makeSecretRow('API Key');
-        const modelRow = new Adw.ComboRow({
+        const modelRow = makeSearchableComboRow({
             title: 'Model',
             subtitle: 'Select a model from the active provider',
-            enable_search: true,
             model: Gtk.StringList.new(['No models available']),
             sensitive: false,
         });
-        const contextSizeRow = new Adw.ComboRow({
+        const contextSizeRow = makeSearchableComboRow({
             title: 'Context Size',
             subtitle: 'Context window tokens (Auto uses provider default)',
             model: Gtk.StringList.new(contextPresetOptions.map(o => o.label)),
@@ -1270,7 +1275,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         workspaceActiveRow.add_suffix(workspaceBtnBox);
         workspaceFolderGroup.add(workspaceActiveRow);
 
-        const workspaceRecentRow = new Adw.ComboRow({
+        const workspaceRecentRow = makeSearchableComboRow({
             title: 'Recent Work Folders',
             subtitle: 'Quickly switch to a previously used folder',
             model: Gtk.StringList.new(['None (General Assistant)']),
@@ -1602,6 +1607,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 return;
             }
 
+            parsedModels.sort((a, b) => a.id.localeCompare(b.id, undefined, {sensitivity: 'base'}));
             availableModels = parsedModels;
             modelToolMap.clear();
             modelContextMap.clear();
@@ -3652,7 +3658,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 modelRow.add_suffix(saveModelBtn);
                 row.add_row(modelRow);
 
-                const permRow = new Adw.ComboRow({
+                const permRow = makeSearchableComboRow({
                     title: 'Permission Mode',
                     subtitle: presets,
                     model: new Gtk.StringList({strings: permModes}),

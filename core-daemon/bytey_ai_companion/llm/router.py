@@ -331,14 +331,25 @@ class LLMRouter:
         """Discover available models and their tool-calling capability for a provider."""
         prov = (provider or "").strip().lower()
         if prov == "ollama":
-            return await self._discover_ollama_models(base_url)
-        if prov in ("openai", "custom"):
-            return await self._discover_openai_compat_models(prov, base_url, api_key)
-        if prov == "gemini":
-            return await self._discover_gemini_models(base_url, api_key)
-        if prov == "anthropic":
-            return await self._discover_anthropic_models(base_url, api_key)
-        return {"models": [], "error": f"Unsupported provider: {provider}"}
+            result = await self._discover_ollama_models(base_url)
+        elif prov in ("openai", "custom"):
+            result = await self._discover_openai_compat_models(prov, base_url, api_key)
+        elif prov == "gemini":
+            result = await self._discover_gemini_models(base_url, api_key)
+        elif prov == "anthropic":
+            result = await self._discover_anthropic_models(base_url, api_key)
+        else:
+            return {"models": [], "error": f"Unsupported provider: {provider}"}
+
+        models = result.get("models")
+        if isinstance(models, list):
+            models.sort(
+                key=lambda m: (
+                    str((m.get("id") if isinstance(m, dict) else m) or "").casefold(),
+                    str((m.get("id") if isinstance(m, dict) else m) or ""),
+                )
+            )
+        return result
 
     async def _discover_ollama_models(self, base_url: str) -> dict[str, Any]:
         base = _normalize_ollama_base(base_url)

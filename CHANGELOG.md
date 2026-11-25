@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-25
+
+### Added
+
+- Searchable, live-filtering select boxes across `prefs.js` (`makeSearchableComboRow`), `settings-ui/bytey_settings/window.py` (`_make_string_combo`), and GNOME drawer model/workspace menus (`_populateSearchableMenu`) (`72827f8`).
+
+### Changed
+
+- Sorted all model selector lists A-Z case-insensitively across `LLMRouter.discover_models()`, `settings-ui`, `prefs.js`, and drawer model menu (`72827f8`).
+- Expanded multiline chat input to 6 lines maximum height (`ENTRY_MAX_LINES = 6`) with `Enter` to send, `Shift+Enter` for newline, visible scrollbar, and cursor auto-scrolling (`72827f8`).
+
+### Fixed
+
+- Fixed `Shift+Enter` newline insertion in GNOME drawer chat input (`ct.insert_text('\n', ct.get_cursor_position())` instead of `insert_unichar(0x0A)`) (`72827f8`).
+
 ## [1.3.0] - 2026-11-25
 
 ### Added
@@ -94,7 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `PLAN.md` (`5f16fb1`).
 - Removed floating mode option from right-click context menu (`f253fd7`).
 
-[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.0.0...v1.1.0
