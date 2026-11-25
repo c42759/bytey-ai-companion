@@ -785,6 +785,9 @@ class ConfigManager:
             servers_patch = patch["mcp_servers"]
             if not isinstance(servers_patch, dict):
                 raise ValueError("Section 'mcp_servers' must be a dictionary")
+            from .mcp_host.schema_sync import validate_unique_mcp_urls
+
+            validate_unique_mcp_urls(servers_patch)
             current_data["mcp_servers"] = copy.deepcopy(servers_patch)
 
         updated = ByteyConfig.model_validate(current_data)
@@ -805,6 +808,10 @@ class ConfigManager:
         }
         if not cleaned_data:
             raise ValueError("Invalid configuration JSON: no recognized configuration sections")
+        if "mcp_servers" in cleaned_data and isinstance(cleaned_data["mcp_servers"], dict):
+            from .mcp_host.schema_sync import validate_unique_mcp_urls
+
+            validate_unique_mcp_urls(cleaned_data["mcp_servers"])
 
         updated = ByteyConfig.model_validate(cleaned_data)
         self._config = updated

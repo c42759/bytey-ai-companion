@@ -9,6 +9,7 @@ import os
 import threading
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse, urlunparse
 
 import gi
 
@@ -549,6 +550,24 @@ def _expand_preferences_page(widget: Gtk.Widget) -> None:
         child = child.get_next_sibling()
 
 
+def _normalize_mcp_url(url: str) -> str:
+    """Return canonical MCP server URL for duplicate checks."""
+    cleaned = url.strip()
+    if not cleaned:
+        return ""
+    parsed = urlparse(cleaned)
+    if not parsed.scheme or not parsed.netloc:
+        return cleaned.rstrip("/")
+    return urlunparse((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        parsed.path.rstrip("/"),
+        parsed.params,
+        parsed.query,
+        "",
+    ))
+
+
 class MCPServerDialog(Adw.Dialog):
     """Modal dialog for adding or editing a single MCP server configuration."""
 
@@ -558,12 +577,14 @@ class MCPServerDialog(Adw.Dialog):
         on_save: Callable[[str, dict[str, Any], str | None], None],
         existing_name: str | None = None,
         existing_cfg: dict[str, Any] | None = None,
+        existing_servers: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         title = f"Edit MCP Server: {existing_name}" if existing_name else "Add MCP Server"
         super().__init__(title=title, content_width=520, content_height=600)
         self._parent = parent
         self._on_save = on_save
         self._original_name = existing_name
+        self._existing_servers = existing_servers or {}
         cfg = copy.deepcopy(existing_cfg or {})
 
         toolbar = Adw.ToolbarView()
@@ -736,6 +757,16 @@ class MCPServerDialog(Adw.Dialog):
             if not url:
                 self._show_error("URL is required for HTTP/SSE transport.")
                 return
+            target_norm = _normalize_mcp_url(url)
+            for other_name, other_cfg in self._existing_servers.items():
+                if self._original_name and other_name == self._original_name:
+                    continue
+                other_url = _normalize_mcp_url(str((other_cfg or {}).get("url") or ""))
+                if other_url and other_url == target_norm:
+                    self._show_error(
+                        f"URL matches existing MCP server '{other_name}'. Each server must use a unique URL."
+                    )
+                    return
             new_cfg["url"] = url
 
             raw_headers = self._read_buffer(self.headers_view)
@@ -1519,7 +1550,13 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
 
     def _open_mcp_dialog(self, name: str | None) -> None:
         cfg = self._mcp_servers.get(name, {}) if name else None
-        dialog = MCPServerDialog(self, self._on_mcp_dialog_saved, existing_name=name, existing_cfg=cfg)
+        dialog = MCPServerDialog(
+            self,
+            self._on_mcp_dialog_saved,
+            existing_name=name,
+            existing_cfg=cfg,
+            existing_servers=self._mcp_servers,
+        )
         dialog.present(self)
 
     def _on_mcp_dialog_saved(
