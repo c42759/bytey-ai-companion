@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Rich Markdown rendering in GNOME Shell transcript drawer (`transcriptDrawer.js`, `stylesheet.css`): headings (`#`–`######`), bold (`**`/`__`), italic (`*`/`_`), bold+italic (`***`/`___`), strikethrough (`~~`), inline code spans, `[text](url)` links, unordered/ordered lists with indentation, blockquotes (`>`), and horizontal rules (`---`/`***`/`___`), with safe Pango markup escaping for streaming replies (`422a007`).
 
+### Fixed
+
+- Duplicate MCP server URL validation across `core-daemon` (`schema_sync.py`, `config.py`), `settings-ui` (`window.py`), and `gnome-extension` (`prefs.js`) so no two configured servers can share the same normalized URL (`b039196`).
+
 ## [1.4.0] - 2026-11-25
 
 ### Added
