@@ -2413,6 +2413,28 @@ export default class ByteyPreferences extends ExtensionPreferences {
                         showDlgError('URL is required for HTTP/SSE transport.');
                         return;
                     }
+                    const normalizeUrl = raw => {
+                        const trimmed = String(raw || '').trim();
+                        if (!trimmed)
+                            return '';
+                        try {
+                            const parsed = new URL(trimmed);
+                            const path = parsed.pathname.replace(/\/+$/, '');
+                            return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${path}${parsed.search}`;
+                        } catch (_e) {
+                            return trimmed.replace(/\/+$/, '');
+                        }
+                    };
+                    const targetNorm = normalizeUrl(url);
+                    for (const [otherName, otherCfg] of Object.entries(mcpServers)) {
+                        if (existingName && otherName === existingName)
+                            continue;
+                        const otherUrl = normalizeUrl(otherCfg?.url ?? '');
+                        if (otherUrl && otherUrl === targetNorm) {
+                            showDlgError(`URL matches existing MCP server '${otherName}'. Each server must use a unique URL.`);
+                            return;
+                        }
+                    }
                     nextCfg.url = url;
 
                     const rawHeaders = readTextBuffer(headersView);

@@ -1221,6 +1221,37 @@ class TestSchemaSyncAndMCP(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed["remote_api"]["url"], "https://example.com/mcp")
         self.assertFalse(parsed["remote_api"]["enabled"])
 
+    def test_from_mcp_servers_json_rejects_duplicate_urls(self) -> None:
+        dup_payload = json.dumps({
+            "mcpServers": {
+                "Fetch": {"url": "http://100.67.225.57:8081/sse", "transport": "sse"},
+                "Web Search": {"url": "HTTP://100.67.225.57:8081/sse/", "transport": "sse"},
+            }
+        })
+        with self.assertRaisesRegex(ValueError, "duplicates existing server"):
+            from_mcp_servers_json(dup_payload)
+
+        # Updating/editing the same server with its own URL succeeds
+        unique_payload = json.dumps({
+            "mcpServers": {
+                "Fetch": {"url": "http://100.67.225.57:8081/sse", "transport": "sse"},
+                "Web Search": {"url": "http://100.67.225.57:8082/sse", "transport": "sse"},
+            }
+        })
+        parsed = from_mcp_servers_json(unique_payload)
+        self.assertEqual(len(parsed), 2)
+
+        # ConfigManager.update_config also rejects duplicate URLs
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cm = ConfigManager(config_dir=Path(tmpdir))
+            with self.assertRaisesRegex(ValueError, "duplicates existing server"):
+                cm.update_config({
+                    "mcp_servers": {
+                        "Fetch": {"transport": "sse", "url": "http://100.67.225.57:8081/sse"},
+                        "Web Search": {"transport": "sse", "url": "http://100.67.225.57:8081/sse"},
+                    }
+                })
+
     async def test_stdio_mcp_server_tools_and_confirmation_gate(self) -> None:
         servers_cfg = {
             "mock": {
