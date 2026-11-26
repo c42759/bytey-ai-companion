@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-26
+
+### Added
+
+- Configurable chat history **Focus Window** (`focus_window`, `0` = full history, `X > 0` = latest `X` history messages + current user message) across `core-daemon` (`config.py`, `storage.py`, `main.py`), `settings-ui` (`api_client.py`, `window.py`), and `gnome-extension` (`prefs.js`) without deleting database messages (`caf8de5`).
+- Context window token usage tracking across `LLMRouter.generate_chat()`, SQLite `usage_json` persistence (`storage.py`), `transcript_delta` WebSocket broadcasts, and a Cairo donut ring indicator with hover tooltip in the GNOME Shell transcript drawer (`transcriptDrawer.js`, `stylesheet.css`) (`eb50528`).
+- Context-aware emotion capture from message context (`emotions.py`, `router.py`, `main.py`) (`26b4dc7`).
+
 ## [1.5.0] - 2026-11-25
 
 ### Added
@@ -119,7 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `PLAN.md` (`5f16fb1`).
 - Removed floating mode option from right-click context menu (`f253fd7`).
 
-[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.2.0...v1.3.0
