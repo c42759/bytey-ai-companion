@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-11-26
+
+### Changed
+
+- Modularized GNOME Shell extension (`extension.js` -> `daemonClient.js`, `prefs.js` -> `prefs/` with `mcpSection.js`, `transcriptDrawer.js` -> `markdownRenderer.js`, `searchableMenu.js`, `attachmentPicker.js`, `contextRing.js`, `toolCallCard.js`, `sessionSidebar.js`, `islandWidget.js` -> `islandBorderPainter.js`, plus `colorUtils.js` and `sharedUtils.js`) and updated `gnome-extension/build.sh` (`a4cec19`, `b2696fc`, `d334ece`, `e8be5e0`, `a192b53`, `450a5f2`, `a41aeac`).
+- Replaced Unicode emoji/glyph UI placeholders with `St.Icon` / `Gtk.Image` and consolidated duplicate CSS/dialog/color/URL helpers (`a4cec19`, `b2696fc`, `d334ece`).
+- Removed redundant `_disabled`/`_destroyed` guard flags, unnecessary `try-catch` wrappers, and legacy compatibility fallbacks for GNOME Shell 48–51 (`a4cec19`, `509028a`).
+
+### Fixed
+
+- Tracked GLib idle sources, portal D-Bus subscriptions, and `zenity` subprocess cancellables cleanly across `destroy()` teardown (`a4cec19`).
+- Fixed `_renderSessions()` clearing `_copyTimers`, `prefs/visualsPage.js` live-preview `httpJson` error reporting, and `metadata.json` description length (`a7aa9cd`, `509028a`).
+
 ## [1.6.0] - 2026-11-26
 
 ### Added
@@ -127,7 +140,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `PLAN.md` (`5f16fb1`).
 - Removed floating mode option from right-click context menu (`f253fd7`).
 
-[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/c42759/bytey-ai-companion/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.3.0...v1.4.0
