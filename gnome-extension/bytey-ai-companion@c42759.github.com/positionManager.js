@@ -20,7 +20,7 @@ export class PositionManager {
      * @returns {number}
      */
     resolveMonitorIndex(monitorIndex = 0) {
-        const monitors = Main.layoutManager?.monitors ?? [];
+        const monitors = Main.layoutManager.monitors ?? [];
         if (monitors.length === 0)
             return -1;
 
@@ -41,13 +41,13 @@ export class PositionManager {
      * @returns {{ x: number, y: number, width: number, height: number }}
      */
     getMonitorGeometry(monitorIndex = 0) {
-        const monitors = Main.layoutManager?.monitors ?? [];
+        const monitors = Main.layoutManager.monitors ?? [];
         const idx = this.resolveMonitorIndex(monitorIndex);
         if (idx >= 0 && monitors[idx]) {
             const m = monitors[idx];
             return {x: m.x, y: m.y, width: m.width, height: m.height};
         }
-        if (Main.layoutManager?.primaryMonitor) {
+        if (Main.layoutManager.primaryMonitor) {
             const p = Main.layoutManager.primaryMonitor;
             return {x: p.x, y: p.y, width: p.width, height: p.height};
         }
@@ -62,14 +62,10 @@ export class PositionManager {
      */
     getWorkArea(monitorIndex = 0) {
         const idx = this.resolveMonitorIndex(monitorIndex);
-        if (idx >= 0 && typeof Main.layoutManager?.getWorkAreaForMonitor === 'function') {
-            try {
-                const area = Main.layoutManager.getWorkAreaForMonitor(idx);
-                if (area && area.width > 0 && area.height > 0)
-                    return {x: area.x, y: area.y, width: area.width, height: area.height};
-            } catch (_e) {
-                // Fall back to full monitor geometry during early shell startup.
-            }
+        if (idx >= 0) {
+            const area = Main.layoutManager.getWorkAreaForMonitor(idx);
+            if (area && area.width > 0 && area.height > 0)
+                return {x: area.x, y: area.y, width: area.width, height: area.height};
         }
         return this.getMonitorGeometry(monitorIndex);
     }

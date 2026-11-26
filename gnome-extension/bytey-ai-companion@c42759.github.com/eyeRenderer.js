@@ -5,6 +5,8 @@ import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
 
+import {parseHexColor} from './colorUtils.js';
+
 const VALID_STATES = new Set([
     'IDLE',
     'LISTENING',
@@ -84,7 +86,6 @@ export class EyeRenderer {
         this._frameSourceId = 0;
         this._blinkTimerId = 0;
         this._pointerPollId = 0;
-        this._destroyed = false;
 
         this._drawingArea = new St.DrawingArea({
             width: this._width,
@@ -97,10 +98,6 @@ export class EyeRenderer {
 
         this._repaintId = this._drawingArea.connect('repaint', area => {
             this._onRepaint(area);
-        });
-        this._destroyId = this._drawingArea.connect('destroy', () => {
-            this._cleanupTimers();
-            this._destroyed = true;
         });
 
         this._syncAnimationTimers();
@@ -120,7 +117,7 @@ export class EyeRenderer {
      * @param {string} [emotion]
      */
     setState(state, emotion = undefined) {
-        if (this._destroyed)
+        if (!this._drawingArea)
             return;
 
         const normState = typeof state === 'string' ? state.toUpperCase() : 'IDLE';
@@ -152,7 +149,7 @@ export class EyeRenderer {
      * @param {string} emotion
      */
     setEmotion(emotion) {
-        if (this._destroyed)
+        if (!this._drawingArea)
             return;
         const nextEmotion = this._normalizeEmotion(emotion);
         if (nextEmotion === this._emotion)
@@ -169,7 +166,7 @@ export class EyeRenderer {
      * @param {number} rms
      */
     setAudioLevel(source, rms) {
-        if (this._destroyed)
+        if (!this._drawingArea)
             return;
 
         const clamped = Number.isFinite(rms) ? Math.max(0, Math.min(1, rms)) : 0;
@@ -189,7 +186,7 @@ export class EyeRenderer {
      * @param {boolean} cursorTracking
      */
     setAnimationConfig(mode, cursorTracking = true) {
-        if (this._destroyed)
+        if (!this._drawingArea)
             return;
 
         const normMode = typeof mode === 'string' ? mode.toLowerCase() : 'full';
@@ -220,13 +217,13 @@ export class EyeRenderer {
      * @param {string} hexColor
      */
     setEyeColor(hexColor) {
-        if (this._destroyed)
+        if (!this._drawingArea)
             return;
 
         const nextHex = typeof hexColor === 'string' && hexColor.trim()
             ? hexColor.trim()
             : '#F7FAFF';
-        const nextColor = this._parseHexColor(nextHex);
+        const nextColor = parseHexColor(nextHex, [0.97, 0.98, 1.0, 1.0]);
         const changed = nextHex !== this._eyeColorHex ||
             nextColor.some((v, idx) => Math.abs(v - this._eyeColor[idx]) > 1e-4);
 
@@ -240,19 +237,12 @@ export class EyeRenderer {
      * Stop all timers, disconnect signals, and dispose resources.
      */
     destroy() {
-        if (this._destroyed)
-            return;
-        this._destroyed = true;
         this._cleanupTimers();
 
         if (this._drawingArea) {
             if (this._repaintId) {
                 this._drawingArea.disconnect(this._repaintId);
                 this._repaintId = 0;
-            }
-            if (this._destroyId) {
-                this._drawingArea.disconnect(this._destroyId);
-                this._destroyId = 0;
             }
             this._drawingArea.destroy();
             this._drawingArea = null;
@@ -272,45 +262,8 @@ export class EyeRenderer {
         return VALID_EMOTIONS.has(norm) ? norm : 'neutral';
     }
 
-    _parseHexColor(hex, fallback = [0.97, 0.98, 1.0, 1.0]) {
-        if (typeof hex !== 'string')
-            return [...fallback];
-        const clean = hex.trim();
-        if (!clean.startsWith('#'))
-            return [...fallback];
-        const raw = clean.slice(1);
-        if (!/^[0-9a-fA-F]+$/.test(raw))
-            return [...fallback];
-
-        if (raw.length === 3) {
-            return [
-                parseInt(raw[0] + raw[0], 16) / 255,
-                parseInt(raw[1] + raw[1], 16) / 255,
-                parseInt(raw[2] + raw[2], 16) / 255,
-                1.0,
-            ];
-        }
-        if (raw.length === 6) {
-            return [
-                parseInt(raw.slice(0, 2), 16) / 255,
-                parseInt(raw.slice(2, 4), 16) / 255,
-                parseInt(raw.slice(4, 6), 16) / 255,
-                1.0,
-            ];
-        }
-        if (raw.length === 8) {
-            return [
-                parseInt(raw.slice(0, 2), 16) / 255,
-                parseInt(raw.slice(2, 4), 16) / 255,
-                parseInt(raw.slice(4, 6), 16) / 255,
-                parseInt(raw.slice(6, 8), 16) / 255,
-            ];
-        }
-        return [...fallback];
-    }
-
     _queueRepaint() {
-        if (!this._destroyed && this._drawingArea)
+        if (this._drawingArea)
             this._drawingArea.queue_repaint();
     }
 
@@ -342,7 +295,7 @@ export class EyeRenderer {
     }
 
     _syncAnimationTimers() {
-        if (this._destroyed)
+        if (!this._drawingArea)
             return;
 
         if (this._animationMode !== 'full') {
@@ -368,13 +321,13 @@ export class EyeRenderer {
 
     _scheduleNextBlink() {
         this._stopBlinkTimer();
-        if (this._destroyed || this._animationMode !== 'full')
+        if (!this._drawingArea || this._animationMode !== 'full')
             return;
 
         const delayMs = Math.round(BLINK_MIN_MS + Math.random() * (BLINK_MAX_MS - BLINK_MIN_MS));
         this._blinkTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delayMs, () => {
             this._blinkTimerId = 0;
-            if (this._destroyed || this._animationMode !== 'full')
+            if (!this._drawingArea || this._animationMode !== 'full')
                 return GLib.SOURCE_REMOVE;
 
             this._blinking = true;
@@ -385,11 +338,11 @@ export class EyeRenderer {
     }
 
     _startPointerPoll() {
-        if (this._pointerPollId || this._destroyed)
+        if (this._pointerPollId || !this._drawingArea)
             return;
 
         this._pointerPollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, POINTER_POLL_MS, () => {
-            if (this._destroyed || this._animationMode !== 'full' || !this._cursorTracking || this._state !== 'IDLE') {
+            if (!this._drawingArea || this._animationMode !== 'full' || !this._cursorTracking || this._state !== 'IDLE') {
                 this._pointerPollId = 0;
                 return GLib.SOURCE_REMOVE;
             }
@@ -405,42 +358,37 @@ export class EyeRenderer {
     _sampleCursorTarget() {
         if (!this._drawingArea || !this._drawingArea.mapped)
             return;
-        try {
-            const [ptrX, ptrY] = global.get_pointer();
-            const nowUs = GLib.get_monotonic_time();
-            const moved = this._lastPtrX === null ||
-                this._lastPtrY === null ||
-                Math.hypot(ptrX - this._lastPtrX, ptrY - this._lastPtrY) >= CURSOR_MOVE_THRESHOLD_PX;
+        const [ptrX, ptrY] = global.get_pointer();
+        const nowUs = GLib.get_monotonic_time();
+        const moved = this._lastPtrX === null ||
+            this._lastPtrY === null ||
+            Math.hypot(ptrX - this._lastPtrX, ptrY - this._lastPtrY) >= CURSOR_MOVE_THRESHOLD_PX;
 
-            if (moved) {
-                this._lastPtrX = ptrX;
-                this._lastPtrY = ptrY;
-                this._lastCursorMoveUs = nowUs;
-                this._wandering = false;
-            }
-
-            if ((nowUs - this._lastCursorMoveUs) >= CURSOR_IDLE_WANDER_US) {
-                if (!this._wandering || nowUs >= this._nextWanderPickUs) {
-                    this._wandering = true;
-                    this._pickWanderTarget(nowUs);
-                }
-                return;
-            }
-
-            const [ax, ay] = this._drawingArea.get_transformed_position();
-            const [aw, ah] = this._drawingArea.get_transformed_size();
-            const cx = ax + aw / 2;
-            const cy = ay + ah / 2;
-            const dx = ptrX - cx;
-            const dy = ptrY - cy;
-            const maxDistX = 320;
-            const maxDistY = 240;
-            this._targetGazeX = Math.max(-1, Math.min(1, dx / maxDistX));
-            this._targetGazeY = Math.max(-1, Math.min(1, dy / maxDistY));
-        } catch (_e) {
-            this._targetGazeX = 0;
-            this._targetGazeY = 0;
+        if (moved) {
+            this._lastPtrX = ptrX;
+            this._lastPtrY = ptrY;
+            this._lastCursorMoveUs = nowUs;
+            this._wandering = false;
         }
+
+        if ((nowUs - this._lastCursorMoveUs) >= CURSOR_IDLE_WANDER_US) {
+            if (!this._wandering || nowUs >= this._nextWanderPickUs) {
+                this._wandering = true;
+                this._pickWanderTarget(nowUs);
+            }
+            return;
+        }
+
+        const [ax, ay] = this._drawingArea.get_transformed_position();
+        const [aw, ah] = this._drawingArea.get_transformed_size();
+        const cx = ax + aw / 2;
+        const cy = ay + ah / 2;
+        const dx = ptrX - cx;
+        const dy = ptrY - cy;
+        const maxDistX = 320;
+        const maxDistY = 240;
+        this._targetGazeX = Math.max(-1, Math.min(1, dx / maxDistX));
+        this._targetGazeY = Math.max(-1, Math.min(1, dy / maxDistY));
     }
 
     _pickWanderTarget(nowUs) {
@@ -489,12 +437,12 @@ export class EyeRenderer {
     }
 
     _ensureFrameLoopIfNeeded() {
-        if (this._destroyed || this._frameSourceId || !this._needsContinuousLoop())
+        if (!this._drawingArea || this._frameSourceId || !this._needsContinuousLoop())
             return;
 
         this._lastTickUs = GLib.get_monotonic_time();
         this._frameSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, FRAME_INTERVAL_MS, () => {
-            if (this._destroyed || !this._needsContinuousLoop()) {
+            if (!this._drawingArea || !this._needsContinuousLoop()) {
                 this._frameSourceId = 0;
                 return GLib.SOURCE_REMOVE;
             }
@@ -725,7 +673,7 @@ export class EyeRenderer {
             return;
         }
 
-        // 9. Neutral / Default (including LISTENING / SPEAKING): 2 tall white pill eyes + cyan-blue bar
+        // 10. Neutral / Default (including LISTENING / SPEAKING): 2 tall white pill eyes + cyan-blue bar
         const blue = [0.38, 0.65, 0.98];
         if (state === 'LISTENING') {
             const auraStrength = isFull ? (0.25 + 0.65 * mic) : 0.45;
@@ -859,24 +807,6 @@ export class EyeRenderer {
         cr.restore();
     }
 
-    _drawSurprisedRings(cr, lx, ly, rx, ry, radius, color, alpha) {
-        const [hr, hg, hb] = this._eyeColor;
-        for (const [ex, ey] of [[lx, ly], [rx, ry]]) {
-            const halo = new Cairo.RadialGradient(ex, ey, radius * 0.4, ex, ey, radius * 1.5);
-            halo.addColorStopRGBA(0, hr, hg, hb, 0.32 * alpha);
-            halo.addColorStopRGBA(1, hr, hg, hb, 0.0);
-            cr.setSource(halo);
-            cr.arc(ex, ey, radius * 1.5, 0, 2 * Math.PI);
-            cr.fill();
-
-            cr.setSourceRGBA(color[0], color[1], color[2], alpha);
-            cr.setLineWidth(Math.max(2.2, radius * 0.32));
-            cr.newSubPath();
-            cr.arc(ex, ey, radius, 0, 2 * Math.PI);
-            cr.stroke();
-        }
-    }
-
     _drawHeartEyes(cr, lx, ly, rx, ry, size, color, alpha) {
         const [r, g, b] = color;
         for (const [ex, ey] of [[lx, ly], [rx, ry]]) {
@@ -900,110 +830,6 @@ export class EyeRenderer {
         }
     }
 
-    _drawAstonishedEyes(cr, lx, ly, rx, ry, rxRadius, ryRadius, color, alpha) {
-        const [hr, hg, hb] = this._eyeColor;
-        const specs = [
-            [lx, ly, rxRadius * 1.18, ryRadius * 1.18],
-            [rx, ry, rxRadius * 0.96, ryRadius * 0.96],
-        ];
-        for (const [ex, ey, ew, eh] of specs) {
-            const haloR = Math.max(ew, eh) * 1.5;
-            const halo = new Cairo.RadialGradient(ex, ey, ew * 0.3, ex, ey, haloR);
-            halo.addColorStopRGBA(0, hr, hg, hb, 0.35 * alpha);
-            halo.addColorStopRGBA(1, hr, hg, hb, 0.0);
-            cr.setSource(halo);
-            cr.arc(ex, ey, haloR, 0, 2 * Math.PI);
-            cr.fill();
-
-            cr.setSourceRGBA(color[0], color[1], color[2], alpha);
-            this._fillCapsule(cr, ex, ey, ew * 1.65, eh * 1.65, 0.5);
-        }
-    }
-
-    _drawHalfMoonEye(cr, x, y, w, h, tiltRad, color, alpha) {
-        cr.save();
-        cr.translate(x, y);
-        if (tiltRad !== 0)
-            cr.rotate(tiltRad);
-        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
-        const hw = w * 0.5;
-        cr.newSubPath();
-        cr.moveTo(-hw, -h * 0.3);
-        cr.lineTo(hw, -h * 0.3);
-        cr.curveTo(hw, h * 0.65, -hw, h * 0.65, -hw, -h * 0.3);
-        cr.closePath();
-        cr.fill();
-        cr.restore();
-    }
-
-    _drawSleepyV(cr, x, y, w, color, alpha) {
-        cr.save();
-        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
-        cr.setLineCap(Cairo.LineCap.ROUND);
-        cr.setLineWidth(Math.max(1.8, w * 0.22));
-        cr.newSubPath();
-        cr.arc(x, y - w * 0.2, w * 0.52, Math.PI * 0.18, Math.PI * 0.82);
-        cr.stroke();
-        cr.restore();
-    }
-
-    _drawBlushCheeks(cr, cx, y, spread, w, alpha) {
-        cr.save();
-        cr.setSourceRGBA(1.0, 0.36, 0.48, 0.82 * alpha);
-        const h = Math.max(2.2, w * 0.48);
-        this._fillCapsule(cr, cx - spread, y, w, h, 0.5);
-        this._fillCapsule(cr, cx + spread, y, w, h, 0.5);
-        cr.restore();
-    }
-
-    _drawMouth(cr, x, y, kind, size, color, alpha) {
-        cr.save();
-        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
-        cr.setLineCap(Cairo.LineCap.ROUND);
-        if (kind === 'open_smile') {
-            const hw = size * 0.5;
-            cr.newSubPath();
-            cr.moveTo(x - hw, y - size * 0.12);
-            cr.lineTo(x + hw, y - size * 0.12);
-            cr.curveTo(x + hw * 0.85, y + size * 0.52, x - hw * 0.85, y + size * 0.52, x - hw, y - size * 0.12);
-            cr.closePath();
-            cr.fill();
-        } else if (kind === 'smile') {
-            cr.setLineWidth(Math.max(1.5, size * 0.22));
-            cr.newSubPath();
-            cr.arc(x, y - size * 0.18, size * 0.46, Math.PI * 0.18, Math.PI * 0.82);
-            cr.stroke();
-        } else if (kind === 'flat') {
-            cr.setLineWidth(Math.max(1.5, size * 0.24));
-            cr.newSubPath();
-            cr.moveTo(x - size * 0.45, y);
-            cr.lineTo(x + size * 0.45, y);
-            cr.stroke();
-        } else if (kind === 'o') {
-            cr.newSubPath();
-            cr.arc(x, y, Math.max(1.5, size * 0.38), 0, 2 * Math.PI);
-            cr.fill();
-        } else if (kind === 'dot') {
-            cr.newSubPath();
-            cr.arc(x, y, Math.max(1.2, size * 0.32), 0, 2 * Math.PI);
-            cr.fill();
-        }
-        cr.restore();
-    }
-
-    _drawMiniHeart(cr, x, y, size, alpha) {
-        cr.save();
-        cr.translate(x, y);
-        cr.setSourceRGBA(0.65, 0.92, 1.0, alpha);
-        cr.newSubPath();
-        cr.moveTo(0, size * 0.72);
-        cr.curveTo(-size * 1.15, size * 0.05, -size * 0.95, -size * 0.85, 0, -size * 0.25);
-        cr.curveTo(size * 0.95, -size * 0.85, size * 1.15, size * 0.05, 0, size * 0.72);
-        cr.closePath();
-        cr.fill();
-        cr.restore();
-    }
-
     _drawSparkle(cr, x, y, size, color, alpha) {
         cr.save();
         cr.translate(x, y);
@@ -1020,40 +846,6 @@ export class EyeRenderer {
         cr.lineTo(-inner, -inner);
         cr.closePath();
         cr.fill();
-        cr.restore();
-    }
-
-    _drawFloatingZ(cr, x, y, size, color, alpha) {
-        cr.save();
-        cr.setSourceRGBA(color[0], color[1], color[2], alpha);
-        cr.setLineCap(Cairo.LineCap.ROUND);
-        cr.setLineJoin(Cairo.LineJoin.ROUND);
-        cr.setLineWidth(Math.max(1.2, size * 0.22));
-        const hs = size * 0.5;
-        cr.newSubPath();
-        cr.moveTo(x - hs, y - hs);
-        cr.lineTo(x + hs, y - hs);
-        cr.lineTo(x - hs, y + hs);
-        cr.lineTo(x + hs, y + hs);
-        cr.stroke();
-        cr.restore();
-    }
-
-    _drawDroopingLidEye(cr, x, y, w, h) {
-        const clampedH = Math.max(2.2, h);
-        this._fillCapsule(cr, x, y, w, clampedH, 0.5);
-
-        cr.save();
-        cr.setLineCap(Cairo.LineCap.ROUND);
-        cr.setLineWidth(Math.max(1.8, w * 0.16));
-        cr.newSubPath();
-        cr.moveTo(x - w * 0.55, y - clampedH * 0.25);
-        cr.curveTo(
-            x - w * 0.2, y + clampedH * 0.35,
-            x + w * 0.2, y + clampedH * 0.35,
-            x + w * 0.55, y - clampedH * 0.25
-        );
-        cr.stroke();
         cr.restore();
     }
 

@@ -78,9 +78,9 @@ PY
   glib-compile-schemas --strict --dry-run "${EXT_DIR}/schemas"
 
   if command -v node >/dev/null 2>&1; then
-    for js in "${EXT_DIR}"/*.js; do
+    while IFS= read -r -d '' js; do
       node --check "${js}"
-    done
+    done < <(find "${EXT_DIR}" -name '*.js' -print0)
   fi
 
   python3 - "${EXT_DIR}" "${OUT_ZIP}" <<'PY'
@@ -89,7 +89,11 @@ ext_dir = pathlib.Path(sys.argv[1])
 out_zip = pathlib.Path(sys.argv[2])
 files = [
     "LICENSE",
+    "attachmentPicker.js",
+    "colorUtils.js",
     "contextMenu.js",
+    "contextRing.js",
+    "daemonClient.js",
     "extension.js",
     "eyeRenderer.js",
     "icons/avatar.png",
@@ -97,12 +101,31 @@ files = [
     "icons/bytey-ai-companion.svg",
     "icons/bytey-double-check-symbolic.svg",
     "icons/bytey-god-mode-symbolic.svg",
+    "islandBorderPainter.js",
     "islandWidget.js",
+    "markdownRenderer.js",
     "metadata.json",
     "positionManager.js",
     "prefs.js",
+    "prefs/aiPage.js",
+    "prefs/constants.js",
+    "prefs/dialogs.js",
+    "prefs/generalPage.js",
+    "prefs/godModePage.js",
+    "prefs/httpClient.js",
+    "prefs/importExportPage.js",
+    "prefs/mcpSection.js",
+    "prefs/skillsPage.js",
+    "prefs/visualsPage.js",
+    "prefs/voicePage.js",
+    "prefs/widgets.js",
+    "prefs/workspacePage.js",
     "schemas/org.gnome.shell.extensions.bytey-ai-companion.gschema.xml",
+    "searchableMenu.js",
+    "sessionSidebar.js",
+    "sharedUtils.js",
     "stylesheet.css",
+    "toolCallCard.js",
     "transcriptDrawer.js",
 ]
 with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
