@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-11-26
+
+### Fixed
+
+- Added GFM pipe-table parsing and `St.BoxLayout` table rendering (`parseTableRow()`, `parseTableSeparator()`, `renderMarkdownTable()`) with column alignment, inline markup, zebra striping, and `Clutter.Text.line_alignment` fix in `markdownRenderer.js` and `stylesheet.css` (`f78523d`, `5a4e387`).
+
 ## [1.7.0] - 2026-11-26
 
 ### Added
@@ -151,7 +157,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `PLAN.md` (`5f16fb1`).
 - Removed floating mode option from right-click context menu (`f253fd7`).
 
-[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.7.1...HEAD
+[1.7.1]: https://github.com/c42759/bytey-ai-companion/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/c42759/bytey-ai-companion/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.5.0...v1.6.0
