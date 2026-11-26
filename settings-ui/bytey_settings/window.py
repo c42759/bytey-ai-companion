@@ -137,6 +137,7 @@ FIELD_PATHS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "llm_force_tools": (("llm", "force_enable_tools"), ("force_enable_tools", "force_tools")),
     "llm_context_size": (("llm", "context_size"), ("llm_context_size", "context_size")),
     "llm_max_context_size": (("llm", "max_context_size"), ("max_context_size",)),
+    "llm_focus_window": (("llm", "focus_window"), ("llm_focus_window", "focus_window")),
     "llm_max_tool_rounds": (("llm", "max_tool_rounds"), ("llm_max_tool_rounds", "max_tool_rounds")),
     "mic_muted": (("voice_input", "mic_muted"), ("mic_muted",)),
     "wake_sensitivity": (("voice_input", "wake_sensitivity"), ("wake_sensitivity",)),
@@ -1165,6 +1166,21 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         )
         self.context_size_row.connect("notify::selected", self._on_context_size_selected)
         ai_group.add(self.context_size_row)
+
+        self.focus_window_row = Adw.SpinRow.new_with_range(0, 500, 1)
+        self.focus_window_row.set_title("Focus Window")
+        self.focus_window_row.set_subtitle(
+            "Latest history messages sent to LLM + user message (0 = full history)"
+        )
+        self.focus_window_row.set_digits(0)
+        self.focus_window_row.connect(
+            "notify::value",
+            lambda *_: self._patch_fields(
+                {"llm_focus_window": int(self.focus_window_row.get_value())},
+                "Focus window updated",
+            ),
+        )
+        ai_group.add(self.focus_window_row)
 
         self.max_tool_rounds_row = Adw.SpinRow.new_with_range(1, 100, 1)
         self.max_tool_rounds_row.set_title("Max Tool Loops")
@@ -3903,6 +3919,15 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         if (
             res.offline
             and isinstance(raw_cfg.get("provider"), dict)
+            and raw_cfg["provider"].get("focus_window") is not None
+            and not (isinstance(raw_cfg.get("llm"), dict) and "focus_window" in raw_cfg["llm"])
+        ):
+            self._config.setdefault("llm", {})["focus_window"] = raw_cfg["provider"][
+                "focus_window"
+            ]
+        if (
+            res.offline
+            and isinstance(raw_cfg.get("provider"), dict)
             and raw_cfg["provider"].get("max_tool_rounds") is not None
             and not (isinstance(raw_cfg.get("llm"), dict) and "max_tool_rounds" in raw_cfg["llm"])
         ):
@@ -3961,6 +3986,12 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             self._refresh_llm_secret_indicator()
             self._update_tools_sensitivity()
             self._refresh_context_size_row()
+            raw_focus = self._read_field("llm_focus_window", 0)
+            try:
+                focus_val = max(0, min(500, int(raw_focus if raw_focus is not None else 0)))
+            except (TypeError, ValueError):
+                focus_val = 0
+            self.focus_window_row.set_value(float(focus_val))
             raw_rounds = self._read_field("llm_max_tool_rounds", 25)
             try:
                 rounds_val = max(1, min(100, int(raw_rounds if raw_rounds is not None else 25)))

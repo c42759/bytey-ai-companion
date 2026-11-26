@@ -7053,5 +7053,85 @@ class TestTokenUsageTracking(unittest.IsolatedAsyncioTestCase):
                 await daemon.stop()
 
 
+class TestFocusWindow(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_config_focus_window_validation(self) -> None:
+        from bytey_ai_companion.config import ProviderConfig
+
+        self.assertEqual(ProviderConfig().focus_window, 0)
+        self.assertEqual(ProviderConfig(focus_window=None).focus_window, 0)
+        self.assertEqual(ProviderConfig(focus_window="").focus_window, 0)
+        self.assertEqual(ProviderConfig(focus_window=-5).focus_window, 0)
+        self.assertEqual(ProviderConfig(focus_window="10").focus_window, 10)
+
+    async def test_focus_window_limits_llm_history_without_deleting_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = ByteyDaemon(
+                config_dir=tmp_path / "cfg",
+                data_dir=tmp_path / "data",
+                enable_voice_capture=False,
+            )
+            daemon.config_manager.update_config(
+                {
+                    "provider": {
+                        "active_provider": "ollama",
+                        "model": "llama3.2",
+                        "focus_window": 2,
+                    },
+                    "voice_out": {"tts_provider": "disabled", "tts_muted": True},
+                }
+            )
+            captured_messages: list[list[dict[str, Any]]] = []
+
+            async def _fake_generate_chat(**kwargs: Any) -> dict[str, Any]:
+                captured_messages.append(list(kwargs.get("messages") or []))
+                on_chunk = kwargs.get("on_text_chunk")
+                if callable(on_chunk):
+                    await on_chunk("ok")
+                return {
+                    "content": "ok",
+                    "emotion": "happy",
+                    "emotion_explicit": True,
+                    "title": None,
+                    "tool_calls": [],
+                    "raw_assistant_message": {"role": "assistant", "content": "ok"},
+                }
+
+            daemon.llm_router.generate_chat = _fake_generate_chat  # type: ignore[method-assign]
+            daemon.ipc.port = 0
+            await daemon.start()
+            try:
+                sess = await daemon.storage.create_session("Focus Window Session")
+                sid = sess["id"]
+                for i in range(6):
+                    role = "user" if i % 2 == 0 else "assistant"
+                    await daemon.storage.add_message(sid, role=role, content=f"msg-{i}")
+
+                await daemon.handle_user_prompt("msg-current", input_mode="text", session_id=sid)
+                self.assertEqual(len(captured_messages), 1)
+                self.assertEqual(
+                    [m["content"] for m in captured_messages[0]],
+                    ["msg-4", "msg-5", "msg-current"],
+                )
+
+                # DB still retains all 6 seeded + user + assistant = 8 messages
+                all_msgs = await daemon.storage.list_messages(sid, limit=None)
+                self.assertEqual(len(all_msgs), 8)
+                self.assertEqual(await daemon.storage.list_messages(sid, limit=0), [])
+
+                # Setting focus_window=0 sends full history (> 40 messages)
+                for i in range(45):
+                    role = "user" if i % 2 == 0 else "assistant"
+                    await daemon.storage.add_message(sid, role=role, content=f"extra-{i}")
+                daemon.config_manager.update_config({"provider": {"focus_window": 0}})
+                await daemon.handle_user_prompt("final-msg", input_mode="text", session_id=sid)
+                self.assertEqual(len(captured_messages), 2)
+                self.assertEqual(len(captured_messages[1]), 8 + 45 + 1)
+                self.assertEqual(captured_messages[1][0]["content"], "msg-0")
+                self.assertEqual(captured_messages[1][-1]["content"], "final-msg")
+            finally:
+                await daemon.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

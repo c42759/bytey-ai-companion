@@ -78,6 +78,8 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "model": ("provider", "model"),
     "llm_context_size": ("provider", "context_size"),
     "context_size": ("provider", "context_size"),
+    "focus_window": ("provider", "focus_window"),
+    "llm_focus_window": ("provider", "focus_window"),
     "max_tool_rounds": ("provider", "max_tool_rounds"),
     "llm_max_tool_rounds": ("provider", "max_tool_rounds"),
     "mic_muted": ("voice_in", "mic_muted"),
@@ -1726,6 +1728,7 @@ class ByteyDaemon:
             "temperature": cfg.provider.temperature,
             "context_size": cfg.provider.context_size,
             "max_context_size": self._detected_context_length,
+            "focus_window": cfg.provider.focus_window,
             "max_tool_rounds": cfg.provider.max_tool_rounds,
         }
         data["voice_input"] = {
@@ -1802,6 +1805,8 @@ class ByteyDaemon:
                 mapped["temperature"] = llm["temperature"]
             if "context_size" in llm:
                 mapped["context_size"] = llm["context_size"]
+            if "focus_window" in llm:
+                mapped["focus_window"] = llm["focus_window"]
             if "max_tool_rounds" in llm:
                 mapped["max_tool_rounds"] = llm["max_tool_rounds"]
             if "supports_tools" in llm and isinstance(llm["supports_tools"], bool):
@@ -2364,7 +2369,10 @@ class ByteyDaemon:
 
             await self._set_state("THINKING", emotion="neutral")
 
-            history = await self.storage.list_messages(sid, limit=40)
+            cfg = self.config_manager.config
+            focus_window = max(0, int(cfg.provider.focus_window))
+            history_limit = None if focus_window == 0 else focus_window + 1
+            history = await self.storage.list_messages(sid, limit=history_limit)
             llm_messages: list[dict[str, Any]] = [
                 {"role": m["role"], "content": m["content"]}
                 for m in history

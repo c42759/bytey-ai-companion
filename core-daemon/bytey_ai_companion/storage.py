@@ -604,26 +604,37 @@ class StorageManager:
             self._update_message_sync, message_id, content, emotion, parts, usage
         )
 
-    def _list_messages_sync(self, session_id: str, limit: int) -> list[dict[str, Any]]:
-        if limit <= 0:
+    def _list_messages_sync(self, session_id: str, limit: int | None) -> list[dict[str, Any]]:
+        if limit is not None and limit <= 0:
             return []
         with self._lock:
             conn = self._get_conn()
-            rows = conn.execute(
-                """
-                SELECT id, session_id, role, input_mode, content, parts_json, emotion, usage_json, created_at
-                FROM (
-                    SELECT id, session_id, role, input_mode, content, parts_json, emotion,
-                           usage_json, created_at, rowid AS _rid
+            if limit is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, session_id, role, input_mode, content, parts_json, emotion, usage_json, created_at
                     FROM messages
                     WHERE session_id = ?
-                    ORDER BY created_at DESC, rowid DESC
-                    LIMIT ?
-                )
-                ORDER BY created_at ASC, _rid ASC
-                """,
-                (session_id, limit),
-            ).fetchall()
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (session_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, session_id, role, input_mode, content, parts_json, emotion, usage_json, created_at
+                    FROM (
+                        SELECT id, session_id, role, input_mode, content, parts_json, emotion,
+                               usage_json, created_at, rowid AS _rid
+                        FROM messages
+                        WHERE session_id = ?
+                        ORDER BY created_at DESC, rowid DESC
+                        LIMIT ?
+                    )
+                    ORDER BY created_at ASC, _rid ASC
+                    """,
+                    (session_id, limit),
+                ).fetchall()
             messages = [dict(row) for row in rows]
             if not messages:
                 return []
@@ -656,7 +667,7 @@ class StorageManager:
             return messages
 
     async def list_messages(
-        self, session_id: str, limit: int = 100
+        self, session_id: str, limit: int | None = 100
     ) -> list[dict[str, Any]]:
         """List recent messages for a session in chronological order with tool_calls."""
         return await asyncio.to_thread(self._list_messages_sync, session_id, limit)
