@@ -292,59 +292,45 @@ function renderMarkdownTable(block) {
         orientation: Clutter.Orientation.VERTICAL,
         x_expand: true,
     });
-    const scroll = new St.ScrollView({
-        style_class: 'bytey-md-table-scroll',
-        hscrollbar_policy: St.PolicyType.AUTOMATIC,
-        vscrollbar_policy: St.PolicyType.NEVER,
-        overlay_scrollbars: true,
-        x_expand: true,
-    });
-    const gridLayout = new Clutter.GridLayout({
-        column_spacing: 0,
-        row_spacing: 0,
-    });
-    const grid = new St.Widget({
-        layout_manager: gridLayout,
-        x_expand: true,
-    });
 
-    const attachCell = (cellText, col, row, isHeader, altRow) => {
-        const alignCfg = TABLE_ALIGN_MAP[block.alignments[col]] ?? TABLE_ALIGN_MAP.left;
-        const labelClass = isHeader
-            ? 'bytey-msg-text bytey-md-table-header-text'
-            : 'bytey-msg-text bytey-md-table-cell-text';
-        const label = createFormattedLabel(cellText, labelClass);
-        label.x_align = alignCfg.actor;
-        label.clutter_text.set_alignment(alignCfg.pango);
-
-        let cellClass = 'bytey-md-table-cell';
+    const buildRow = (cells, isHeader, altRow) => {
+        let rowClass = 'bytey-md-table-row';
         if (isHeader)
-            cellClass += ' bytey-md-table-header';
+            rowClass += ' bytey-md-table-header';
         else if (altRow)
-            cellClass += ' bytey-md-table-row-alt';
+            rowClass += ' bytey-md-table-row-alt';
 
-        const cell = new St.Bin({
-            style_class: cellClass,
+        const rowBox = new St.BoxLayout({
+            style_class: rowClass,
             x_expand: true,
-            x_align: Clutter.ActorAlign.FILL,
-            y_align: Clutter.ActorAlign.FILL,
-            child: label,
         });
-        gridLayout.attach(cell, col, row, 1, 1);
+        rowBox.layout_manager.homogeneous = true;
+
+        for (let c = 0; c < block.headers.length; c++) {
+            const alignCfg = TABLE_ALIGN_MAP[block.alignments[c]] ?? TABLE_ALIGN_MAP.left;
+            const labelClass = isHeader
+                ? 'bytey-msg-text bytey-md-table-header-text'
+                : 'bytey-msg-text bytey-md-table-cell-text';
+            const label = createFormattedLabel(cells[c] ?? '', labelClass);
+            label.x_align = alignCfg.actor;
+            label.clutter_text.line_alignment = alignCfg.pango;
+
+            const cell = new St.Bin({
+                style_class: 'bytey-md-table-cell',
+                x_expand: true,
+                x_align: Clutter.ActorAlign.FILL,
+                y_align: Clutter.ActorAlign.FILL,
+                child: label,
+            });
+            rowBox.add_child(cell);
+        }
+        return rowBox;
     };
 
-    for (let c = 0; c < block.headers.length; c++)
-        attachCell(block.headers[c], c, 0, true, false);
+    wrap.add_child(buildRow(block.headers, true, false));
+    for (let r = 0; r < block.rows.length; r++)
+        wrap.add_child(buildRow(block.rows[r], false, r % 2 === 1));
 
-    for (let r = 0; r < block.rows.length; r++) {
-        const rowCells = block.rows[r];
-        const altRow = r % 2 === 1;
-        for (let c = 0; c < block.headers.length; c++)
-            attachCell(rowCells[c] ?? '', c, r + 1, false, altRow);
-    }
-
-    scroll.set_child(grid);
-    wrap.add_child(scroll);
     return wrap;
 }
 

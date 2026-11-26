@@ -666,14 +666,14 @@
   margin: 0.3em 0;
 }
 
-.bytey-md-table-scroll {
-  padding: 0;
+.bytey-md-table-row {
+  border-bottom-width: 1px;
+  border-color: rgba(148, 163, 184, 0.16);
 }
 
 .bytey-md-table-cell {
   padding: 0.35em 0.6em;
   border-right-width: 1px;
-  border-bottom-width: 1px;
   border-color: rgba(148, 163, 184, 0.16);
 }
 
