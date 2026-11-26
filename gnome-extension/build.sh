@@ -92,6 +92,7 @@ files = [
     "attachmentPicker.js",
     "colorUtils.js",
     "contextMenu.js",
+    "contextRing.js",
     "daemonClient.js",
     "extension.js",
     "eyeRenderer.js",
@@ -121,6 +122,7 @@ files = [
     "searchableMenu.js",
     "sharedUtils.js",
     "stylesheet.css",
+    "toolCallCard.js",
     "transcriptDrawer.js",
 ]
 with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:

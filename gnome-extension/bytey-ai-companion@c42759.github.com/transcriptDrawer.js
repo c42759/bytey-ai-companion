@@ -9,9 +9,11 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {AttachmentPicker} from './attachmentPicker.js';
+import {drawContextRing, formatContextTooltipText} from './contextRing.js';
 import {renderMessageBody} from './markdownRenderer.js';
 import {populateSearchableMenu} from './searchableMenu.js';
 import {connectTracked} from './sharedUtils.js';
+import {createToolWidget, refreshToolWidget} from './toolCallCard.js';
 
 const DRAWER_GAP_PX = 8;
 const DRAWER_WIDTH_FALLBACK = 380;
@@ -1162,39 +1164,8 @@ export class TranscriptDrawer {
             .replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
     }
 
-    _getContextStats() {
-        const usage = this._latestTokenUsage;
-        let used = null;
-        if (usage && typeof usage === 'object') {
-            if (typeof usage.total_tokens === 'number' && Number.isFinite(usage.total_tokens) && usage.total_tokens >= 0) {
-                used = usage.total_tokens;
-            } else {
-                const p = typeof usage.prompt_tokens === 'number' && Number.isFinite(usage.prompt_tokens) ? usage.prompt_tokens : null;
-                const c = typeof usage.completion_tokens === 'number' && Number.isFinite(usage.completion_tokens) ? usage.completion_tokens : null;
-                if (p !== null || c !== null)
-                    used = (p ?? 0) + (c ?? 0);
-            }
-        }
-        const limit = (typeof this._contextWindowTokens === 'number' &&
-            Number.isFinite(this._contextWindowTokens) &&
-            this._contextWindowTokens > 0)
-            ? this._contextWindowTokens
-            : null;
-        const pct = (used !== null && limit !== null)
-            ? Math.max(0, Math.min(100, Math.round((used / limit) * 100)))
-            : null;
-        return {used, limit, pct};
-    }
-
     _getContextTooltipText() {
-        const {used, limit} = this._getContextStats();
-        if (used !== null && limit !== null)
-            return `${this._formatSpaceNumber(used)}/${this._formatSpaceNumber(limit)}`;
-        if (used !== null)
-            return `${this._formatSpaceNumber(used)} / —`;
-        if (limit !== null)
-            return `0/${this._formatSpaceNumber(limit)}`;
-        return 'Context usage unavailable';
+        return formatContextTooltipText(this._latestTokenUsage, this._contextWindowTokens);
     }
 
     _refreshContextRing() {
@@ -1208,51 +1179,7 @@ export class TranscriptDrawer {
     }
 
     _drawContextRing(area) {
-        const cr = area.get_context();
-        const [w, h] = area.get_surface_size();
-        const cx = w / 2;
-        const cy = h / 2;
-        const stroke = 3.2;
-        const radius = Math.max(4, Math.min(w, h) / 2 - stroke / 2 - 1);
-
-        cr.setLineCap(Cairo.LineCap.ROUND);
-        cr.setLineWidth(stroke);
-
-        // Background track
-        cr.setSourceRGBA(1, 1, 1, 0.18);
-        cr.arc(cx, cy, radius, 0, Math.PI * 2);
-        cr.stroke();
-
-        const {pct} = this._getContextStats();
-        let r = 0.72;
-        let g = 0.75;
-        let b = 0.80;
-        if (pct !== null) {
-            if (pct <= 65) {
-                r = 0.133; g = 0.773; b = 0.369; // #22C55E green
-            } else if (pct <= 89) {
-                r = 0.918; g = 0.702; b = 0.031; // #EAB308 yellow
-            } else {
-                r = 0.937; g = 0.267; b = 0.267; // #EF4444 red
-            }
-            if (pct > 0) {
-                const startAngle = -Math.PI / 2;
-                const endAngle = startAngle + (pct / 100) * Math.PI * 2;
-                cr.setSourceRGBA(r, g, b, 1.0);
-                cr.arc(cx, cy, radius, startAngle, endAngle);
-                cr.stroke();
-            }
-        }
-
-        const label = pct !== null ? `${pct}%` : '--';
-        cr.selectFontFace('Sans', Cairo.FontSlant.NORMAL, Cairo.FontWeight.BOLD);
-        cr.setFontSize(pct === 100 ? 8.2 : 9.2);
-        const ext = cr.textExtents(label);
-        cr.setSourceRGBA(r, g, b, 1.0);
-        cr.moveTo(cx - ext.width / 2 - ext.xBearing, cy - ext.height / 2 - ext.yBearing);
-        cr.showText(label);
-
-        cr.$dispose();
+        drawContextRing(area, this._latestTokenUsage, this._contextWindowTokens);
     }
 
     /**
@@ -3250,206 +3177,15 @@ export class TranscriptDrawer {
     }
 
     _appendToolWidget(toolBox, tool, group = null) {
-        toolBox.visible = true;
-
-        const badge = new St.BoxLayout({
-            style_class: `bytey-tool-badge bytey-tool-${tool.status}`,
-            orientation: Clutter.Orientation.VERTICAL,
-            x_expand: true,
+        createToolWidget(toolBox, tool, group, {
+            toolWidgets: this._toolWidgets,
+            onConfirmTool: (reqId, approved) => this._callbacks.onConfirmTool?.(reqId, approved),
+            onRefreshGroup: g => this._refreshToolGroup(g),
         });
-
-        const headerBtn = new St.Button({
-            style_class: 'bytey-tool-header-btn',
-            x_expand: true,
-            can_focus: true,
-        });
-
-        const headerRow = new St.BoxLayout({
-            style_class: 'bytey-tool-header',
-            x_expand: true,
-        });
-        const titleLabel = new St.Label({
-            style_class: 'bytey-tool-title',
-            text: `${tool.server} · ${tool.tool}`,
-            x_expand: true,
-            x_align: Clutter.ActorAlign.START,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        const statusLabel = new St.Label({
-            style_class: 'bytey-tool-status-chip',
-            text: this._formatToolStatus(tool.status),
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        headerRow.add_child(titleLabel);
-        headerRow.add_child(statusLabel);
-        headerBtn.set_child(headerRow);
-        badge.add_child(headerBtn);
-
-        const detailsLabel = new St.Label({
-            style_class: 'bytey-tool-details',
-            text: this._formatToolDetails(tool),
-            visible: tool.status === 'awaiting_confirm',
-            x_expand: true,
-        });
-        detailsLabel.clutter_text.line_wrap = true;
-        detailsLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-        detailsLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-        badge.add_child(detailsLabel);
-
-        const confirmCard = new St.BoxLayout({
-            style_class: 'bytey-confirm-card',
-            orientation: Clutter.Orientation.VERTICAL,
-            visible: false,
-            x_expand: true,
-        });
-        const confirmScroll = new St.ScrollView({
-            style_class: 'bytey-confirm-scroll',
-            hscrollbar_policy: St.PolicyType.AUTOMATIC,
-            vscrollbar_policy: St.PolicyType.AUTOMATIC,
-            overlay_scrollbars: true,
-            x_expand: true,
-        });
-        const confirmPreviewBox = new St.BoxLayout({
-            orientation: Clutter.Orientation.VERTICAL,
-            x_expand: true,
-        });
-        const confirmPreviewLabel = new St.Label({
-            style_class: 'bytey-confirm-diff',
-            text: '',
-            x_expand: true,
-        });
-        confirmPreviewLabel.clutter_text.line_wrap = false;
-        confirmPreviewLabel.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-        confirmPreviewBox.add_child(confirmPreviewLabel);
-        confirmScroll.set_child(confirmPreviewBox);
-        confirmCard.add_child(confirmScroll);
-        badge.add_child(confirmCard);
-
-        const confirmRow = new St.BoxLayout({
-            style_class: 'bytey-confirm-row',
-            visible: tool.status === 'awaiting_confirm',
-            x_expand: true,
-        });
-        const allowBtn = new St.Button({
-            style_class: 'bytey-btn-allow bytey-confirm-approve-btn',
-            label: 'Approve',
-            can_focus: true,
-        });
-        const denyBtn = new St.Button({
-            style_class: 'bytey-btn-deny bytey-confirm-reject-btn',
-            label: 'Reject',
-            can_focus: true,
-        });
-        confirmRow.add_child(allowBtn);
-        confirmRow.add_child(denyBtn);
-        badge.add_child(confirmRow);
-
-        const record = {
-            tool,
-            group,
-            badge,
-            titleLabel,
-            statusLabel,
-            detailsLabel,
-            confirmCard,
-            confirmPreviewLabel,
-            confirmRow,
-            allowBtn,
-            denyBtn,
-            expanded: tool.status === 'awaiting_confirm',
-        };
-
-        headerBtn.connect('clicked', () => {
-            record.expanded = !record.expanded;
-            detailsLabel.visible = record.expanded && detailsLabel.text.length > 0;
-        });
-
-        allowBtn.connect('clicked', () => {
-            allowBtn.reactive = false;
-            denyBtn.reactive = false;
-            record.tool.status = 'running';
-            this._refreshToolWidget(record);
-            this._callbacks.onConfirmTool?.(record.tool.requestId || record.tool.id, true);
-        });
-
-        denyBtn.connect('clicked', () => {
-            allowBtn.reactive = false;
-            denyBtn.reactive = false;
-            record.tool.status = 'error';
-            record.tool.summary = 'Rejected by user';
-            this._refreshToolWidget(record);
-            this._callbacks.onConfirmTool?.(record.tool.requestId || record.tool.id, false);
-        });
-
-        this._toolWidgets.set(tool.id, record);
-        if (group)
-            group.tools.push(tool);
-        this._refreshToolWidget(record);
-        toolBox.add_child(badge);
     }
 
     _refreshToolWidget(record) {
-        const {
-            tool,
-            badge,
-            statusLabel,
-            detailsLabel,
-            confirmCard,
-            confirmPreviewLabel,
-            confirmRow,
-            allowBtn,
-            denyBtn,
-        } = record;
-        for (const cls of ['running', 'ok', 'error', 'awaiting_confirm'])
-            badge.remove_style_class_name(`bytey-tool-${cls}`);
-        badge.add_style_class_name(`bytey-tool-${tool.status}`);
-
-        statusLabel.text = this._formatToolStatus(tool.status);
-        const detailText = this._formatToolDetails(tool);
-        detailsLabel.text = detailText;
-
-        const awaiting = tool.status === 'awaiting_confirm';
-        const previewText = tool.diff || tool.command || '';
-        if (previewText && awaiting) {
-            confirmPreviewLabel.style_class = tool.diff ? 'bytey-confirm-diff' : 'bytey-confirm-cmd';
-            confirmPreviewLabel.text = tool.command && !tool.diff ? `$ ${tool.command}` : previewText;
-            confirmCard.visible = true;
-        } else {
-            confirmCard.visible = false;
-        }
-
-        if (awaiting) {
-            record.expanded = true;
-            allowBtn.reactive = true;
-            denyBtn.reactive = true;
-        }
-        detailsLabel.visible = record.expanded && detailText.length > 0;
-        confirmRow.visible = awaiting;
-        if (record.group)
-            this._refreshToolGroup(record.group);
-    }
-
-    _formatToolStatus(status) {
-        switch (status) {
-        case 'awaiting_confirm':
-            return 'Confirm?';
-        case 'ok':
-            return 'OK';
-        case 'error':
-            return 'Error';
-        case 'running':
-        default:
-            return 'Running';
-        }
-    }
-
-    _formatToolDetails(tool) {
-        const parts = [];
-        if (tool.argumentsText)
-            parts.push(`Args: ${tool.argumentsText}`);
-        if (tool.summary)
-            parts.push(tool.summary);
-        return parts.join('\n');
+        refreshToolWidget(record, g => this._refreshToolGroup(g));
     }
 
     _scheduleScrollToBottom() {
