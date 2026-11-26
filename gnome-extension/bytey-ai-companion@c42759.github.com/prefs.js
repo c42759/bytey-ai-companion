@@ -487,7 +487,6 @@ export default class ByteyPreferences extends ExtensionPreferences {
         const cancellable = new Gio.Cancellable();
         const httpSession = new Soup.Session({timeout: 8});
         const longHttpSession = new Soup.Session({timeout: 300});
-        let destroyed = false;
         let loading = false;
         let settingsChangedId = 0;
         let secretsConfigured = {};
@@ -516,12 +515,12 @@ export default class ByteyPreferences extends ExtensionPreferences {
         const getDaemonUrl = () => normalizeUrl(settings.get_string('daemon-url')) ?? DEFAULT_DAEMON_URL;
 
         const showToast = title => {
-            if (!destroyed)
+            if (!cancellable.is_cancelled())
                 window.add_toast(new Adw.Toast({title, timeout: 3}));
         };
 
         const httpJson = (method, path, body = undefined, {longTimeout = false} = {}) => new Promise(resolve => {
-            if (destroyed) {
+            if (cancellable.is_cancelled()) {
                 resolve({ok: false, status: 0, data: null});
                 return;
             }
@@ -544,7 +543,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 GLib.PRIORITY_DEFAULT,
                 cancellable,
                 (session, res) => {
-                    if (destroyed) {
+                    if (cancellable.is_cancelled()) {
                         resolve({ok: false, status: 0, data: null});
                         return;
                     }
@@ -574,22 +573,13 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
 
         window.connect('close-request', () => {
-            destroyed = true;
             if (settingsChangedId) {
                 settings.disconnect(settingsChangedId);
                 settingsChangedId = 0;
             }
             cancellable.cancel();
-            try {
-                httpSession.abort();
-            } catch (_e) {
-                // Ignore abort errors on close.
-            }
-            try {
-                longHttpSession.abort();
-            } catch (_e) {
-                // Ignore abort errors on close.
-            }
+            httpSession.abort();
+            longHttpSession.abort();
             return false;
         });
 
@@ -604,13 +594,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             button_label: 'Retry',
             revealed: false,
         });
-        if (typeof generalPage.set_banner === 'function') {
-            generalPage.set_banner(offlineBanner);
-        } else {
-            const bannerGroup = new Adw.PreferencesGroup();
-            bannerGroup.add(offlineBanner);
-            generalPage.add(bannerGroup);
-        }
+        generalPage.set_banner(offlineBanner);
 
         const brandGroup = new Adw.PreferencesGroup();
         const versionLabel = this.metadata?.['version-name'] ?? '0.1.0';
@@ -1331,10 +1315,10 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 widget.set_tightening_threshold(100000);
                 return;
             }
-            let child = widget.get_first_child?.();
+            let child = widget.get_first_child();
             while (child) {
                 expandPreferencesPage(child);
-                child = child.get_next_sibling?.();
+                child = child.get_next_sibling();
             }
         };
         for (const page of [
@@ -1379,7 +1363,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         const setWorkspacePath = async path => {
             const cleaned = String(path ?? '').trim();
             const resp = await httpJson('PUT', '/api/v1/workspace', {path: cleaned});
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (!resp.ok) {
                 if (resp.status === 0)
@@ -1553,7 +1537,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             baseUrl = '',
             {autoSelectIfMissing = false, showResultToast = false} = {}
         ) => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const seq = ++modelFetchSeq;
             const prov = String(provider || '').trim().toLowerCase();
@@ -1569,7 +1553,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 path += `?base_url=${encodeURIComponent(cleanUrl)}`;
 
             const resp = await httpJson('GET', path);
-            if (destroyed || seq !== modelFetchSeq)
+            if (cancellable.is_cancelled() || seq !== modelFetchSeq)
                 return;
 
             if (!resp.ok || !resp.data || typeof resp.data !== 'object') {
@@ -1796,7 +1780,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const fetchPiperVoices = async ({refresh = false, showResultToast = false} = {}) => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const seq = ++piperFetchSeq;
             piperModelRow.set_subtitle('Loading Piper voice catalog...');
@@ -1804,13 +1788,13 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
             const queryPath = `/api/v1/tts/voices?provider=piper${refresh ? '&refresh=1' : ''}`;
             let resp = await httpJson('GET', queryPath, undefined, {longTimeout: refresh});
-            if (destroyed || seq !== piperFetchSeq)
+            if (cancellable.is_cancelled() || seq !== piperFetchSeq)
                 return;
 
             if (resp.status !== 0 && (!resp.ok || (Array.isArray(resp.data?.voices) && resp.data.voices.length === 0))) {
                 const altPath = `/api/v1/tts/piper/voices${refresh ? '?refresh=1' : ''}`;
                 const altResp = await httpJson('GET', altPath, undefined, {longTimeout: refresh});
-                if (destroyed || seq !== piperFetchSeq)
+                if (cancellable.is_cancelled() || seq !== piperFetchSeq)
                     return;
                 if (altResp.ok)
                     resp = altResp;
@@ -2003,14 +1987,14 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const pushMcpChanges = async toastMsg => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const raw = JSON.stringify({mcpServers}, null, 2);
             syncMcpJsonText(raw);
             rebuildMcpList();
 
             const resp = await httpJson('PUT', '/api/v1/mcp/json', {raw_json: raw});
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (!resp.ok) {
                 if (resp.status === 0)
@@ -2029,7 +2013,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const applyRawMcpJson = async () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const raw = readTextBuffer(mcpJsonView);
             let parsed;
@@ -2052,7 +2036,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             }
 
             const resp = await httpJson('PUT', '/api/v1/mcp/json', {raw_json: raw});
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (!resp.ok) {
                 if (resp.status === 0)
@@ -2070,11 +2054,11 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         const testMcpServer = async name => {
             const cfg = mcpServers[name];
-            if (!cfg || destroyed)
+            if (!cfg || cancellable.is_cancelled())
                 return;
             showToast(`Testing MCP server '${name}'...`);
             const resp = await httpJson('POST', '/api/v1/mcp/test', {name, config: cfg});
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (!resp.ok) {
                 if (resp.status === 0)
@@ -2117,7 +2101,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const showMcpInfoDialog = async name => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const isBuiltin = name === null;
             const cfg = isBuiltin ? null : (mcpServers[name] ?? {});
@@ -2187,7 +2171,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             const resp = isBuiltin
                 ? await httpJson('GET', '/api/v1/mcp/host')
                 : await httpJson('POST', '/api/v1/mcp/test', {name: mcpTitle, config: cfg});
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
 
             toolsGroup.remove(loadingRow);
@@ -2247,7 +2231,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const openMcpDialog = (existingName = null) => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const cfg = existingName ? cloneJson(mcpServers[existingName] ?? {}) : {};
             const dialog = new Adw.Dialog({
@@ -2642,11 +2626,11 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const loadConfig = async () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             statusRow.set_subtitle('Checking...');
             const resp = await httpJson('GET', '/api/v1/config');
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (resp.ok && resp.data && typeof resp.data === 'object') {
                 setOfflineState(false);
@@ -2659,11 +2643,11 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const checkHealth = async () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             statusRow.set_subtitle('Checking...');
             const resp = await httpJson('GET', '/api/v1/health');
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (resp.ok) {
                 setOfflineState(false);
@@ -2675,10 +2659,10 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const patchConfig = async (patch, toastMsg = 'Saved') => {
-            if (destroyed || loading)
+            if (cancellable.is_cancelled() || loading)
                 return;
             const resp = await httpJson('PATCH', '/api/v1/config', patch);
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (resp.ok) {
                 setOfflineState(false);
@@ -2707,7 +2691,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const saveSecret = async (secretKey, row, badge) => {
-            if (destroyed || loading)
+            if (cancellable.is_cancelled() || loading)
                 return false;
             const value = row.get_text().trim();
             if (!value) {
@@ -2719,7 +2703,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 return false;
             }
             const resp = await httpJson('PUT', '/api/v1/secrets', {secrets: {[secretKey]: value}});
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return false;
             if (!resp.ok) {
                 setOfflineState(true);
@@ -2742,7 +2726,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const onUserChange = handler => {
-            if (destroyed || loading)
+            if (cancellable.is_cancelled() || loading)
                 return;
             handler();
         };
@@ -2781,7 +2765,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         }));
 
         settingsChangedId = settings.connect('changed::daemon-url', () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             loading = true;
             try {
@@ -2838,7 +2822,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         const confirmReplaceImport = parsedConfig => {
             const runImport = async () => {
                 const resp = await httpJson('PUT', '/api/v1/config', parsedConfig);
-                if (destroyed)
+                if (cancellable.is_cancelled())
                     return;
                 if (resp.ok && resp.data && typeof resp.data === 'object') {
                     setOfflineState(false);
@@ -2850,45 +2834,27 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 }
             };
 
-            if (typeof Adw.AlertDialog === 'function') {
-                const dialog = new Adw.AlertDialog({
-                    heading: 'Replace All Configuration?',
-                    body: 'Importing this JSON file will replace all existing Bytey configurations. This cannot be undone.',
-                });
-                dialog.add_response('cancel', 'Cancel');
-                dialog.add_response('replace', 'Replace All');
-                dialog.set_response_appearance('replace', Adw.ResponseAppearance.DESTRUCTIVE);
-                dialog.set_default_response('cancel');
-                dialog.set_close_response('cancel');
-                dialog.connect('response', (_dlg, response) => {
-                    if (response === 'replace')
-                        runImport();
-                });
-                dialog.present(window);
-            } else {
-                const dialog = new Adw.MessageDialog({
-                    transient_for: window,
-                    modal: true,
-                    heading: 'Replace All Configuration?',
-                    body: 'Importing this JSON file will replace all existing Bytey configurations. This cannot be undone.',
-                });
-                dialog.add_response('cancel', 'Cancel');
-                dialog.add_response('replace', 'Replace All');
-                dialog.set_response_appearance('replace', Adw.ResponseAppearance.DESTRUCTIVE);
-                dialog.set_default_response('cancel');
-                dialog.connect('response', (_dlg, response) => {
-                    if (response === 'replace')
-                        runImport();
-                });
-                dialog.present();
-            }
+            const dialog = new Adw.AlertDialog({
+                heading: 'Replace All Configuration?',
+                body: 'Importing this JSON file will replace all existing Bytey configurations. This cannot be undone.',
+            });
+            dialog.add_response('cancel', 'Cancel');
+            dialog.add_response('replace', 'Replace All');
+            dialog.set_response_appearance('replace', Adw.ResponseAppearance.DESTRUCTIVE);
+            dialog.set_default_response('cancel');
+            dialog.set_close_response('cancel');
+            dialog.connect('response', (_dlg, response) => {
+                if (response === 'replace')
+                    runImport();
+            });
+            dialog.present(window);
         };
 
         exportBtn.connect('clicked', async () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const resp = await httpJson('GET', '/api/v1/config');
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (!resp.ok || !resp.data || typeof resp.data !== 'object') {
                 setOfflineState(true);
@@ -2937,7 +2903,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
 
         importBtn.connect('clicked', () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const fileDialog = new Gtk.FileDialog({
                 title: 'Import Bytey Configuration',
@@ -3135,10 +3101,10 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const refreshElevenLabsVoices = async ({silent = false} = {}) => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const resp = await httpJson('GET', '/api/v1/tts/voices?provider=elevenlabs');
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (!resp.ok || !resp.data || !Array.isArray(resp.data.voices)) {
                 if (!silent)
@@ -3279,7 +3245,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 {longTimeout: true}
             );
             piperDownloading = false;
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
 
             if (!resp.ok || resp.data?.ok === false) {
@@ -3405,7 +3371,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
             piperTestBtn.set_sensitive(false);
             const resp = await httpJson('POST', '/api/v1/tts/replay', {text}, {longTimeout: true});
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             piperTestBtn.set_sensitive(true);
             if (!resp.ok || resp.data?.ok === false) {
@@ -3436,7 +3402,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             }
             refreshContextSizeRow();
             await patchConfig({provider: {active_provider: prov, base_url: defaultUrl}}, 'Saved AI provider');
-            if (!destroyed && comboText(providerRow) === prov)
+            if (!cancellable.is_cancelled() && comboText(providerRow) === prov)
                 await fetchModels(prov, defaultUrl, {autoSelectIfMissing: true});
         }));
 
@@ -3444,7 +3410,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             const prov = comboText(providerRow);
             const nextUrl = baseUrlRow.get_text().trim();
             await patchConfig({provider: {base_url: nextUrl}}, 'Saved base URL');
-            if (!destroyed && comboText(providerRow) === prov)
+            if (!cancellable.is_cancelled() && comboText(providerRow) === prov)
                 await fetchModels(prov, nextUrl, {autoSelectIfMissing: false});
         }));
 
@@ -3454,7 +3420,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             if (!secretKey)
                 return;
             const saved = await saveSecret(secretKey, aiApiKeyRow, aiApiKeyBadge);
-            if (saved && !destroyed && comboText(providerRow) === prov)
+            if (saved && !cancellable.is_cancelled() && comboText(providerRow) === prov)
                 await fetchModels(prov, baseUrlRow.get_text().trim(), {autoSelectIfMissing: true});
         }));
 
@@ -3565,12 +3531,19 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 const source = String(skill?.source ?? 'user');
                 const sourceTag = sourceTags[source] ?? `[${source}]`;
                 const valid = Boolean(skill?.valid ?? true);
-                const invalidTag = valid ? '' : ' ⚠ Invalid';
                 const editable = Boolean(skill?.editable ?? source === 'user');
                 const row = new Adw.ActionRow({
-                    title: `${name} ${sourceTag}${invalidTag}`,
+                    title: `${name} ${sourceTag}`,
                     subtitle: String(skill?.error || skill?.description || ''),
                 });
+                if (!valid) {
+                    row.add_suffix(new Gtk.Image({
+                        icon_name: 'dialog-warning-symbolic',
+                        valign: Gtk.Align.CENTER,
+                        tooltip_text: 'Invalid skill',
+                        css_classes: ['warning'],
+                    }));
+                }
 
                 const enabledSwitch = new Gtk.Switch({
                     active: Boolean(skill?.enabled ?? true),
@@ -3581,7 +3554,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                     const active = enabledSwitch.get_active();
                     httpJson('PATCH', `/api/v1/skills/${encodeURIComponent(name)}`, {enabled: active})
                         .then(resp => {
-                            if (destroyed)
+                            if (cancellable.is_cancelled())
                                 return;
                             if (!resp.ok) {
                                 showToast(`Failed to update ${name}`);
@@ -3741,7 +3714,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         const loadAgents = async () => {
             const resp = await httpJson('GET', '/api/v1/agents');
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (resp.ok && resp.data)
                 rebuildAgentsList(resp.data.agents || []);
@@ -3778,20 +3751,20 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
 
         const loadSkills = async () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const resp = await httpJson('GET', '/api/v1/skills');
-            if (destroyed || !resp.ok || !resp.data || typeof resp.data !== 'object')
+            if (cancellable.is_cancelled() || !resp.ok || !resp.data || typeof resp.data !== 'object')
                 return;
             skillsList = Array.isArray(resp.data.skills) ? resp.data.skills : [];
             rebuildSkillsList();
         };
 
         const rescanSkills = async (showResultToast = false) => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const resp = await httpJson('POST', '/api/v1/skills/rescan', {});
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             if (!resp.ok) {
                 showToast('Failed to rescan skills');
@@ -3805,7 +3778,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         };
 
         const openSkillEditor = skill => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const name = String(skill?.name ?? '');
             const source = String(skill?.source ?? 'user');
@@ -3855,7 +3828,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             if (!rawContent) {
                 httpJson('GET', `/api/v1/skills/${encodeURIComponent(name)}`)
                     .then(resp => {
-                        if (!destroyed && resp.ok && resp.data?.raw_content)
+                        if (!cancellable.is_cancelled() && resp.ok && resp.data?.raw_content)
                             textView.get_buffer().set_text(String(resp.data.raw_content), -1);
                     })
                     .catch(() => {});
@@ -3871,7 +3844,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                         `/api/v1/skills/${encodeURIComponent(name)}`,
                         {content}
                     );
-                    if (destroyed)
+                    if (cancellable.is_cancelled())
                         return;
                     saveBtn.set_sensitive(true);
                     if (!resp.ok) {
@@ -3889,7 +3862,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         const confirmDeleteSkill = name => {
             const doDelete = async () => {
                 const resp = await httpJson('DELETE', `/api/v1/skills/${encodeURIComponent(name)}`);
-                if (destroyed)
+                if (cancellable.is_cancelled())
                     return;
                 if (!resp.ok) {
                     const err = resp.data?.detail || resp.data?.error || 'Delete failed';
@@ -3900,38 +3873,20 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 loadSkills().catch(() => {});
             };
 
-            if (typeof Adw.AlertDialog === 'function') {
-                const dlg = new Adw.AlertDialog({
-                    heading: `Delete Skill '${name}'?`,
-                    body: 'This permanently removes the user skill directory and its files.',
-                });
-                dlg.add_response('cancel', 'Cancel');
-                dlg.add_response('delete', 'Delete');
-                dlg.set_response_appearance('delete', Adw.ResponseAppearance.DESTRUCTIVE);
-                dlg.set_default_response('cancel');
-                dlg.set_close_response('cancel');
-                dlg.connect('response', (_d, response) => {
-                    if (response === 'delete')
-                        doDelete().catch(() => {});
-                });
-                dlg.present(window);
-            } else {
-                const dlg = new Adw.MessageDialog({
-                    transient_for: window,
-                    modal: true,
-                    heading: `Delete Skill '${name}'?`,
-                    body: 'This permanently removes the user skill directory and its files.',
-                });
-                dlg.add_response('cancel', 'Cancel');
-                dlg.add_response('delete', 'Delete');
-                dlg.set_response_appearance('delete', Adw.ResponseAppearance.DESTRUCTIVE);
-                dlg.set_default_response('cancel');
-                dlg.connect('response', (_d, response) => {
-                    if (response === 'delete')
-                        doDelete().catch(() => {});
-                });
-                dlg.present();
-            }
+            const dlg = new Adw.AlertDialog({
+                heading: `Delete Skill '${name}'?`,
+                body: 'This permanently removes the user skill directory and its files.',
+            });
+            dlg.add_response('cancel', 'Cancel');
+            dlg.add_response('delete', 'Delete');
+            dlg.set_response_appearance('delete', Adw.ResponseAppearance.DESTRUCTIVE);
+            dlg.set_default_response('cancel');
+            dlg.set_close_response('cancel');
+            dlg.connect('response', (_d, response) => {
+                if (response === 'delete')
+                    doDelete().catch(() => {});
+            });
+            dlg.present(window);
         };
 
         skillsEnabledRow.connect('notify::active', () => onUserChange(() => {
@@ -3946,7 +3901,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         }));
 
         skillsBrowseBtn.connect('clicked', () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const fileDialog = new Gtk.FileDialog({title: 'Select Skills Storage Folder'});
             fileDialog.select_folder(window, null, (_dlg, result) => {
@@ -3976,7 +3931,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
 
         workspaceChooseBtn.connect('clicked', () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const fileDialog = new Gtk.FileDialog({title: 'Select Work Folder'});
             fileDialog.select_folder(window, null, (_dlg, result) => {
@@ -4067,7 +4022,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
 
         addSkillBtn.connect('clicked', () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const dialog = new Adw.Dialog({
                 title: 'Add Skill',
@@ -4133,7 +4088,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                     payload.slash_command = slashCommand;
                 createBtn.set_sensitive(false);
                 const resp = await httpJson('POST', '/api/v1/skills', payload);
-                if (destroyed)
+                if (cancellable.is_cancelled())
                     return;
                 createBtn.set_sensitive(true);
                 if (!resp.ok) {
@@ -4152,11 +4107,11 @@ export default class ByteyPreferences extends ExtensionPreferences {
         });
 
         importSkillBtn.connect('clicked', () => {
-            if (destroyed)
+            if (cancellable.is_cancelled())
                 return;
             const doImportPath = async path => {
                 const resp = await httpJson('POST', '/api/v1/skills/import', {path});
-                if (destroyed)
+                if (cancellable.is_cancelled())
                     return;
                 if (!resp.ok) {
                     const err = resp.data?.detail || resp.data?.error || 'Import failed';
@@ -4204,26 +4159,22 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 });
             };
 
-            if (typeof Adw.AlertDialog === 'function') {
-                const dlg = new Adw.AlertDialog({
-                    heading: 'Import Skill',
-                    body: 'Choose whether to import a skill folder or a .zip archive.',
-                });
-                dlg.add_response('cancel', 'Cancel');
-                dlg.add_response('folder', 'Folder');
-                dlg.add_response('zip', '.zip Archive');
-                dlg.set_default_response('folder');
-                dlg.set_close_response('cancel');
-                dlg.connect('response', (_d, response) => {
-                    if (response === 'folder')
-                        pickFolder();
-                    else if (response === 'zip')
-                        pickZip();
-                });
-                dlg.present(window);
-            } else {
-                pickFolder();
-            }
+            const dlg = new Adw.AlertDialog({
+                heading: 'Import Skill',
+                body: 'Choose whether to import a skill folder or a .zip archive.',
+            });
+            dlg.add_response('cancel', 'Cancel');
+            dlg.add_response('folder', 'Folder');
+            dlg.add_response('zip', '.zip Archive');
+            dlg.set_default_response('folder');
+            dlg.set_close_response('cancel');
+            dlg.connect('response', (_d, response) => {
+                if (response === 'folder')
+                    pickFolder();
+                else if (response === 'zip')
+                    pickZip();
+            });
+            dlg.present(window);
         });
 
         rebuildSkillsList();

@@ -78,9 +78,9 @@ PY
   glib-compile-schemas --strict --dry-run "${EXT_DIR}/schemas"
 
   if command -v node >/dev/null 2>&1; then
-    for js in "${EXT_DIR}"/*.js; do
+    while IFS= read -r -d '' js; do
       node --check "${js}"
-    done
+    done < <(find "${EXT_DIR}" -name '*.js' -print0)
   fi
 
   python3 - "${EXT_DIR}" "${OUT_ZIP}" <<'PY'
@@ -90,6 +90,7 @@ out_zip = pathlib.Path(sys.argv[2])
 files = [
     "LICENSE",
     "contextMenu.js",
+    "daemonClient.js",
     "extension.js",
     "eyeRenderer.js",
     "icons/avatar.png",

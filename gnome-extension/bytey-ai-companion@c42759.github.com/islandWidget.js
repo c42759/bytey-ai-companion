@@ -320,7 +320,6 @@ export class IslandWidget {
         this._pressStart = [0, 0];
         this._actorStart = [0, 0];
         this._dragGrab = null;
-        this._destroyed = false;
         this._signalIds = [];
 
         this._island = new St.Widget({
@@ -445,7 +444,7 @@ export class IslandWidget {
      * Show the island overlay.
      */
     show() {
-        if (this._destroyed || !this._island)
+        if (!this._island)
             return;
         this._island.remove_all_transitions();
         this._island.opacity = 255;
@@ -456,7 +455,7 @@ export class IslandWidget {
      * Hide the island overlay.
      */
     hide() {
-        if (this._destroyed || !this._island)
+        if (!this._island)
             return;
         this._island.remove_all_transitions();
         this._island.hide();
@@ -469,10 +468,10 @@ export class IslandWidget {
      * @param {number} [durationMs=200]
      */
     fadeIn(durationMs = 200) {
-        if (this._destroyed || !this._island)
+        if (!this._island)
             return;
         const effectiveDuration = (St.ReducedMotion &&
-            St.Settings.get?.().reducedMotion === St.ReducedMotion.REDUCE)
+            St.Settings.get().reducedMotion === St.ReducedMotion.REDUCE)
             ? 0
             : durationMs;
         this._island.remove_all_transitions();
@@ -493,10 +492,10 @@ export class IslandWidget {
      * @param {number} [durationMs=200]
      */
     fadeOut(durationMs = 200) {
-        if (this._destroyed || !this._island)
+        if (!this._island)
             return;
         const effectiveDuration = (St.ReducedMotion &&
-            St.Settings.get?.().reducedMotion === St.ReducedMotion.REDUCE)
+            St.Settings.get().reducedMotion === St.ReducedMotion.REDUCE)
             ? 0
             : durationMs;
         this._island.remove_all_transitions();
@@ -507,7 +506,7 @@ export class IslandWidget {
             duration: effectiveDuration,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
-                if (!this._destroyed && this._island && this._island.opacity === 0)
+                if (this._island && this._island.opacity === 0)
                     this._island.hide();
             },
         });
@@ -521,7 +520,7 @@ export class IslandWidget {
      * @param {string} [label]
      */
     setState(state, emotion = undefined, label = undefined) {
-        if (this._destroyed || !this._island)
+        if (!this._island)
             return;
 
         const normState = typeof state === 'string' ? state.toUpperCase() : 'IDLE';
@@ -548,7 +547,7 @@ export class IslandWidget {
      * @param {number} rms
      */
     setAudioLevel(source, rms) {
-        if (this._destroyed)
+        if (!this._island)
             return;
         this._eyeRenderer.setAudioLevel(source, rms);
     }
@@ -559,7 +558,7 @@ export class IslandWidget {
      * @param {object} visualsConfig
      */
     applyVisualsConfig(visualsConfig) {
-        if (this._destroyed || !visualsConfig)
+        if (!this._island || !visualsConfig)
             return;
 
         this._visualsConfig = {
@@ -591,7 +590,7 @@ export class IslandWidget {
      * Recompute and apply island position from current visuals config and monitor layout.
      */
     reposition() {
-        if (this._destroyed || !this._island || this._dragging)
+        if (!this._island || this._dragging)
             return;
 
         const bounds = this.getBounds();
@@ -608,19 +607,11 @@ export class IslandWidget {
      * Release grabs, destroy renderer, and remove chrome actor.
      */
     destroy() {
-        if (this._destroyed)
-            return;
-        this._destroyed = true;
         this._stopRainbowTimer();
         this._releaseDragGrab();
 
-        for (const [obj, id] of this._signalIds) {
-            try {
-                obj.disconnect(id);
-            } catch (_e) {
-                // Ignore if already disposed.
-            }
-        }
+        for (const [obj, id] of this._signalIds)
+            obj.disconnect(id);
         this._signalIds = [];
 
         if (this._eyeRenderer) {
@@ -653,7 +644,7 @@ export class IslandWidget {
     }
 
     _syncNotchMode() {
-        if (this._destroyed || !this._island)
+        if (!this._island)
             return;
 
         const isNotch = this._isNotchMode();
@@ -674,7 +665,7 @@ export class IslandWidget {
     }
 
     _syncCustomColors() {
-        if (this._destroyed || !this._island)
+        if (!this._island)
             return;
         if (this._isNotchMode())
             this._island.set_style('background-color: transparent;');
@@ -693,7 +684,7 @@ export class IslandWidget {
     }
 
     _shouldRunRainbow() {
-        if (this._destroyed || (this._visualsConfig.animation_mode ?? 'full') !== 'full')
+        if (!this._island || (this._visualsConfig.animation_mode ?? 'full') !== 'full')
             return false;
         return this._state === 'THINKING' ||
             this._state === 'TOOL_CALLING' ||
@@ -870,6 +861,16 @@ export class IslandWidget {
         cr.restore();
     }
 
+    _strokeActivityBorder(cr, width, height, isNotch, palette) {
+        if (isNotch) {
+            this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, palette);
+            this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, palette);
+        } else {
+            this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, palette);
+            this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, palette);
+        }
+    }
+
     _onBorderRepaint(area) {
         const [width, height] = area.get_surface_size();
         if (width <= 2 || height <= 2)
@@ -883,34 +884,16 @@ export class IslandWidget {
 
             const mode = this._visualsConfig.animation_mode ?? 'full';
             const isNotch = this._isNotchMode();
-            if (this._state === 'THINKING' && mode !== 'disabled') {
-                if (isNotch) {
-                    this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'full');
-                    this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'full');
-                } else {
-                    this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'full');
-                    this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'full');
-                }
-                return;
-            }
-            if (this._state === 'TOOL_CALLING' && mode !== 'disabled') {
-                if (isNotch) {
-                    this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'green');
-                    this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'green');
-                } else {
-                    this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'green');
-                    this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'green');
-                }
-                return;
-            }
-            if (this._godMode && this._state !== 'ERROR' && mode !== 'disabled') {
-                if (isNotch) {
-                    this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'yellow');
-                    this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'yellow');
-                } else {
-                    this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, 'yellow');
-                    this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, 'yellow');
-                }
+            let activityPalette = null;
+            if (this._state === 'THINKING' && mode !== 'disabled')
+                activityPalette = 'full';
+            else if (this._state === 'TOOL_CALLING' && mode !== 'disabled')
+                activityPalette = 'green';
+            else if (this._godMode && this._state !== 'ERROR' && mode !== 'disabled')
+                activityPalette = 'yellow';
+
+            if (activityPalette) {
+                this._strokeActivityBorder(cr, width, height, isNotch, activityPalette);
                 return;
             }
 
@@ -1041,11 +1024,7 @@ export class IslandWidget {
 
         if (this._visualsConfig.position_mode === 'floating') {
             this._releaseDragGrab();
-            try {
-                this._dragGrab = global.stage.grab(this._island);
-            } catch (_e) {
-                this._dragGrab = null;
-            }
+            this._dragGrab = global.stage.grab(this._island);
         }
         return Clutter.EVENT_STOP;
     }
@@ -1125,11 +1104,7 @@ export class IslandWidget {
 
     _releaseDragGrab() {
         if (this._dragGrab) {
-            try {
-                this._dragGrab.dismiss();
-            } catch (_e) {
-                // Ignore if stage grab was already dismissed.
-            }
+            this._dragGrab.dismiss();
             this._dragGrab = null;
         }
     }

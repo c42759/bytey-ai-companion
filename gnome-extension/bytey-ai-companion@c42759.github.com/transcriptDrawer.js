@@ -63,7 +63,6 @@ export class TranscriptDrawer {
 
         this._isOpen = false;
         this._sidebarOpen = false;
-        this._destroyed = false;
         this._connectionState = 'disconnected';
         this._online = false;
         this._listening = false;
@@ -97,11 +96,14 @@ export class TranscriptDrawer {
         this._editingSessionId = null;
         this._messageWidgets = new Map();
         this._toolWidgets = new Map();
-        this._copyResetTimers = new Set();
+        this._copyTimers = new Set();
         this._emptyStateActor = null;
         this._scrollIdleId = 0;
         this._focusIdleId = 0;
         this._renameFocusIdleId = 0;
+        this._entryScrollIdleId = 0;
+        this._menuFocusIdleId = 0;
+        this._portalSubId = 0;
         this._signalIds = [];
         this._contextWindowTokens = null;
         this._latestTokenUsage = null;
@@ -165,10 +167,22 @@ export class TranscriptDrawer {
         return id;
     }
 
+    _copyWithFeedback(text, copyIcon, doneIconName = 'emblem-ok-symbolic') {
+        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+        copyIcon.icon_name = doneIconName;
+        const tid = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1200, () => {
+            this._copyTimers.delete(tid);
+            if (this._container && copyIcon)
+                copyIcon.icon_name = 'edit-copy-symbolic';
+            return GLib.SOURCE_REMOVE;
+        });
+        this._copyTimers.add(tid);
+    }
+
     _getThemeBasePx() {
-        try {
-            const node = this._container?.get_theme_node?.();
-            const fontDesc = node?.get_font?.();
+        if (this._container?.realized) {
+            const node = this._container.get_theme_node();
+            const fontDesc = node?.get_font();
             if (fontDesc) {
                 const rawSize = fontDesc.get_size();
                 if (rawSize > 0) {
@@ -178,8 +192,6 @@ export class TranscriptDrawer {
                     return Math.max(8, basePx);
                 }
             }
-        } catch (_e) {
-            // Fallback when theme node is not yet realized.
         }
         const scale = DENSITY_SCALE_FACTORS[this._density] ?? 1.0;
         return THEME_BASE_PX_FALLBACK * scale;
@@ -208,7 +220,7 @@ export class TranscriptDrawer {
     }
 
     _syncAllIconSizes() {
-        if (this._destroyed)
+        if (!this._container)
             return;
         const sizes = this._getIconSizes();
         if (this._closeIcon)
@@ -242,7 +254,7 @@ export class TranscriptDrawer {
     }
 
     _onThemeStyleChanged() {
-        if (this._destroyed || !this._container)
+        if (!this._container)
             return;
         this._syncAllIconSizes();
         this._syncEntryHeight();
@@ -742,9 +754,10 @@ export class TranscriptDrawer {
         this._connect(sendBtn, 'clicked', () => this._submitEntry());
         footer.add_child(sendBtn);
 
-        const gripLabel = new St.Label({
+        const gripLabel = new St.Icon({
             style_class: 'bytey-resize-grip-label',
-            text: '◢',
+            icon_name: 'view-fullscreen-symbolic',
+            icon_size: 12,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.END,
         });
@@ -766,7 +779,7 @@ export class TranscriptDrawer {
     }
 
     _syncEntryHeight() {
-        if (this._destroyed || !this._entry || !this._entryScroll)
+        if (!this._container || !this._entry || !this._entryScroll)
             return;
         const metrics = this._getEntryMetrics();
         const minH = metrics.minHeight;
@@ -786,15 +799,20 @@ export class TranscriptDrawer {
     }
 
     _scrollEntryToCursor() {
-        if (this._destroyed || !this._entry || !this._entryScroll)
+        if (!this._container || !this._entry || !this._entryScroll)
             return;
         if (this._entryScroll.vscrollbar_policy !== St.PolicyType.AUTOMATIC)
             return;
         const vadj = this._entryScroll.vadjustment;
         if (!vadj)
             return;
-        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            if (this._destroyed || !this._entry || !this._entryScroll)
+        if (this._entryScrollIdleId) {
+            GLib.Source.remove(this._entryScrollIdleId);
+            this._entryScrollIdleId = 0;
+        }
+        this._entryScrollIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._entryScrollIdleId = 0;
+            if (!this._container || !this._entry || !this._entryScroll)
                 return GLib.SOURCE_REMOVE;
             const ct = this._entry.clutter_text;
             const [ok, _x, y, lineH] = ct.position_to_coords(ct.get_cursor_position());
@@ -844,7 +862,7 @@ export class TranscriptDrawer {
      * @param {boolean} [enabled=true]
      */
     setSkills(skills, enabled = true) {
-        if (this._destroyed)
+        if (!this._container)
             return;
         this._skillsEnabled = enabled !== false;
         this._skills = Array.isArray(skills)
@@ -855,7 +873,7 @@ export class TranscriptDrawer {
     }
 
     _updateSkillSuggestions() {
-        if (this._destroyed || !this._entry || !this._skillSuggestBox)
+        if (!this._container || !this._entry || !this._skillSuggestBox)
             return;
         if (!this._skillsEnabled || this._skills.length === 0) {
             this._hideSkillSuggestions();
@@ -887,7 +905,7 @@ export class TranscriptDrawer {
     }
 
     _renderSkillSuggestions() {
-        if (this._destroyed || !this._skillSuggestList)
+        if (!this._container || !this._skillSuggestList)
             return;
         this._skillSuggestList.destroy_all_children();
         this._skillMatches.forEach((skill, idx) => {
@@ -930,7 +948,7 @@ export class TranscriptDrawer {
     }
 
     _updateSkillSuggestHighlight() {
-        if (this._destroyed || !this._skillSuggestList)
+        if (!this._container || !this._skillSuggestList)
             return;
         const children = this._skillSuggestList.get_children();
         for (let i = 0; i < children.length; i++) {
@@ -941,7 +959,7 @@ export class TranscriptDrawer {
     }
 
     _applySkillSuggestion(cmd) {
-        if (this._destroyed || !this._entry)
+        if (!this._container || !this._entry)
             return;
         const nextText = `/${cmd} `;
         this._entry.text = nextText;
@@ -961,7 +979,7 @@ export class TranscriptDrawer {
     }
 
     _renderAttachStrip() {
-        if (!this._attachStrip || this._destroyed)
+        if (!this._attachStrip || !this._container)
             return;
         this._attachStrip.destroy_all_children();
         if (this._pendingAttachments.length === 0) {
@@ -975,13 +993,21 @@ export class TranscriptDrawer {
                 style_class: 'bytey-attach-chip',
                 y_align: Clutter.ActorAlign.CENTER,
             });
+            chip.add_child(new St.Icon({
+                icon_name: 'mail-attachment-symbolic',
+                icon_size: 13,
+                y_align: Clutter.ActorAlign.CENTER,
+            }));
             chip.add_child(new St.Label({
-                text: `📎 ${att.name}`,
+                text: att.name,
                 y_align: Clutter.ActorAlign.CENTER,
             }));
             const rmBtn = new St.Button({
                 style_class: 'bytey-attach-chip-remove',
-                label: '✕',
+                child: new St.Icon({
+                    icon_name: 'window-close-symbolic',
+                    icon_size: 12,
+                }),
                 can_focus: true,
                 y_align: Clutter.ActorAlign.CENTER,
             });
@@ -995,7 +1021,7 @@ export class TranscriptDrawer {
     }
 
     _beginAttachmentPick() {
-        if (this._destroyed || !this._container)
+        if (!this._container)
             return;
         this._restoreDrawerAfterPick = Boolean(this._isOpen && this._container.visible);
         if (this._restoreDrawerAfterPick)
@@ -1003,7 +1029,7 @@ export class TranscriptDrawer {
     }
 
     _endAttachmentPick() {
-        if (this._destroyed || !this._container)
+        if (!this._container)
             return;
         if (this._restoreDrawerAfterPick && this._isOpen) {
             this._container.visible = true;
@@ -1013,7 +1039,7 @@ export class TranscriptDrawer {
     }
 
     _pickAttachments() {
-        if (this._destroyed)
+        if (!this._container)
             return;
         this._beginAttachmentPick();
         try {
@@ -1023,8 +1049,15 @@ export class TranscriptDrawer {
                 .replace(/\./g, '_');
             const reqPath = `/org/freedesktop/portal/desktop/request/${senderName}/${token}`;
 
-            let subId = 0;
-            subId = Gio.DBus.session.signal_subscribe(
+            if (this._portalSubId) {
+                Gio.DBus.session.signal_unsubscribe(this._portalSubId);
+                this._portalSubId = 0;
+            }
+            if (this._pickCancellable)
+                this._pickCancellable.cancel();
+            this._pickCancellable = new Gio.Cancellable();
+
+            this._portalSubId = Gio.DBus.session.signal_subscribe(
                 'org.freedesktop.portal.Desktop',
                 'org.freedesktop.portal.Request',
                 'Response',
@@ -1032,12 +1065,12 @@ export class TranscriptDrawer {
                 null,
                 Gio.DBusSignalFlags.NONE,
                 (_conn, _sender, _path, _iface, _sig, params) => {
-                    if (subId) {
-                        Gio.DBus.session.signal_unsubscribe(subId);
-                        subId = 0;
+                    if (this._portalSubId) {
+                        Gio.DBus.session.signal_unsubscribe(this._portalSubId);
+                        this._portalSubId = 0;
                     }
                     this._endAttachmentPick();
-                    if (this._destroyed)
+                    if (!this._container)
                         return;
                     const [response, results] = params.deep_unpack();
                     if (response !== 0 || !results?.uris)
@@ -1072,7 +1105,7 @@ export class TranscriptDrawer {
                 null,
                 Gio.DBusCallFlags.NONE,
                 -1,
-                null,
+                this._pickCancellable,
                 (conn, res) => {
                     try {
                         conn.call_finish(res);
@@ -1091,7 +1124,7 @@ export class TranscriptDrawer {
     }
 
     _addAttachmentPaths(paths) {
-        if (this._destroyed || !Array.isArray(paths))
+        if (!this._container || !Array.isArray(paths))
             return;
         for (const filePath of paths) {
             if (this._pendingAttachments.length >= 5)
@@ -1106,7 +1139,7 @@ export class TranscriptDrawer {
     }
 
     _pickAttachmentsZenity() {
-        if (this._destroyed)
+        if (!this._container)
             return;
         try {
             if (this._pickCancellable)
@@ -1153,7 +1186,7 @@ export class TranscriptDrawer {
      * @param {'connected'|'error'|'disconnected'|boolean} status
      */
     setConnectionStatus(status) {
-        if (this._destroyed)
+        if (!this._container)
             return;
 
         let nextState = 'disconnected';
@@ -1195,7 +1228,7 @@ export class TranscriptDrawer {
     }
 
     _showTooltip(anchorActor, label) {
-        if (this._destroyed || !this._isOpen || !this._statusTooltip || !anchorActor)
+        if (!this._container || !this._isOpen || !this._statusTooltip || !anchorActor)
             return;
         this._statusTooltip.text = label;
         this._statusTooltip.visible = true;
@@ -1268,7 +1301,7 @@ export class TranscriptDrawer {
     }
 
     _refreshContextRing() {
-        if (this._destroyed)
+        if (!this._container)
             return;
         if (this._contextRingBtn)
             this._contextRingBtn.accessible_name = `Context usage: ${this._getContextTooltipText()}`;
@@ -1331,7 +1364,7 @@ export class TranscriptDrawer {
      * @param {boolean} listening
      */
     setListening(listening) {
-        if (this._destroyed)
+        if (!this._container)
             return;
         this._listening = Boolean(listening);
         if (this._listening)
@@ -1346,7 +1379,7 @@ export class TranscriptDrawer {
      * @param {object} config
      */
     setConfig(config) {
-        if (this._destroyed || !config)
+        if (!this._container || !config)
             return;
 
         const petName = config.general?.pet_name ?? config.pet_name;
@@ -1445,7 +1478,7 @@ export class TranscriptDrawer {
 
     _syncGodMode(enabled) {
         this._godMode = Boolean(enabled);
-        if (!this._godModeBtn || this._destroyed)
+        if (!this._godModeBtn || !this._container)
             return;
         this._godModeBtn.set_checked(this._godMode);
         if (this._godMode)
@@ -1462,7 +1495,7 @@ export class TranscriptDrawer {
 
     _syncAutoAccept(enabled) {
         this._autoAccept = Boolean(enabled);
-        if (!this._autoAcceptBtn || this._destroyed)
+        if (!this._autoAcceptBtn || !this._container)
             return;
         this._autoAcceptBtn.set_checked(this._autoAccept);
         if (this._autoAccept)
@@ -1472,7 +1505,7 @@ export class TranscriptDrawer {
     }
 
     _applyDensity(density) {
-        if (this._destroyed || !this._container || !DENSITY_ORDER.includes(density))
+        if (!this._container || !DENSITY_ORDER.includes(density))
             return;
         this._density = density;
         for (const mode of DENSITY_ORDER)
@@ -1485,7 +1518,7 @@ export class TranscriptDrawer {
     }
 
     _onResizePress(event) {
-        if (event.get_button() !== Clutter.BUTTON_PRIMARY || this._destroyed || !this._container)
+        if (event.get_button() !== Clutter.BUTTON_PRIMARY || !this._container)
             return Clutter.EVENT_PROPAGATE;
 
         this._hideStatusTooltip();
@@ -1493,17 +1526,13 @@ export class TranscriptDrawer {
         this._resizeStartCoords = event.get_coords();
         this._resizeStartSize = [this._drawerWidth, this._drawerHeight];
         this._releaseResizeGrab();
-        try {
-            this._resizeGrab = global.stage.grab(this._resizeHandle);
-        } catch (_e) {
-            this._resizeGrab = null;
-        }
+        this._resizeGrab = global.stage.grab(this._resizeHandle);
         this._container.add_style_class_name('bytey-drawer-resizing');
         return Clutter.EVENT_STOP;
     }
 
     _onResizeMotion(event) {
-        if (!this._resizing || this._destroyed || !this._container)
+        if (!this._resizing || !this._container)
             return Clutter.EVENT_PROPAGATE;
 
         const [curX, curY] = event.get_coords();
@@ -1545,11 +1574,7 @@ export class TranscriptDrawer {
 
     _releaseResizeGrab() {
         if (this._resizeGrab) {
-            try {
-                this._resizeGrab.dismiss();
-            } catch (_e) {
-                // Ignore if grab was already dismissed.
-            }
+            this._resizeGrab.dismiss();
             this._resizeGrab = null;
         }
     }
@@ -1560,7 +1585,7 @@ export class TranscriptDrawer {
      * @param {Array<object>} messages
      */
     setMessages(messages) {
-        if (this._destroyed)
+        if (!this._container)
             return;
 
         this._messages = [];
@@ -1606,7 +1631,7 @@ export class TranscriptDrawer {
      * @param {boolean} [forceState]
      */
     toggleSidebar(forceState) {
-        if (this._destroyed)
+        if (!this._container)
             return;
 
         const nextOpen = typeof forceState === 'boolean' ? forceState : !this._sidebarOpen;
@@ -1648,7 +1673,7 @@ export class TranscriptDrawer {
         );
 
         const animDuration = (St.ReducedMotion &&
-            St.Settings.get?.().reducedMotion === St.ReducedMotion.REDUCE)
+            St.Settings.get().reducedMotion === St.ReducedMotion.REDUCE)
             ? 0
             : SIDEBAR_ANIM_DURATION_MS;
 
@@ -1672,7 +1697,7 @@ export class TranscriptDrawer {
                     duration: animDuration,
                     mode: Clutter.AnimationMode.EASE_OUT_QUAD,
                     onComplete: () => {
-                        if (this._destroyed || this._sidebarOpen !== false || !this._sidebarBox)
+                        if (!this._container || this._sidebarOpen !== false || !this._sidebarBox)
                             return;
                         this._sidebarBox.visible = false;
                         this._sidebarBox.width = sidebarWidth;
@@ -1688,7 +1713,7 @@ export class TranscriptDrawer {
             duration: animDuration,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
-                if (this._destroyed || this._sidebarOpen !== nextOpen)
+                if (!this._container || this._sidebarOpen !== nextOpen)
                     return;
                 this._syncEntryHeight();
             },
@@ -1705,7 +1730,7 @@ export class TranscriptDrawer {
      * @param {string|null} [activeSessionId]
      */
     setSessions(sessions, activeSessionId = this._activeSessionId) {
-        if (this._destroyed)
+        if (!this._container)
             return;
         this._sessions = Array.isArray(sessions) ? sessions : [];
         if (activeSessionId !== undefined)
@@ -1717,7 +1742,7 @@ export class TranscriptDrawer {
      * Focus the text entry on the next idle tick when the drawer is open.
      */
     focusInput() {
-        if (this._destroyed || !this._isOpen || !this._entry)
+        if (!this._container || !this._isOpen || !this._entry)
             return;
         if (this._focusIdleId) {
             GLib.Source.remove(this._focusIdleId);
@@ -1725,7 +1750,7 @@ export class TranscriptDrawer {
         }
         this._focusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._focusIdleId = 0;
-            if (!this._destroyed && this._isOpen && this._entry)
+            if (this._container && this._isOpen && this._entry)
                 this._entry.clutter_text.grab_key_focus();
             return GLib.SOURCE_REMOVE;
         });
@@ -1759,7 +1784,7 @@ export class TranscriptDrawer {
     }
 
     _applyDrawerSize() {
-        if (this._destroyed || !this._container)
+        if (!this._container)
             return;
         const {width, height} = this._getEffectiveSize();
         this._container.set_size(width, height);
@@ -1770,13 +1795,9 @@ export class TranscriptDrawer {
     }
 
     _renderSessions() {
-        if (this._destroyed || !this._sessionsList)
+        if (!this._container || !this._sessionsList)
             return;
 
-        if (this._renameFocusIdleId) {
-            GLib.Source.remove(this._renameFocusIdleId);
-            this._renameFocusIdleId = 0;
-        }
         if (this._copyTimers) {
             for (const tid of this._copyTimers)
                 GLib.Source.remove(tid);
@@ -1839,7 +1860,7 @@ export class TranscriptDrawer {
                     x_expand: true,
                 });
                 titleEntry.clutter_text.connect('activate', () => {
-                    if (this._destroyed)
+                    if (!this._container)
                         return;
                     const newTitle = titleEntry.get_text().trim();
                     this._editingSessionId = null;
@@ -1860,9 +1881,13 @@ export class TranscriptDrawer {
                 textCol.add_child(subLabel);
                 row.add_child(textCol);
 
+                if (this._renameFocusIdleId) {
+                    GLib.Source.remove(this._renameFocusIdleId);
+                    this._renameFocusIdleId = 0;
+                }
                 this._renameFocusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
                     this._renameFocusIdleId = 0;
-                    if (!this._destroyed && this._editingSessionId === sid && titleEntry.clutter_text) {
+                    if (this._container && this._editingSessionId === sid && titleEntry.clutter_text) {
                         titleEntry.clutter_text.grab_key_focus();
                         titleEntry.clutter_text.set_selection(0, -1);
                     }
@@ -2026,7 +2051,7 @@ export class TranscriptDrawer {
      * @param {object} event
      */
     upsertMessageDelta(event) {
-        if (this._destroyed || !event)
+        if (!this._container || !event)
             return;
 
         const messageId = event.message_id ?? event.id ?? `msg-${Date.now()}`;
@@ -2138,7 +2163,7 @@ export class TranscriptDrawer {
      * @param {object} ws
      */
     setWorkspace(ws) {
-        if (this._destroyed)
+        if (!this._container)
             return;
         const data = ws && typeof ws === 'object' ? ws : {};
         const activePath = String(data.active_path ?? '').trim();
@@ -2224,15 +2249,20 @@ export class TranscriptDrawer {
         rebuildList('');
         if (footerFn)
             footerFn(menuBox);
-        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            if (!this._destroyed && menuBox.visible)
+        if (this._menuFocusIdleId) {
+            GLib.Source.remove(this._menuFocusIdleId);
+            this._menuFocusIdleId = 0;
+        }
+        this._menuFocusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            this._menuFocusIdleId = 0;
+            if (this._container && menuBox.visible)
                 searchEntry.clutter_text.grab_key_focus();
             return GLib.SOURCE_REMOVE;
         });
     }
 
     async _toggleModelMenu() {
-        if (!this._modelMenuBox || this._destroyed)
+        if (!this._modelMenuBox || !this._container)
             return;
         this._hideWorkspaceMenu();
         const nextVisible = !this._modelMenuBox.visible;
@@ -2256,7 +2286,7 @@ export class TranscriptDrawer {
         } catch (_e) {
             models = [];
         }
-        if (this._destroyed || !this._modelMenuBox)
+        if (!this._container || !this._modelMenuBox)
             return;
         const names = [];
         for (const m of models) {
@@ -2293,11 +2323,26 @@ export class TranscriptDrawer {
             entries,
             entry => {
                 const isActive = entry.name === this._activeModel;
+                const row = new St.BoxLayout({
+                    y_align: Clutter.ActorAlign.CENTER,
+                });
+                if (isActive) {
+                    row.add_child(new St.Icon({
+                        icon_name: 'emblem-ok-symbolic',
+                        icon_size: 13,
+                        y_align: Clutter.ActorAlign.CENTER,
+                        style: 'margin-right: 6px;',
+                    }));
+                }
+                row.add_child(new St.Label({
+                    text: entry.name,
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
                 const btn = new St.Button({
                     style_class: isActive
                         ? 'bytey-workspace-menu-item bytey-workspace-menu-item-active'
                         : 'bytey-workspace-menu-item',
-                    label: isActive ? `✓ ${entry.name}` : entry.name,
+                    child: row,
                     x_expand: true,
                     x_align: Clutter.ActorAlign.START,
                     can_focus: true,
@@ -2326,7 +2371,7 @@ export class TranscriptDrawer {
     }
 
     _rebuildWorkspaceMenu() {
-        if (!this._workspaceMenuBox || this._destroyed)
+        if (!this._workspaceMenuBox || !this._container)
             return;
         const ws = this._workspace ?? {active_path: '', recent_paths: []};
         const recent = ws.recent_paths ?? [];
@@ -2388,11 +2433,24 @@ export class TranscriptDrawer {
             entries,
             entry => {
                 const isActive = entry.path === ws.active_path;
+                const row = new St.BoxLayout({
+                    y_align: Clutter.ActorAlign.CENTER,
+                });
+                row.add_child(new St.Icon({
+                    icon_name: isActive ? 'emblem-ok-symbolic' : 'folder-symbolic',
+                    icon_size: 13,
+                    y_align: Clutter.ActorAlign.CENTER,
+                    style: 'margin-right: 6px;',
+                }));
+                row.add_child(new St.Label({
+                    text: `${entry.base}  (${entry.path})`,
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
                 const btn = new St.Button({
                     style_class: isActive
                         ? 'bytey-workspace-menu-item bytey-workspace-menu-item-active'
                         : 'bytey-workspace-menu-item',
-                    label: isActive ? `✓ ${entry.base}  (${entry.path})` : `📁 ${entry.base}  (${entry.path})`,
+                    child: row,
                     x_expand: true,
                     x_align: Clutter.ActorAlign.START,
                     can_focus: true,
@@ -2426,7 +2484,7 @@ export class TranscriptDrawer {
      * @param {object} event
      */
     updateToolCall(event) {
-        if (this._destroyed || !event)
+        if (!this._container || !event)
             return;
 
         const tool = this._normalizeTool(event);
@@ -2486,7 +2544,7 @@ export class TranscriptDrawer {
      * @param {object} event
      */
     showToolConfirmation(event) {
-        if (this._destroyed || !event)
+        if (!this._container || !event)
             return;
         this.updateToolCall({
             ...event,
@@ -2520,7 +2578,7 @@ export class TranscriptDrawer {
     }
 
     updatePosition(islandX, islandY, islandW, islandH, monitorIndex = this._monitorIndex) {
-        if (this._destroyed || !this._container)
+        if (!this._container)
             return;
 
         this._monitorIndex = monitorIndex;
@@ -2550,7 +2608,7 @@ export class TranscriptDrawer {
      * @param {number} [monitorIndex]
      */
     open(islandX, islandY, islandW, islandH, monitorIndex = this._monitorIndex) {
-        if (this._destroyed || !this._container)
+        if (!this._container)
             return;
 
         this._isOpen = true;
@@ -2564,7 +2622,7 @@ export class TranscriptDrawer {
         }
         this._focusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._focusIdleId = 0;
-            if (!this._destroyed && this._isOpen && this._entry)
+            if (this._container && this._isOpen && this._entry)
                 this._entry.clutter_text.grab_key_focus();
             return GLib.SOURCE_REMOVE;
         });
@@ -2575,7 +2633,7 @@ export class TranscriptDrawer {
      * Hide the transcript drawer.
      */
     close() {
-        if (this._destroyed || !this._isOpen)
+        if (!this._container || !this._isOpen)
             return;
         this._isOpen = false;
         this._pendingDeleteSessionId = null;
@@ -2619,9 +2677,8 @@ export class TranscriptDrawer {
      * Clean up signals, idle timers, and chrome actor.
      */
     destroy() {
-        if (this._destroyed)
+        if (!this._container)
             return;
-        this._destroyed = true;
         this._isOpen = false;
         this._resizing = false;
         this._releaseResizeGrab();
@@ -2638,15 +2695,22 @@ export class TranscriptDrawer {
             GLib.Source.remove(this._renameFocusIdleId);
             this._renameFocusIdleId = 0;
         }
+        if (this._entryScrollIdleId) {
+            GLib.Source.remove(this._entryScrollIdleId);
+            this._entryScrollIdleId = 0;
+        }
+        if (this._menuFocusIdleId) {
+            GLib.Source.remove(this._menuFocusIdleId);
+            this._menuFocusIdleId = 0;
+        }
+        if (this._portalSubId) {
+            Gio.DBus.session.signal_unsubscribe(this._portalSubId);
+            this._portalSubId = 0;
+        }
         if (this._copyTimers) {
             for (const tid of this._copyTimers)
                 GLib.Source.remove(tid);
             this._copyTimers.clear();
-        }
-        if (this._copyResetTimers) {
-            for (const tid of this._copyResetTimers)
-                GLib.Source.remove(tid);
-            this._copyResetTimers.clear();
         }
         if (this._pickCancellable) {
             this._pickCancellable.cancel();
@@ -2660,13 +2724,8 @@ export class TranscriptDrawer {
         this._sidebarBox?.remove_all_transitions();
         this._container?.remove_all_transitions();
 
-        for (const [obj, id] of this._signalIds) {
-            try {
-                obj.disconnect(id);
-            } catch (_e) {
-                // Ignore if actor was already disposed.
-            }
-        }
+        for (const [obj, id] of this._signalIds)
+            obj.disconnect(id);
         this._signalIds = [];
         this._messageWidgets.clear();
         this._toolWidgets.clear();
@@ -2741,7 +2800,7 @@ export class TranscriptDrawer {
     }
 
     _renderEmptyState() {
-        if (this._destroyed || !this._messagesBox || this._emptyStateActor)
+        if (!this._container || !this._messagesBox || this._emptyStateActor)
             return;
         const emptyLabel = new St.Label({
             style_class: 'bytey-empty-state',
@@ -2990,19 +3049,7 @@ export class TranscriptDrawer {
             child: copyIcon,
         });
         copyBtn.connect('clicked', () => {
-            St.Clipboard.get_default().set_text(
-                St.ClipboardType.CLIPBOARD,
-                this._getMessageText(msg)
-            );
-            copyIcon.icon_name = 'emblem-ok-symbolic';
-            this._copyResetTimers ??= new Set();
-            const tid = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1200, () => {
-                this._copyResetTimers?.delete(tid);
-                if (!this._destroyed && copyIcon)
-                    copyIcon.icon_name = 'edit-copy-symbolic';
-                return GLib.SOURCE_REMOVE;
-            });
-            this._copyResetTimers.add(tid);
+            this._copyWithFeedback(this._getMessageText(msg), copyIcon, 'emblem-ok-symbolic');
         });
         metaRow.add_child(copyBtn);
 
@@ -3264,8 +3311,13 @@ export class TranscriptDrawer {
                     style_class: 'bytey-msg-attachment-chip',
                     x_align: Clutter.ActorAlign.START,
                 });
+                chip.add_child(new St.Icon({
+                    icon_name: 'mail-attachment-symbolic',
+                    icon_size: 13,
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
                 chip.add_child(new St.Label({
-                    text: `📎 ${part.name}`,
+                    text: part.name,
                     y_align: Clutter.ActorAlign.CENTER,
                 }));
                 record.contentBox.add_child(chip);
@@ -3294,7 +3346,7 @@ export class TranscriptDrawer {
      * @param {'playing'|'paused'|'idle'} [status]
      */
     setSpeakingMessage(messageId, status = 'idle') {
-        if (this._destroyed)
+        if (!this._container)
             return;
         this._speakingMessageId = messageId ?? null;
         this._speakingStatus = status ?? 'idle';
@@ -3317,17 +3369,13 @@ export class TranscriptDrawer {
      * @param {string} messageId
      */
     removeMessage(messageId) {
-        if (this._destroyed || !messageId)
+        if (!this._container || !messageId)
             return;
         const record = this._messageWidgets.get(messageId);
         if (record) {
-            try {
-                if (record.box && record.box.get_parent() === this._messagesBox)
-                    this._messagesBox.remove_child(record.box);
-                record.box?.destroy();
-            } catch (_e) {
-                // Ignore if already disposed.
-            }
+            if (record.box && record.box.get_parent() === this._messagesBox)
+                this._messagesBox.remove_child(record.box);
+            record.box?.destroy();
             this._messageWidgets.delete(messageId);
         }
         this._messages = this._messages.filter(m => m.id !== messageId);
@@ -3629,16 +3677,7 @@ export class TranscriptDrawer {
                     child: copyIcon,
                 });
                 copyBtn.connect('clicked', () => {
-                    St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, seg.code);
-                    copyIcon.icon_name = 'object-select-symbolic';
-                    this._copyTimers ??= new Set();
-                    const tid = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1200, () => {
-                        this._copyTimers?.delete(tid);
-                        if (!this._destroyed && copyIcon)
-                            copyIcon.icon_name = 'edit-copy-symbolic';
-                        return GLib.SOURCE_REMOVE;
-                    });
-                    this._copyTimers.add(tid);
+                    this._copyWithFeedback(seg.code, copyIcon, 'object-select-symbolic');
                 });
                 header.add_child(langLabel);
                 header.add_child(copyBtn);
@@ -3877,12 +3916,12 @@ export class TranscriptDrawer {
     }
 
     _scheduleScrollToBottom() {
-        if (this._destroyed || this._scrollIdleId || !this._isOpen)
+        if (!this._container || this._scrollIdleId || !this._isOpen)
             return;
 
         this._scrollIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
             this._scrollIdleId = 0;
-            if (this._destroyed || !this._scrollView)
+            if (!this._container || !this._scrollView)
                 return GLib.SOURCE_REMOVE;
 
             const adj = this._scrollView.vadjustment;

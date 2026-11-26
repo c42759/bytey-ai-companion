@@ -21,7 +21,6 @@ export class IslandContextMenu {
         this._sourceActor = sourceActor;
         this._callbacks = callbacks;
         this._syncing = false;
-        this._destroyed = false;
         this._signalIds = [];
 
         this._menuManager = new PopupMenu.PopupMenuManager(sourceActor);
@@ -94,7 +93,7 @@ export class IslandContextMenu {
      * @param {object} config
      */
     syncFromConfig(config) {
-        if (this._destroyed || !config)
+        if (!config)
             return;
 
         const micMuted = Boolean(config.voice_in?.mic_muted ?? config.voice_input?.mic_muted ?? false);
@@ -115,13 +114,12 @@ export class IslandContextMenu {
      * @param {boolean} [isLowerHalf=false]
      */
     toggle(isLowerHalf = false) {
-        if (this._destroyed || !this._menu)
+        if (!this._menu)
             return;
 
         if (!this._menu.isOpen) {
             const side = isLowerHalf ? St.Side.BOTTOM : St.Side.TOP;
-            if (typeof this._menu._boxPointer?.updateArrowSide === 'function')
-                this._menu._boxPointer.updateArrowSide(side);
+            this._menu._boxPointer.updateArrowSide(side);
         }
 
         this._menu.toggle();
@@ -131,7 +129,7 @@ export class IslandContextMenu {
      * Close the context menu if open.
      */
     close() {
-        if (this._destroyed || !this._menu?.isOpen)
+        if (!this._menu?.isOpen)
             return;
         this._menu.close();
     }
@@ -140,20 +138,11 @@ export class IslandContextMenu {
      * Remove menu from manager and destroy actors.
      */
     destroy() {
-        if (this._destroyed)
-            return;
-        this._destroyed = true;
-
         if (this._menu)
             this._menu.close(false);
 
-        for (const [obj, id] of this._signalIds) {
-            try {
-                obj.disconnect(id);
-            } catch (_e) {
-                // Ignore if item was already disposed.
-            }
-        }
+        for (const [obj, id] of this._signalIds)
+            obj.disconnect(id);
         this._signalIds = [];
 
         if (this._menu) {

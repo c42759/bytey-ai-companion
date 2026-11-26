@@ -1,43 +1,34 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import GLib from 'gi://GLib';
-import Gio from 'gi://Gio';
-import Soup from 'gi://Soup?version=3.0';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {IslandContextMenu} from './contextMenu.js';
+import {DaemonClient} from './daemonClient.js';
 import {IslandWidget} from './islandWidget.js';
 import {PositionManager} from './positionManager.js';
 import {TranscriptDrawer} from './transcriptDrawer.js';
-
-const DEFAULT_BASE_URL = 'http://127.0.0.1:8765';
-const WS_BACKOFF_MIN_MS = 1000;
-const WS_BACKOFF_MAX_MS = 30000;
-// Match daemon _MAX_BODY_BYTES so large MCP tool results are not rejected by libsoup (default 128 KiB).
-const WS_MAX_INCOMING_PAYLOAD = 16 * 1024 * 1024;
 
 /**
  * GNOME Shell 48-51 Extension entrypoint for Bytey AI Companion Dynamic Island.
  */
 export default class ByteyExtension extends Extension {
     enable() {
-        this._disabled = false;
-        this._exitedByUser = false;
-
         this._settings = this.getSettings();
-        this._resolveDaemonUrls();
-        this._settingsChangedId = this._settings.connect('changed::daemon-url', () => {
-            if (this._disabled)
-                return;
-            const prev = this._baseUrl;
-            this._resolveDaemonUrls();
-            if (this._baseUrl !== prev) {
-                this._exitedByUser = false;
-                this._wsBackoffMs = WS_BACKOFF_MIN_MS;
-                this._connectWebSocket();
+        this._daemon = new DaemonClient(this._settings, {
+            onStatus: status => this._drawer?.setConnectionStatus(status),
+            onConnected: () => {
+                this._drawer?.setConnectionStatus('connected');
+                if (!Main.overview.visible)
+                    this._islandWidget?.show();
                 this._loadInitialData().catch(() => {});
-            }
+            },
+            onEvent: event => this._handleWsEvent(event),
+        });
+
+        this._settingsChangedId = this._settings.connect('changed::daemon-url', () => {
+            if (this._daemon?.onDaemonUrlChanged())
+                this._loadInitialData().catch(() => {});
         });
 
         this._config = {
@@ -67,25 +58,17 @@ export default class ByteyExtension extends Extension {
         this._activeSessionId = null;
         this._sessions = [];
         this._daemonState = 'IDLE';
-        this._wsConn = null;
-        this._wsSignalIds = [];
-        this._wsBackoffMs = WS_BACKOFF_MIN_MS;
-        this._wsHadError = false;
-        this._reconnectTimerId = 0;
-
-        this._cancellable = new Gio.Cancellable();
-        this._httpSession = new Soup.Session({timeout: 10});
 
         this._positionManager = new PositionManager();
 
         this._drawer = new TranscriptDrawer(this._positionManager, {
             onSendText: (text, attachments) => this._handleSendText(text, attachments),
             onClearChat: () => this._handleNewChat(),
-            onReplayTts: (messageId, text) => this._handleReplayTts(messageId, text),
+            onReplayTts: (messageId, text) => this._daemon.replayTts(this._activeSessionId, messageId, text),
             onDeleteMessage: messageId => this._handleDeleteMessage(messageId),
-            onTogglePauseTts: () => this._handleTogglePauseTts(),
-            onManualMic: () => this._handleManualMic(),
-            onConfirmTool: (callId, approved) => this._handleConfirmTool(callId, approved),
+            onTogglePauseTts: () => this._daemon.pauseTts(),
+            onManualMic: () => this._daemon.triggerVoice((this._islandWidget?.state ?? 'IDLE') === 'SPEAKING'),
+            onConfirmTool: (callId, approved) => this._daemon.confirmTool(callId, approved),
             onResizeCommit: (width, height) => {
                 this._patchConfig({
                     visuals: {
@@ -157,26 +140,26 @@ export default class ByteyExtension extends Extension {
         });
 
         this._monitorsChangedId = Main.layoutManager.connect('monitors-changed', () => {
-            if (this._disabled)
+            if (!this._daemon?.active)
                 return;
             this._islandWidget?.reposition();
             this._syncDrawerPosition();
         });
         this._workareasChangedId = global.display.connect('workareas-changed', () => {
-            if (this._disabled)
+            if (!this._daemon?.active)
                 return;
             this._islandWidget?.reposition();
             this._syncDrawerPosition();
         });
         this._overviewShowingId = Main.overview.connect('showing', () => {
-            if (this._disabled)
+            if (!this._daemon?.active)
                 return;
             this._drawer?.close();
             this._contextMenu?.close();
             this._islandWidget?.fadeOut();
         });
         this._overviewHiddenId = Main.overview.connect('hidden', () => {
-            if (this._disabled || this._exitedByUser)
+            if (!this._daemon?.active || this._daemon.exitedByUser)
                 return;
             this._islandWidget?.fadeIn();
         });
@@ -184,34 +167,20 @@ export default class ByteyExtension extends Extension {
             this._islandWidget?.hide();
 
         this._applyConfig(this._config);
-        this._connectWebSocket();
+        this._daemon.connectWebSocket();
         this._loadInitialData().catch(() => {});
     }
 
     disable() {
-        this._disabled = true;
-        this._clearReconnectTimer();
-
         if (this._settings && this._settingsChangedId) {
             this._settings.disconnect(this._settingsChangedId);
             this._settingsChangedId = 0;
         }
         this._settings = null;
 
-        if (this._cancellable) {
-            this._cancellable.cancel();
-            this._cancellable = null;
-        }
-
-        this._closeWebSocket();
-
-        if (this._httpSession) {
-            try {
-                this._httpSession.abort();
-            } catch (_e) {
-                // Ignore abort errors during teardown.
-            }
-            this._httpSession = null;
+        if (this._daemon) {
+            this._daemon.destroy();
+            this._daemon = null;
         }
 
         if (this._monitorsChangedId) {
@@ -251,62 +220,38 @@ export default class ByteyExtension extends Extension {
         this._activeSessionId = null;
         this._sessions = [];
         this._daemonState = 'IDLE';
-        this._baseUrl = null;
-        this._wsUrl = null;
-        this._wsSignalIds = [];
-        this._exitedByUser = false;
-        this._wsHadError = false;
-        this._wsBackoffMs = WS_BACKOFF_MIN_MS;
     }
 
-    _isValidHttpUrl(url) {
-        if (typeof url !== 'string')
-            return false;
-        const trimmed = url.trim();
-        if (!/^https?:\/\/\S+$/i.test(trimmed))
-            return false;
-        const stripped = trimmed.replace(/\/+$/, '');
-        return /^https?:\/\/\S+$/i.test(stripped);
-    }
-
-    _resolveDaemonUrls() {
-        const envUrl = GLib.getenv('BYTEY_DAEMON_URL') || GLib.getenv('AI_PET_DAEMON_URL');
-        const settingsUrl = this._settings?.get_string('daemon-url');
-        let chosen = DEFAULT_BASE_URL;
-        if (this._isValidHttpUrl(envUrl))
-            chosen = envUrl.trim().replace(/\/+$/, '');
-        else if (this._isValidHttpUrl(settingsUrl))
-            chosen = settingsUrl.trim().replace(/\/+$/, '');
-        this._baseUrl = chosen;
-        this._wsUrl = `${this._baseUrl.replace(/^http/i, 'ws')}/ws`;
+    _openDrawerAtIsland(action = 'open') {
+        if (!this._daemon?.active || !this._islandWidget || !this._drawer)
+            return;
+        const b = this._islandWidget.getBounds();
+        const monIdx = this._config?.visuals?.monitor_index ?? 0;
+        this._drawer[action](b.x, b.y, b.width, b.height, monIdx);
     }
 
     _handleLeftClick() {
-        if (this._disabled || !this._islandWidget || !this._drawer)
+        if (!this._daemon?.active || !this._islandWidget || !this._drawer)
             return;
         this._contextMenu?.close();
-        const b = this._islandWidget.getBounds();
-        const monIdx = this._config?.visuals?.monitor_index ?? 0;
-        this._drawer.toggle(b.x, b.y, b.width, b.height, monIdx);
+        this._openDrawerAtIsland('toggle');
     }
 
     _handleRightClick() {
-        if (this._disabled || !this._islandWidget || !this._contextMenu)
+        if (!this._daemon?.active || !this._islandWidget || !this._contextMenu)
             return;
         this._drawer?.close();
         this._contextMenu.toggle(this._islandWidget.isInLowerHalf());
     }
 
     _syncDrawerPosition() {
-        if (this._disabled || !this._drawer?.isOpen || !this._islandWidget)
+        if (!this._drawer?.isOpen)
             return;
-        const b = this._islandWidget.getBounds();
-        const monIdx = this._config?.visuals?.monitor_index ?? 0;
-        this._drawer.updatePosition(b.x, b.y, b.width, b.height, monIdx);
+        this._openDrawerAtIsland('updatePosition');
     }
 
     _applyConfig(config) {
-        if (this._disabled || !config)
+        if (!this._daemon?.active || !config)
             return;
 
         this._config = {
@@ -329,18 +274,19 @@ export default class ByteyExtension extends Extension {
     }
 
     async _loadInitialData() {
-        const cfgResp = await this._httpJson('GET', '/api/v1/config');
+        if (!this._daemon?.active)
+            return;
+        const cfgResp = await this._daemon.getConfig();
         if (cfgResp.ok && cfgResp.data)
             this._applyConfig(cfgResp.data);
         await this._refreshActiveSession();
     }
 
     async _refreshActiveSession() {
-        let sessionResp = await this._httpJson('GET', '/api/v1/sessions/active');
-        if (!sessionResp.ok && sessionResp.status === 404)
-            sessionResp = await this._httpJson('GET', '/api/v1/sessions');
-
-        if (!sessionResp.ok || !sessionResp.data)
+        if (!this._daemon?.active)
+            return;
+        const sessionResp = await this._daemon.getActiveSessionOrList();
+        if (!this._daemon?.active || !sessionResp.ok || !sessionResp.data)
             return;
 
         const payload = sessionResp.data;
@@ -365,18 +311,12 @@ export default class ByteyExtension extends Extension {
         this._activeSessionId = sessionId;
 
         if (messages === null && sessionId) {
-            const msgResp = await this._httpJson(
-                'GET',
-                `/api/v1/sessions/${encodeURIComponent(sessionId)}/messages`
-            );
-            if (msgResp.ok && msgResp.data) {
-                messages = Array.isArray(msgResp.data)
-                    ? msgResp.data
-                    : (msgResp.data.messages ?? []);
-            }
+            const msgResp = await this._daemon.getSessionMessages(sessionId);
+            if (msgResp.ok && msgResp.data)
+                messages = this._extractMessages(msgResp.data);
         }
 
-        if (!this._disabled && Array.isArray(messages))
+        if (this._daemon?.active && Array.isArray(messages))
             this._drawer?.setMessages(messages);
 
         await this._refreshSessionsList();
@@ -385,19 +325,19 @@ export default class ByteyExtension extends Extension {
     }
 
     async _refreshWorkspace() {
-        const resp = await this._httpJson('GET', '/api/v1/workspace');
-        if (this._disabled || !resp.ok || !resp.data)
+        if (!this._daemon?.active)
+            return;
+        const resp = await this._daemon.getWorkspace();
+        if (!this._daemon?.active || !resp.ok || !resp.data)
             return;
         this._drawer?.setWorkspace(resp.data);
     }
 
     async _handleSelectWorkspace(path) {
-        if (this._disabled)
+        if (!this._daemon?.active)
             return;
-        const resp = await this._httpJson('PUT', '/api/v1/workspace', {
-            path: String(path ?? '').trim(),
-        });
-        if (this._disabled || !resp.ok)
+        const resp = await this._daemon.setWorkspace(path);
+        if (!this._daemon?.active || !resp.ok)
             return;
         if (resp.data)
             this._drawer?.setWorkspace(resp.data);
@@ -405,41 +345,40 @@ export default class ByteyExtension extends Extension {
     }
 
     async _handleListModels(provider) {
-        if (this._disabled || !provider)
+        if (!this._daemon?.active || !provider)
             return [];
-        const resp = await this._httpJson(
-            'GET',
-            `/api/v1/providers/${encodeURIComponent(String(provider))}/models`
-        );
-        if (this._disabled || !resp.ok || !resp.data)
+        const resp = await this._daemon.listModels(provider);
+        if (!this._daemon?.active || !resp.ok || !resp.data)
             return [];
         return Array.isArray(resp.data.models) ? resp.data.models : [];
     }
 
     async _handleSelectModel(model) {
-        if (this._disabled || !model)
+        if (!this._daemon?.active || !model)
             return;
         await this._patchConfig({provider: {model: String(model)}});
     }
 
     async _refreshSkillsList() {
-        const resp = await this._httpJson('GET', '/api/v1/skills');
-        if (this._disabled || !resp.ok || !resp.data)
+        if (!this._daemon?.active)
+            return;
+        const resp = await this._daemon.getSkills();
+        if (!this._daemon?.active || !resp.ok || !resp.data)
             return;
 
         const payload = resp.data;
         const skills = Array.isArray(payload)
             ? payload
             : (Array.isArray(payload.skills) ? payload.skills : []);
-        const enabled = typeof payload.enabled === 'boolean'
-            ? payload.enabled
-            : true;
+        const enabled = typeof payload.enabled === 'boolean' ? payload.enabled : true;
         this._drawer?.setSkills(skills, enabled);
     }
 
     async _refreshSessionsList() {
-        const resp = await this._httpJson('GET', '/api/v1/sessions');
-        if (this._disabled || !resp.ok || !resp.data)
+        if (!this._daemon?.active)
+            return;
+        const resp = await this._daemon.getSessions();
+        if (!this._daemon?.active || !resp.ok || !resp.data)
             return;
 
         const payload = resp.data;
@@ -463,7 +402,7 @@ export default class ByteyExtension extends Extension {
     }
 
     async _handleSelectSession(sessionId) {
-        if (this._disabled || !sessionId || this._isDaemonBusy())
+        if (!this._daemon?.active || !sessionId || this._isDaemonBusy())
             return;
 
         if (sessionId === this._activeSessionId) {
@@ -471,51 +410,36 @@ export default class ByteyExtension extends Extension {
             return;
         }
 
-        const resp = await this._httpJson(
-            'POST',
-            `/api/v1/sessions/${encodeURIComponent(sessionId)}/activate`,
-            {}
-        );
-        if (this._disabled || !resp.ok || !resp.data)
+        const resp = await this._daemon.activateSession(sessionId);
+        if (!this._daemon?.active || !resp.ok || !resp.data)
             return;
 
-        const nextId = resp.data.active_session_id ?? sessionId;
+        this._activeSessionId = resp.data.active_session_id ?? sessionId;
         const messages = Array.isArray(resp.data.messages) ? resp.data.messages : [];
-        this._activeSessionId = nextId;
         this._drawer?.setSessions(this._sessions, this._activeSessionId);
         this._drawer?.loadMessages(messages);
         this._drawer?.focusInput();
     }
 
     async _handleDeleteSession(sessionId) {
-        if (this._disabled || !sessionId)
+        if (!this._daemon?.active || !sessionId)
             return;
 
         const wasActive = sessionId === this._activeSessionId;
         if (wasActive && this._isDaemonBusy())
             return;
 
-        const resp = await this._httpJson(
-            'DELETE',
-            `/api/v1/sessions/${encodeURIComponent(sessionId)}`
-        );
-        if (this._disabled || !resp.ok)
+        const resp = await this._daemon.deleteSession(sessionId);
+        if (!this._daemon?.active || !resp.ok)
             return;
 
         const nextActiveId = resp.data?.active_session_id ?? null;
         if (wasActive || (nextActiveId && nextActiveId !== this._activeSessionId)) {
             this._activeSessionId = nextActiveId;
             if (this._activeSessionId) {
-                const msgResp = await this._httpJson(
-                    'GET',
-                    `/api/v1/sessions/${encodeURIComponent(this._activeSessionId)}/messages`
-                );
-                if (!this._disabled && msgResp.ok && msgResp.data) {
-                    const messages = Array.isArray(msgResp.data)
-                        ? msgResp.data
-                        : (msgResp.data.messages ?? []);
-                    this._drawer?.loadMessages(messages);
-                }
+                const msgResp = await this._daemon.getSessionMessages(this._activeSessionId);
+                if (this._daemon?.active && msgResp.ok && msgResp.data)
+                    this._drawer?.loadMessages(this._extractMessages(msgResp.data));
             } else {
                 this._drawer?.clearMessages();
             }
@@ -525,46 +449,41 @@ export default class ByteyExtension extends Extension {
     }
 
     async _handleRenameSession(sessionId, title) {
-        if (this._disabled || !sessionId)
+        if (!this._daemon?.active || !sessionId)
             return;
 
         const cleanTitle = typeof title === 'string' ? title.trim() : '';
         if (!cleanTitle)
             return;
 
-        const resp = await this._httpJson(
-            'PATCH',
-            `/api/v1/sessions/${encodeURIComponent(sessionId)}`,
-            {title: cleanTitle}
-        );
-        if (this._disabled || !resp.ok)
+        const resp = await this._daemon.renameSession(sessionId, cleanTitle);
+        if (!this._daemon?.active || !resp.ok)
             return;
 
         await this._refreshSessionsList();
     }
 
     async _patchConfig(patch) {
+        if (!this._daemon?.active)
+            return;
         this._applyConfig(patch);
-        const resp = await this._httpJson('PATCH', '/api/v1/config', patch);
+        const resp = await this._daemon.patchConfig(patch);
         if (resp.ok && resp.data && typeof resp.data === 'object')
             this._applyConfig(resp.data);
     }
 
     _persistFloatingPosition(x, y) {
-        const roundedX = Math.round(x);
-        const roundedY = Math.round(y);
         this._patchConfig({
             visuals: {
-                float_x: roundedX,
-                float_y: roundedY,
+                float_x: Math.round(x),
+                float_y: Math.round(y),
             },
         }).catch(() => {});
     }
 
     async _handleSendText(text, attachments = []) {
-        const sessionTarget = this._activeSessionId
-            ? encodeURIComponent(this._activeSessionId)
-            : 'active';
+        if (!this._daemon?.active)
+            return;
         const body = {
             content: text,
             text,
@@ -574,16 +493,8 @@ export default class ByteyExtension extends Extension {
         if (Array.isArray(attachments) && attachments.length > 0)
             body.attachments = attachments;
 
-        let resp = await this._httpJson('POST', `/api/v1/sessions/${sessionTarget}/messages`, body);
-        if (!resp.ok && resp.status === 404) {
-            resp = await this._httpJson('POST', '/api/v1/sessions', {
-                action: 'message',
-                session_id: this._activeSessionId,
-                ...body,
-            });
-        }
-
-        if (resp.ok && resp.data) {
+        const resp = await this._daemon.sendMessage(this._activeSessionId, body);
+        if (this._daemon?.active && resp.ok && resp.data) {
             const msg = resp.data.user_message ?? resp.data.message ?? resp.data;
             if (msg && (msg.id || msg.message_id) && (msg.content || msg.text)) {
                 this._drawer?.upsertMessageDelta({
@@ -600,17 +511,11 @@ export default class ByteyExtension extends Extension {
     }
 
     async _handleNewChat() {
-        if (this._disabled || this._isDaemonBusy())
+        if (!this._daemon?.active || this._isDaemonBusy())
             return;
 
-        let resp = await this._httpJson('POST', '/api/v1/sessions', {title: 'New Chat'});
-        if (!resp.ok && resp.status === 405 && this._activeSessionId) {
-            resp = await this._httpJson(
-                'DELETE',
-                `/api/v1/sessions/${encodeURIComponent(this._activeSessionId)}`
-            );
-        }
-        if (!this._disabled) {
+        const resp = await this._daemon.createOrResetSession(this._activeSessionId);
+        if (this._daemon?.active) {
             if (resp.ok && resp.data)
                 this._activeSessionId = resp.data.id ?? resp.data.session?.id ?? null;
             this._drawer?.clearMessages();
@@ -619,266 +524,40 @@ export default class ByteyExtension extends Extension {
         }
     }
 
-    async _handleReplayTts(messageId, text) {
-        let resp = await this._httpJson('POST', '/api/v1/tts/replay', {
-            message_id: messageId,
-            text,
-        });
-        if (!resp.ok && resp.status === 404) {
-            const sid = encodeURIComponent(this._activeSessionId ?? 'active');
-            const mid = encodeURIComponent(messageId);
-            resp = await this._httpJson('POST', `/api/v1/sessions/${sid}/messages/${mid}/replay`, {
-                text,
-            });
-        }
-    }
-
     async _handleDeleteMessage(messageId) {
-        if (this._disabled || !messageId)
+        if (!this._daemon?.active || !messageId)
             return;
-        const sid = encodeURIComponent(this._activeSessionId ?? 'active');
-        const mid = encodeURIComponent(messageId);
-        const resp = await this._httpJson('DELETE', `/api/v1/sessions/${sid}/messages/${mid}`);
-        if (this._disabled || !resp.ok)
+        const resp = await this._daemon.deleteMessage(this._activeSessionId, messageId);
+        if (!this._daemon?.active || !resp.ok)
             return;
         this._drawer?.removeMessage(messageId);
         await this._refreshSessionsList();
     }
 
-    async _handleTogglePauseTts() {
-        if (this._disabled)
-            return;
-        await this._httpJson('POST', '/api/v1/tts/pause', {});
+    _extractMessages(data) {
+        return Array.isArray(data) ? data : (data?.messages ?? []);
     }
 
-    async _handleManualMic() {
-        const state = this._islandWidget?.state ?? 'IDLE';
-        if (state === 'SPEAKING')
-            await this._httpJson('POST', '/api/v1/voice/barge-in', {});
-        else
-            await this._httpJson('POST', '/api/v1/voice/trigger', {});
-    }
-
-    async _handleConfirmTool(requestId, approved) {
-        let resp = await this._httpJson('POST', '/api/v1/tools/confirm', {
-            request_id: requestId,
-            approved: Boolean(approved),
-        });
-        if (!resp.ok && resp.status === 404) {
-            resp = await this._httpJson('POST', '/api/v1/mcp/confirm', {
-                call_id: requestId,
-                approved: Boolean(approved),
-            });
-        }
-        if (!resp.ok && resp.status === 404) {
-            resp = await this._httpJson(
-                'POST',
-                `/api/v1/tools/${encodeURIComponent(requestId)}/confirm`,
-                {approved: Boolean(approved)}
-            );
-        }
-    }
-
-    async _handleExit() {
-        this._exitedByUser = true;
-        this._wsHadError = false;
-        this._clearReconnectTimer();
+    _beginShutdown() {
+        this._daemon?.markExited();
         this._drawer?.setConnectionStatus('disconnected');
         this._drawer?.close();
         this._contextMenu?.close();
         this._islandWidget?.hide();
+    }
 
+    async _handleExit() {
+        this._beginShutdown();
         try {
-            await this._httpJson('POST', '/api/v1/system/exit', {});
+            await this._daemon?.exitSystem();
         } catch (_e) {
             // Daemon may terminate immediately after accepting exit.
         }
-        this._closeWebSocket();
-    }
-
-    _httpJson(method, path, body = undefined) {
-        return new Promise(resolve => {
-            if (this._disabled || !this._httpSession) {
-                resolve({ok: false, status: 0, data: null});
-                return;
-            }
-
-            const url = `${this._baseUrl}${path}`;
-            const msg = Soup.Message.new(method, url);
-            if (!msg) {
-                resolve({ok: false, status: 0, data: null});
-                return;
-            }
-
-            if (body !== undefined) {
-                const payload = new GLib.Bytes(new TextEncoder().encode(JSON.stringify(body)));
-                msg.set_request_body_from_bytes('application/json', payload);
-            }
-
-            this._httpSession.send_and_read_async(
-                msg,
-                GLib.PRIORITY_DEFAULT,
-                this._cancellable,
-                (session, res) => {
-                    try {
-                        const bytes = session.send_and_read_finish(res);
-                        const status = msg.get_status();
-                        const arr = bytes ? bytes.toArray() : new Uint8Array(0);
-                        const rawText = arr.length > 0 ? new TextDecoder().decode(arr) : '';
-                        let data = null;
-                        if (rawText) {
-                            try {
-                                data = JSON.parse(rawText);
-                            } catch (_parseErr) {
-                                data = rawText;
-                            }
-                        }
-                        resolve({
-                            ok: status >= 200 && status < 300,
-                            status,
-                            data,
-                        });
-                    } catch (_err) {
-                        resolve({ok: false, status: 0, data: null});
-                    }
-                }
-            );
-        });
-    }
-
-    _connectWebSocket() {
-        if (this._disabled || this._exitedByUser || !this._httpSession)
-            return;
-
-        this._clearReconnectTimer();
-        this._closeWebSocket();
-
-        const msg = Soup.Message.new('GET', this._wsUrl);
-        if (!msg) {
-            this._scheduleReconnect();
-            return;
-        }
-
-        this._httpSession.websocket_connect_async(
-            msg,
-            null,
-            null,
-            GLib.PRIORITY_DEFAULT,
-            this._cancellable,
-            (session, res) => {
-                let conn = null;
-                try {
-                    conn = session.websocket_connect_finish(res);
-                } catch (_err) {
-                    if (!this._disabled && !this._exitedByUser) {
-                        this._wsHadError = true;
-                        this._drawer?.setConnectionStatus('error');
-                        this._scheduleReconnect();
-                    }
-                    return;
-                }
-
-                if (this._disabled || this._exitedByUser || !conn) {
-                    try {
-                        conn?.close(Soup.WebsocketCloseCode.NORMAL, null);
-                    } catch (_e) {
-                        // Ignore close errors.
-                    }
-                    return;
-                }
-
-                this._wsConn = conn;
-                try {
-                    conn.max_incoming_payload_size = WS_MAX_INCOMING_PAYLOAD;
-                } catch (_e) {
-                    // Older libsoup: keep default limit.
-                }
-                this._wsBackoffMs = WS_BACKOFF_MIN_MS;
-                this._wsHadError = false;
-                this._drawer?.setConnectionStatus('connected');
-                if (!Main.overview.visible)
-                    this._islandWidget?.show();
-
-                const msgId = conn.connect('message', (_c, dataType, bytes) => {
-                    if (dataType !== Soup.WebsocketDataType.TEXT || !bytes)
-                        return;
-                    try {
-                        const text = new TextDecoder().decode(bytes.toArray());
-                        const event = JSON.parse(text);
-                        this._handleWsEvent(event);
-                    } catch (_e) {
-                        // Ignore malformed JSON frames.
-                    }
-                });
-
-                const errId = conn.connect('error', () => {
-                    this._wsHadError = true;
-                    if (!this._disabled)
-                        this._drawer?.setConnectionStatus('error');
-                });
-
-                const closedId = conn.connect('closed', () => {
-                    const closedAfterError = this._wsHadError;
-                    this._closeWebSocket();
-                    if (!this._disabled && !this._exitedByUser) {
-                        this._drawer?.setConnectionStatus(closedAfterError ? 'error' : 'disconnected');
-                        this._scheduleReconnect();
-                    }
-                });
-
-                this._wsSignalIds = [msgId, errId, closedId];
-                this._loadInitialData().catch(() => {});
-            }
-        );
-    }
-
-    _closeWebSocket() {
-        if (this._wsConn) {
-            for (const id of this._wsSignalIds) {
-                try {
-                    this._wsConn.disconnect(id);
-                } catch (_e) {
-                    // Ignore disconnect errors.
-                }
-            }
-            this._wsSignalIds = [];
-            try {
-                if (this._wsConn.get_state() === Soup.WebsocketState.OPEN)
-                    this._wsConn.close(Soup.WebsocketCloseCode.NORMAL, null);
-            } catch (_e) {
-                // Ignore close errors.
-            }
-            this._wsConn = null;
-        }
-    }
-
-    _scheduleReconnect() {
-        if (this._disabled || this._exitedByUser || this._reconnectTimerId)
-            return;
-
-        const delayMs = this._wsBackoffMs;
-        this._wsBackoffMs = Math.min(WS_BACKOFF_MAX_MS, this._wsBackoffMs * 2);
-
-        if (this._reconnectTimerId) {
-            GLib.Source.remove(this._reconnectTimerId);
-            this._reconnectTimerId = 0;
-        }
-        this._reconnectTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delayMs, () => {
-            this._reconnectTimerId = 0;
-            this._connectWebSocket();
-            return GLib.SOURCE_REMOVE;
-        });
-    }
-
-    _clearReconnectTimer() {
-        if (this._reconnectTimerId) {
-            GLib.Source.remove(this._reconnectTimerId);
-            this._reconnectTimerId = 0;
-        }
+        this._daemon?.closeWebSocket();
     }
 
     _handleWsEvent(event) {
-        if (this._disabled || !event || typeof event !== 'object')
+        if (!this._daemon?.active || !event || typeof event !== 'object')
             return;
 
         switch (event.type) {
@@ -921,20 +600,14 @@ export default class ByteyExtension extends Extension {
             const status = String(event.status ?? '').toLowerCase();
             if (status === 'running' && event.tool)
                 this._islandWidget?.setState('TOOL_CALLING', undefined, String(event.tool));
-            if (status === 'awaiting_confirm' && !this._drawer?.isOpen && this._islandWidget) {
-                const b = this._islandWidget.getBounds();
-                const monIdx = this._config?.visuals?.monitor_index ?? 0;
-                this._drawer.open(b.x, b.y, b.width, b.height, monIdx);
-            }
+            if (status === 'awaiting_confirm' && !this._drawer?.isOpen)
+                this._openDrawerAtIsland('open');
             this._drawer?.updateToolCall(event);
             break;
         }
         case 'tool_confirmation_required': {
-            if (!this._drawer?.isOpen && this._islandWidget) {
-                const b = this._islandWidget.getBounds();
-                const monIdx = this._config?.visuals?.monitor_index ?? 0;
-                this._drawer.open(b.x, b.y, b.width, b.height, monIdx);
-            }
+            if (!this._drawer?.isOpen)
+                this._openDrawerAtIsland('open');
             this._drawer?.showToolConfirmation(event);
             break;
         }
@@ -984,30 +657,17 @@ export default class ByteyExtension extends Extension {
             if (Array.isArray(event.messages)) {
                 this._drawer?.loadMessages(event.messages);
             } else if (this._activeSessionId) {
-                this._httpJson(
-                    'GET',
-                    `/api/v1/sessions/${encodeURIComponent(this._activeSessionId)}/messages`
-                ).then(msgResp => {
-                    if (!this._disabled && msgResp.ok && msgResp.data) {
-                        const msgs = Array.isArray(msgResp.data)
-                            ? msgResp.data
-                            : (msgResp.data.messages ?? []);
-                        this._drawer?.loadMessages(msgs);
-                    }
+                this._daemon.getSessionMessages(this._activeSessionId).then(msgResp => {
+                    if (this._daemon?.active && msgResp.ok && msgResp.data)
+                        this._drawer?.loadMessages(this._extractMessages(msgResp.data));
                 }).catch(() => {});
             }
             this._drawer?.setSessions(this._sessions, this._activeSessionId);
             break;
         }
         case 'shutdown': {
-            this._exitedByUser = true;
-            this._wsHadError = false;
-            this._clearReconnectTimer();
-            this._drawer?.setConnectionStatus('disconnected');
-            this._drawer?.close();
-            this._contextMenu?.close();
-            this._islandWidget?.hide();
-            this._closeWebSocket();
+            this._beginShutdown();
+            this._daemon?.closeWebSocket();
             break;
         }
         default:
