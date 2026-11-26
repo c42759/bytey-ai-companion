@@ -6786,6 +6786,7 @@ class TestInterleavedMessageParts(unittest.IsolatedAsyncioTestCase):
                 await orig_broadcast(payload)
 
             daemon.ipc.connection_manager.broadcast = _capture_broadcast  # type: ignore[method-assign]
+            daemon.ipc.port = 0
             await daemon.start()
             try:
                 sess = await daemon.storage.get_or_create_active_session()
@@ -6928,6 +6929,128 @@ class TestModelDiscoverySorting(unittest.IsolatedAsyncioTestCase):
             ids,
             ["deepseek-r1:8b", "gemma2:9b", "Llama3.2:3b", "qwen2.5:7b"],
         )
+
+
+class TestTokenUsageTracking(unittest.IsolatedAsyncioTestCase):
+    async def test_usage_normalization_and_storage_roundtrip(self) -> None:
+        from bytey_ai_companion.llm.router import (
+            _extract_anthropic_usage,
+            _extract_openai_usage,
+            _normalize_usage,
+        )
+        from bytey_ai_companion.storage import StorageManager
+
+        self.assertEqual(
+            _normalize_usage(100, 50),
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        )
+        self.assertEqual(
+            _extract_openai_usage({"prompt_tokens": 200, "completion_tokens": 40, "total_tokens": 240}),
+            {"prompt_tokens": 200, "completion_tokens": 40, "total_tokens": 240},
+        )
+        self.assertEqual(
+            _extract_anthropic_usage({"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 25}),
+            {"prompt_tokens": 150, "completion_tokens": 25, "total_tokens": 175},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            storage = StorageManager(db_path=db_path)
+            await storage.init_db()
+            try:
+                sess = await storage.create_session("Usage Test")
+                msg = await storage.add_message(
+                    sess["id"],
+                    "assistant",
+                    "initial",
+                    usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                )
+                self.assertEqual(
+                    msg["usage"],
+                    {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                )
+                updated = await storage.update_message(
+                    msg["id"],
+                    content="final",
+                    usage={"prompt_tokens": 50000, "completion_tokens": 4834, "total_tokens": 54834},
+                )
+                self.assertEqual(updated["usage"]["total_tokens"], 54834)
+                listed = await storage.list_messages(sess["id"])
+                self.assertEqual(listed[0]["usage"]["total_tokens"], 54834)
+            finally:
+                await storage.close()
+
+    async def test_router_chat_returns_usage_and_daemon_broadcasts_it(self) -> None:
+        from bytey_ai_companion.llm.router import LLMRouter
+
+        router = LLMRouter(ConfigManager())
+        router._chat_ollama = unittest.mock.AsyncMock(
+            return_value=([], {"prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500})
+        )
+        res = await router.generate_chat(
+            provider="ollama",
+            messages=[{"role": "user", "content": "hi"}],
+            system_prompt="",
+            model="llama3.2",
+        )
+        self.assertEqual(
+            res["usage"],
+            {"prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = ByteyDaemon(
+                config_dir=tmp_path / "cfg",
+                data_dir=tmp_path / "data",
+                enable_voice_capture=False,
+            )
+            daemon.config_manager.update_config(
+                {
+                    "provider": {"active_provider": "ollama", "model": "llama3.2"},
+                    "voice_out": {"tts_provider": "disabled", "tts_muted": True},
+                }
+            )
+            daemon.llm_router.generate_chat = unittest.mock.AsyncMock(
+                return_value={
+                    "content": "hello",
+                    "emotion": "happy",
+                    "emotion_explicit": True,
+                    "title": None,
+                    "tool_calls": [],
+                    "usage": {"prompt_tokens": 50000, "completion_tokens": 4834, "total_tokens": 54834},
+                    "raw_assistant_message": {"role": "assistant", "content": "hello"},
+                }
+            )
+            broadcasts: list[dict[str, Any]] = []
+            orig_broadcast = daemon.ipc.connection_manager.broadcast
+
+            async def _capture_broadcast(payload: dict[str, Any]) -> None:
+                broadcasts.append(payload)
+                await orig_broadcast(payload)
+
+            daemon.ipc.connection_manager.broadcast = _capture_broadcast  # type: ignore[method-assign]
+            daemon.ipc.port = 0
+            await daemon.start()
+            try:
+                sess = await daemon.storage.create_session("Token Usage Session")
+                await daemon.handle_user_prompt("hi", input_mode="text", session_id=sess["id"])
+                finals = [
+                    b for b in broadcasts
+                    if b.get("type") == "transcript_delta"
+                    and b.get("role") == "assistant"
+                    and b.get("is_final") is True
+                ]
+                self.assertEqual(len(finals), 1)
+                self.assertEqual(
+                    finals[0].get("usage"),
+                    {"prompt_tokens": 50000, "completion_tokens": 4834, "total_tokens": 54834},
+                )
+                msgs = await daemon.storage.list_messages(sess["id"])
+                asst = [m for m in msgs if m["role"] == "assistant"][-1]
+                self.assertEqual(asst["usage"]["total_tokens"], 54834)
+            finally:
+                await daemon.stop()
 
 
 if __name__ == "__main__":

@@ -931,6 +931,11 @@
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.bytey-context-ring {
+  padding: 2px;
+  border-radius: 999px;
+}
+
 .bytey-entry-scroll {
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.14);

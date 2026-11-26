@@ -2909,11 +2909,13 @@ class ByteyDaemon:
                         cleaned_parts.append(
                             {"type": "tool_call", "call_id": str(part["call_id"])}
                         )
+                usage = last_result.get("usage") if isinstance(last_result, dict) else None
                 updated_msg = await self.storage.update_message(
                     assistant_id,
                     content=clean_reply,
                     emotion=final_emotion,
                     parts=cleaned_parts,
+                    usage=usage,
                 )
                 if needs_auto_title:
                     captured_title = (
@@ -2934,6 +2936,7 @@ class ByteyDaemon:
                         "text": clean_reply,
                         "parts": cleaned_parts,
                         "emotion": final_emotion,
+                        "usage": usage,
                         "is_final": True,
                     }
                 )
