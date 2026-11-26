@@ -4,6 +4,8 @@ import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import Soup from 'gi://Soup?version=3.0';
 
+import {normalizeHttpUrl} from './sharedUtils.js';
+
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8765';
 const WS_BACKOFF_MIN_MS = 1000;
 const WS_BACKOFF_MAX_MS = 30000;
@@ -39,25 +41,10 @@ export class DaemonClient {
         return this._exitedByUser;
     }
 
-    _isValidHttpUrl(url) {
-        if (typeof url !== 'string')
-            return false;
-        const trimmed = url.trim();
-        if (!/^https?:\/\/\S+$/i.test(trimmed))
-            return false;
-        const stripped = trimmed.replace(/\/+$/, '');
-        return /^https?:\/\/\S+$/i.test(stripped);
-    }
-
     resolveUrls() {
-        const envUrl = GLib.getenv('BYTEY_DAEMON_URL') || GLib.getenv('AI_PET_DAEMON_URL');
-        const settingsUrl = this._settings?.get_string('daemon-url');
-        let chosen = DEFAULT_BASE_URL;
-        if (this._isValidHttpUrl(envUrl))
-            chosen = envUrl.trim().replace(/\/+$/, '');
-        else if (this._isValidHttpUrl(settingsUrl))
-            chosen = settingsUrl.trim().replace(/\/+$/, '');
-        this._baseUrl = chosen;
+        const envUrl = normalizeHttpUrl(GLib.getenv('BYTEY_DAEMON_URL') || GLib.getenv('AI_PET_DAEMON_URL'));
+        const settingsUrl = normalizeHttpUrl(this._settings?.get_string('daemon-url'));
+        this._baseUrl = envUrl ?? settingsUrl ?? DEFAULT_BASE_URL;
         this._wsUrl = `${this._baseUrl.replace(/^http/i, 'ws')}/ws`;
     }
 

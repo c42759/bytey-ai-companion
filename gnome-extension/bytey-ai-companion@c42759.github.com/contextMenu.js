@@ -4,6 +4,8 @@ import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
+import {connectTracked} from './sharedUtils.js';
+
 /**
  * Native GNOME right-click `PopupMenu` anchored to the Dynamic Island pill.
  */
@@ -41,9 +43,7 @@ export class IslandContextMenu {
     }
 
     _connect(obj, signal, handler) {
-        const id = obj.connect(signal, handler);
-        this._signalIds.push([obj, id]);
-        return id;
+        return connectTracked(this._signalIds, obj, signal, handler);
     }
 
     _buildItems() {

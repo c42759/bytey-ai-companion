@@ -9,6 +9,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {parseHexColor} from './colorUtils.js';
 import {EyeRenderer} from './eyeRenderer.js';
+import {connectTracked} from './sharedUtils.js';
 
 const DRAG_THRESHOLD_PX = 5;
 const EXPANDED_STATES = new Set(['LISTENING', 'THINKING', 'TOOL_CALLING', 'SPEAKING']);
@@ -591,9 +592,7 @@ export class IslandWidget {
     }
 
     _connect(obj, signal, handler) {
-        const id = obj.connect(signal, handler);
-        this._signalIds.push([obj, id]);
-        return id;
+        return connectTracked(this._signalIds, obj, signal, handler);
     }
 
     _isNotchMode() {

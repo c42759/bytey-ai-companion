@@ -3,6 +3,7 @@
 import Gdk from 'gi://Gdk';
 
 import {parseHexColor} from '../colorUtils.js';
+export {normalizeHttpUrl as normalizeUrl} from '../sharedUtils.js';
 
 export const DEFAULT_DAEMON_URL = 'http://127.0.0.1:8765';
 export const DEFAULT_EYE_COLOR = '#F7FAFF';
@@ -82,16 +83,6 @@ export const PROVIDER_DEFAULT_URLS = {
     custom: 'http://localhost:8000/v1',
 };
 export const DEFAULT_CONTEXT_FALLBACK_MAX = 131072;
-
-export function normalizeUrl(raw) {
-    if (typeof raw !== 'string')
-        return null;
-    const trimmed = raw.trim();
-    if (!/^https?:\/\/\S+$/i.test(trimmed))
-        return null;
-    const stripped = trimmed.replace(/\/+$/, '');
-    return /^https?:\/\/\S+$/i.test(stripped) ? stripped : null;
-}
 
 export function positionModeValueForIndex(idx) {
     return (POSITION_MODE_OPTIONS[idx] ?? POSITION_MODE_OPTIONS[0]).value;

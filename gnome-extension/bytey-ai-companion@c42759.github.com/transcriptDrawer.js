@@ -11,6 +11,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {AttachmentPicker} from './attachmentPicker.js';
 import {renderMessageBody} from './markdownRenderer.js';
 import {populateSearchableMenu} from './searchableMenu.js';
+import {connectTracked} from './sharedUtils.js';
 
 const DRAWER_GAP_PX = 8;
 const DRAWER_WIDTH_FALLBACK = 380;
@@ -169,9 +170,7 @@ export class TranscriptDrawer {
     }
 
     _connect(obj, signal, handler) {
-        const id = obj.connect(signal, handler);
-        this._signalIds.push([obj, id]);
-        return id;
+        return connectTracked(this._signalIds, obj, signal, handler);
     }
 
     _copyWithFeedback(text, copyIcon, doneIconName = 'emblem-ok-symbolic') {
@@ -3007,14 +3006,13 @@ export class TranscriptDrawer {
             orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
         });
-        const summaryLabel = new St.Label({
+        const summaryChipsBox = new St.BoxLayout({
             style_class: 'bytey-tool-group-summary',
-            text: '',
             x_expand: true,
             x_align: Clutter.ActorAlign.START,
             y_align: Clutter.ActorAlign.CENTER,
+            style: 'spacing: 8px;',
         });
-        summaryLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
         const summaryChevron = new St.Icon({
             icon_name: 'pan-down-symbolic',
             icon_size: 14,
@@ -3024,7 +3022,7 @@ export class TranscriptDrawer {
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
-        summaryRow.add_child(summaryLabel);
+        summaryRow.add_child(summaryChipsBox);
         summaryRow.add_child(summaryChevron);
 
         const summaryBtn = new St.Button({
@@ -3045,7 +3043,7 @@ export class TranscriptDrawer {
         const group = {
             container,
             summaryBtn,
-            summaryLabel,
+            summaryChipsBox,
             summaryChevron,
             listBox,
             tools: [],
@@ -3063,17 +3061,38 @@ export class TranscriptDrawer {
     _refreshToolGroup(group) {
         if (!group)
             return;
-        const chips = group.tools.map(t => {
-            let icon = '⋯';
+        group.summaryChipsBox.destroy_all_children();
+        for (let i = 0; i < group.tools.length; i++) {
+            const t = group.tools[i];
+            if (i > 0) {
+                group.summaryChipsBox.add_child(new St.Label({
+                    text: '·',
+                    y_align: Clutter.ActorAlign.CENTER,
+                }));
+            }
+            let iconName = 'content-loading-symbolic';
             if (t.status === 'ok')
-                icon = '✓';
+                iconName = 'emblem-ok-symbolic';
             else if (t.status === 'error' || t.status === 'denied')
-                icon = '✕';
+                iconName = 'window-close-symbolic';
             else if (t.status === 'awaiting_confirm')
-                icon = '?';
-            return `${icon} ${t.tool}`;
-        });
-        group.summaryLabel.text = chips.join('  ·  ');
+                iconName = 'dialog-question-symbolic';
+
+            const chip = new St.BoxLayout({
+                y_align: Clutter.ActorAlign.CENTER,
+                style: 'spacing: 4px;',
+            });
+            chip.add_child(new St.Icon({
+                icon_name: iconName,
+                icon_size: 12,
+                y_align: Clutter.ActorAlign.CENTER,
+            }));
+            chip.add_child(new St.Label({
+                text: String(t.tool ?? ''),
+                y_align: Clutter.ActorAlign.CENTER,
+            }));
+            group.summaryChipsBox.add_child(chip);
+        }
 
         const hasActive = group.tools.some(
             t => t.status === 'running' || t.status === 'awaiting_confirm'
