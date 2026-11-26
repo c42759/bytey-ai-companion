@@ -859,6 +859,10 @@ export default class ByteyExtension extends Extension {
         const delayMs = this._wsBackoffMs;
         this._wsBackoffMs = Math.min(WS_BACKOFF_MAX_MS, this._wsBackoffMs * 2);
 
+        if (this._reconnectTimerId) {
+            GLib.Source.remove(this._reconnectTimerId);
+            this._reconnectTimerId = 0;
+        }
         this._reconnectTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delayMs, () => {
             this._reconnectTimerId = 0;
             this._connectWebSocket();

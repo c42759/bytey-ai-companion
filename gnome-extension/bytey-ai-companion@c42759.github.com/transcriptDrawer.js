@@ -88,6 +88,7 @@ export class TranscriptDrawer {
         this._skillsEnabled = true;
         this._skillMatches = [];
         this._skillSuggestIdx = 0;
+        this._pickCancellable = null;
         this._activeSessionId = null;
         this._pendingDeleteSessionId = null;
         this._pendingDeleteMessageId = null;
@@ -954,6 +955,7 @@ export class TranscriptDrawer {
     _hideSkillSuggestions() {
         this._skillMatches = [];
         this._skillSuggestIdx = 0;
+        this._pickCancellable = null;
         this._skillSuggestList?.destroy_all_children();
         this._skillSuggestBox?.hide();
     }
@@ -1107,11 +1109,14 @@ export class TranscriptDrawer {
         if (this._destroyed)
             return;
         try {
+            if (this._pickCancellable)
+                this._pickCancellable.cancel();
+            this._pickCancellable = new Gio.Cancellable();
             const proc = Gio.Subprocess.new(
                 ['zenity', '--file-selection', '--multiple', '--separator=\n', '--title=Attach files'],
                 Gio.SubprocessFlags.STDOUT_PIPE
             );
-            proc.communicate_utf8_async(null, null, (p, res) => {
+            proc.communicate_utf8_async(null, this._pickCancellable, (p, res) => {
                 try {
                     const [, stdout] = p.communicate_utf8_finish(res);
                     if (p.get_successful() && stdout) {
@@ -2643,6 +2648,10 @@ export class TranscriptDrawer {
                 GLib.Source.remove(tid);
             this._copyResetTimers.clear();
         }
+        if (this._pickCancellable) {
+            this._pickCancellable.cancel();
+            this._pickCancellable = null;
+        }
         this._pendingDeleteSessionId = null;
         this._pendingDeleteMessageId = null;
         this._speakingMessageId = null;
@@ -2697,6 +2706,7 @@ export class TranscriptDrawer {
         this._skills = [];
         this._skillMatches = [];
         this._skillSuggestIdx = 0;
+        this._pickCancellable = null;
         this._sendIcon = null;
         this._providerLabel = null;
         this._autoAcceptBtn = null;
@@ -3400,7 +3410,17 @@ export class TranscriptDrawer {
         const formatChunk = chunk => {
             if (!chunk)
                 return '';
-            const pattern = /(\*\*\*[^*\n]+?\*\*\*|___[^_\n]+?___|\*\*[^*\n]+?\*\*|__[^_\n]+?__|~~[^~\n]+?~~|(?<![*\w])\*[^*\n]+?\*(?!\*)|(?<![_\w])_[^_\n]+?_(?!_)|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)|\u0000CODE\d+\u0000)/g;
+            const pattern = new RegExp([
+                '\\*\\*\\*[^*\\n]+?\\*\\*\\*',
+                '___[^_\\n]+?___',
+                '\\*\\*[^*\\n]+?\\*\\*',
+                '__[^_\\n]+?__',
+                '~~[^~\\n]+?~~',
+                '(?<![*\\w])\\*[^*\\n]+?\\*(?!\\*)',
+                '(?<![_\\w])_[^_\\n]+?_(?!_)',
+                '\\[[^\\]\\n]+\\]\\(https?:\\/\\/[^\\s)]+\\)',
+                '\u0000CODE\\d+\\u0000',
+            ].join('|'), 'g');
             let out = '';
             let lastIdx = 0;
             let match;

@@ -167,6 +167,5 @@ export class IslandContextMenu {
         this._callbacks = null;
         this._micMuteItem = null;
         this._ttsMuteItem = null;
-        this._floatingItem = null;
     }
 }

@@ -1,7 +1,7 @@
 {
   "uuid": "bytey-ai-companion@c42759.github.com",
   "name": "Bytey AI Companion",
-  "description": "Always-on-top Dynamic Island overlay for Bytey AI Companion with procedural Cairo eyes, voice interaction, and anchored transcript drawer. Requires the local Bytey AI Companion core daemon.",
+  "description": "Always-on-top Dynamic Island overlay for Bytey AI Companion with Cairo eyes, voice interaction, and anchored transcript drawer. Requires local Bytey AI Companion daemon.",
   "url": "https://github.com/c42759/bytey-ai-companion",
   "shell-version": [
     "48",

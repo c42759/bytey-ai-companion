@@ -725,7 +725,7 @@ export class EyeRenderer {
             return;
         }
 
-        // 9. Neutral / Default (including LISTENING / SPEAKING): 2 tall white pill eyes + cyan-blue bar
+        // 10. Neutral / Default (including LISTENING / SPEAKING): 2 tall white pill eyes + cyan-blue bar
         const blue = [0.38, 0.65, 0.98];
         if (state === 'LISTENING') {
             const auraStrength = isFull ? (0.25 + 0.65 * mic) : 0.45;

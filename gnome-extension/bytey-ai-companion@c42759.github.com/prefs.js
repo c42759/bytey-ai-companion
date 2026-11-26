@@ -2930,7 +2930,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                         }
                     );
                 } catch (e) {
-                    if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                    if (!(e instanceof GLib.Error && e.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED)))
                         showToast(`Export failed: ${e.message}`);
                 }
             });
@@ -2974,7 +2974,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                         }
                     });
                 } catch (e) {
-                    if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                    if (!(e instanceof GLib.Error && e.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED)))
                         showToast(`Import failed: ${e.message}`);
                 }
             });
@@ -3961,7 +3961,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                         .then(() => rescanSkills(false))
                         .catch(() => {});
                 } catch (e) {
-                    if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                    if (!(e instanceof GLib.Error && e.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED)))
                         showToast(`Folder selection failed: ${e.message}`);
                 }
             });
@@ -3986,7 +3986,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                     if (path)
                         setWorkspacePath(path).catch(() => {});
                 } catch (e) {
-                    if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                    if (!(e instanceof GLib.Error && e.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED)))
                         showToast(`Folder selection failed: ${e.message}`);
                 }
             });
@@ -4043,7 +4043,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 try {
                     dirFile.make_directory_with_parents(null);
                 } catch (mkErr) {
-                    if (!mkErr.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS))
+                    if (!(mkErr instanceof GLib.Error && mkErr.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.EXISTS)))
                         throw mkErr;
                 }
                 Gio.AppInfo.launch_default_for_uri(dirFile.get_uri(), null);
@@ -4176,7 +4176,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                         if (path)
                             doImportPath(path).catch(() => {});
                     } catch (e) {
-                        if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                        if (!(e instanceof GLib.Error && e.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED)))
                             showToast(`Import failed: ${e.message}`);
                     }
                 });
@@ -4198,7 +4198,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
                         if (path)
                             doImportPath(path).catch(() => {});
                     } catch (e) {
-                        if (!e.matches?.(Gtk.DialogError, Gtk.DialogError.DISMISSED))
+                        if (!(e instanceof GLib.Error && e.matches(Gtk.DialogError, Gtk.DialogError.DISMISSED)))
                             showToast(`Import failed: ${e.message}`);
                     }
                 });
