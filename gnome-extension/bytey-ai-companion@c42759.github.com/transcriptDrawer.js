@@ -12,6 +12,7 @@ import {AttachmentPicker} from './attachmentPicker.js';
 import {drawContextRing, formatContextTooltipText} from './contextRing.js';
 import {renderMessageBody} from './markdownRenderer.js';
 import {populateSearchableMenu} from './searchableMenu.js';
+import {SessionSidebar} from './sessionSidebar.js';
 import {connectTracked} from './sharedUtils.js';
 import {createToolWidget, refreshToolWidget} from './toolCallCard.js';
 
@@ -106,7 +107,6 @@ export class TranscriptDrawer {
         this._emptyStateActor = null;
         this._scrollIdleId = 0;
         this._focusIdleId = 0;
-        this._renameFocusIdleId = 0;
         this._entryScrollIdleId = 0;
         this._menuFocusIdleId = 0;
         this._attachmentPicker = new AttachmentPicker({
@@ -1622,238 +1622,29 @@ export class TranscriptDrawer {
         if (!this._container || !this._sessionsList)
             return;
 
-        this._sessionsList.destroy_all_children();
-
-        if (this._sessions.length === 0) {
-            const empty = new St.Label({
-                style_class: 'bytey-sidebar-empty',
-                text: 'No saved chats',
-                x_expand: true,
-                x_align: Clutter.ActorAlign.CENTER,
+        if (!this._sessionSidebar) {
+            this._sessionSidebar = new SessionSidebar(this._sessionsList, {
+                onSelectSession: sid => this._callbacks.onSelectSession?.(sid),
+                onDeleteSession: sid => this._callbacks.onDeleteSession?.(sid),
+                onRenameSession: (sid, title) => this._callbacks.onRenameSession?.(sid, title),
+                isEditing: sid => this._editingSessionId === sid,
             });
-            this._sessionsList.add_child(empty);
-            return;
         }
 
-        const iconSizes = this._getIconSizes();
-
-        for (const session of this._sessions) {
-            if (!session || !session.id)
-                continue;
-            const sid = String(session.id);
-            const isActive = sid === this._activeSessionId;
-            const isEditing = sid === this._editingSessionId;
-            const isPendingDelete = sid === this._pendingDeleteSessionId;
-
-            const row = new St.BoxLayout({
-                style_class: isActive
-                    ? 'bytey-session-row bytey-session-row-active'
-                    : 'bytey-session-row',
-                orientation: Clutter.Orientation.HORIZONTAL,
-                x_expand: true,
-                reactive: true,
-            });
-
-            const textCol = new St.BoxLayout({
-                orientation: Clutter.Orientation.VERTICAL,
-                x_expand: true,
-                y_align: Clutter.ActorAlign.CENTER,
-            });
-
-            const subLabel = new St.Label({
-                style_class: 'bytey-session-subtitle',
-                text: this._formatSessionSubtitle(session),
-                x_align: Clutter.ActorAlign.START,
-                x_expand: true,
-            });
-            subLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-            subLabel.clutter_text.single_line_mode = true;
-
-            if (isEditing) {
-                const currentTitle = String(session.title || 'New Chat');
-                const titleEntry = new St.Entry({
-                    style_class: 'bytey-session-title-entry',
-                    text: currentTitle,
-                    can_focus: true,
-                    x_expand: true,
-                });
-                titleEntry.clutter_text.connect('activate', () => {
-                    if (!this._container)
-                        return;
-                    const newTitle = titleEntry.get_text().trim();
-                    this._editingSessionId = null;
-                    if (newTitle && newTitle !== currentTitle.trim())
-                        this._callbacks.onRenameSession?.(sid, newTitle);
-                    this._renderSessions();
-                });
-                titleEntry.connect('key-press-event', (_actor, event) => {
-                    if (event.get_key_symbol() === Clutter.KEY_Escape) {
-                        this._editingSessionId = null;
-                        this._renderSessions();
-                        return Clutter.EVENT_STOP;
-                    }
-                    return Clutter.EVENT_PROPAGATE;
-                });
-
-                textCol.add_child(titleEntry);
-                textCol.add_child(subLabel);
-                row.add_child(textCol);
-
-                if (this._renameFocusIdleId) {
-                    GLib.Source.remove(this._renameFocusIdleId);
-                    this._renameFocusIdleId = 0;
-                }
-                this._renameFocusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                    this._renameFocusIdleId = 0;
-                    if (this._container && this._editingSessionId === sid && titleEntry.clutter_text) {
-                        titleEntry.clutter_text.grab_key_focus();
-                        titleEntry.clutter_text.set_selection(0, -1);
-                    }
-                    return GLib.SOURCE_REMOVE;
-                });
-            } else {
-                const titleLabel = new St.Label({
-                    style_class: 'bytey-session-title',
-                    text: String(session.title || 'New Chat'),
-                    x_align: Clutter.ActorAlign.START,
-                    x_expand: true,
-                });
-                titleLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-                titleLabel.clutter_text.single_line_mode = true;
-
-                textCol.add_child(titleLabel);
-                textCol.add_child(subLabel);
-
-                const selectBtn = new St.Button({
-                    style_class: 'bytey-session-select-btn',
-                    can_focus: true,
-                    x_expand: true,
-                    child: textCol,
-                });
-                selectBtn.connect('clicked', () => {
-                    this._callbacks.onSelectSession?.(sid);
-                });
-                row.add_child(selectBtn);
-            }
-
-            if (isPendingDelete) {
-                const confirmBtn = new St.Button({
-                    style_class: 'bytey-session-confirm-delete-btn',
-                    can_focus: true,
-                    y_align: Clutter.ActorAlign.CENTER,
-                    accessible_name: 'Confirm delete chat',
-                    child: new St.Icon({
-                        icon_name: 'object-select-symbolic',
-                        icon_size: iconSizes.replay,
-                    }),
-                });
-                confirmBtn.connect('clicked', () => {
-                    this._pendingDeleteSessionId = null;
-                    this._callbacks.onDeleteSession?.(sid);
-                    this._renderSessions();
-                });
-
-                const cancelBtn = new St.Button({
-                    style_class: 'bytey-session-cancel-delete-btn',
-                    can_focus: true,
-                    y_align: Clutter.ActorAlign.CENTER,
-                    accessible_name: 'Cancel delete chat',
-                    child: new St.Icon({
-                        icon_name: 'window-close-symbolic',
-                        icon_size: iconSizes.replay,
-                    }),
-                });
-                cancelBtn.connect('clicked', () => {
-                    this._pendingDeleteSessionId = null;
-                    this._renderSessions();
-                });
-
-                row.add_child(confirmBtn);
-                row.add_child(cancelBtn);
-            } else {
-                const editBtn = new St.Button({
-                    style_class: 'bytey-session-edit-btn',
-                    can_focus: true,
-                    y_align: Clutter.ActorAlign.CENTER,
-                    accessible_name: 'Rename chat',
-                    child: new St.Icon({
-                        icon_name: 'document-edit-symbolic',
-                        icon_size: iconSizes.replay,
-                    }),
-                });
-                editBtn.connect('clicked', () => {
-                    this._editingSessionId = sid;
-                    this._pendingDeleteSessionId = null;
-                    this._renderSessions();
-                });
-
-                const delBtn = new St.Button({
-                    style_class: 'bytey-session-delete-btn',
-                    can_focus: true,
-                    y_align: Clutter.ActorAlign.CENTER,
-                    accessible_name: 'Delete chat',
-                    child: new St.Icon({
-                        icon_name: 'user-trash-symbolic',
-                        icon_size: iconSizes.replay,
-                    }),
-                });
-                delBtn.connect('clicked', () => {
-                    this._pendingDeleteSessionId = sid;
-                    this._editingSessionId = null;
-                    this._renderSessions();
-                });
-
-                row.add_child(editBtn);
-                row.add_child(delBtn);
-            }
-
-            this._sessionsList.add_child(row);
-        }
-    }
-
-    _formatSessionSubtitle(session) {
-        const rel = this._formatRelativeTime(session.updated_at ?? session.created_at);
-        const count = Number(session.message_count);
-        if (Number.isFinite(count) && count >= 0) {
-            const countText = `${count} msg${count === 1 ? '' : 's'}`;
-            return rel ? `${rel} · ${countText}` : countText;
-        }
-        const preview = typeof session.preview === 'string' ? session.preview.trim() : '';
-        if (preview)
-            return rel ? `${rel} · ${preview}` : preview;
-        return rel || 'Chat';
-    }
-
-    _formatRelativeTime(rawTs) {
-        if (!rawTs)
-            return '';
-        let ms = NaN;
-        if (typeof rawTs === 'number') {
-            ms = rawTs > 1e12 ? rawTs : rawTs * 1000;
-        } else if (typeof rawTs === 'string') {
-            const parsed = Date.parse(rawTs);
-            if (Number.isFinite(parsed)) {
-                ms = parsed;
-            } else {
-                const num = Number(rawTs);
-                if (Number.isFinite(num))
-                    ms = num > 1e12 ? num : num * 1000;
-            }
-        }
-        if (!Number.isFinite(ms))
-            return '';
-
-        const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-        if (diffSec < 60)
-            return 'just now';
-        const diffMin = Math.floor(diffSec / 60);
-        if (diffMin < 60)
-            return `${diffMin}m ago`;
-        const diffHr = Math.floor(diffMin / 60);
-        if (diffHr < 24)
-            return `${diffHr}h ago`;
-        const diffDay = Math.floor(diffHr / 24);
-        return `${diffDay}d ago`;
+        this._sessionSidebar.render({
+            sessions: this._sessions,
+            activeSessionId: this._activeSessionId,
+            editingSessionId: this._editingSessionId,
+            pendingDeleteSessionId: this._pendingDeleteSessionId,
+            iconSize: this._getIconSizes().replay,
+            onStateChange: next => {
+                if ('editingSessionId' in next)
+                    this._editingSessionId = next.editingSessionId;
+                if ('pendingDeleteSessionId' in next)
+                    this._pendingDeleteSessionId = next.pendingDeleteSessionId;
+                this._renderSessions();
+            },
+        });
     }
 
     /**
@@ -2446,9 +2237,9 @@ export class TranscriptDrawer {
             GLib.Source.remove(this._focusIdleId);
             this._focusIdleId = 0;
         }
-        if (this._renameFocusIdleId) {
-            GLib.Source.remove(this._renameFocusIdleId);
-            this._renameFocusIdleId = 0;
+        if (this._sessionSidebar) {
+            this._sessionSidebar.destroy();
+            this._sessionSidebar = null;
         }
         if (this._entryScrollIdleId) {
             GLib.Source.remove(this._entryScrollIdleId);

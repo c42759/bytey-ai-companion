@@ -120,6 +120,7 @@ files = [
     "prefs/workspacePage.js",
     "schemas/org.gnome.shell.extensions.bytey-ai-companion.gschema.xml",
     "searchableMenu.js",
+    "sessionSidebar.js",
     "sharedUtils.js",
     "stylesheet.css",
     "toolCallCard.js",
