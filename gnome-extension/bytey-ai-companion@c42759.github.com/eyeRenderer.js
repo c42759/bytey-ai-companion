@@ -5,6 +5,8 @@ import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
 
+import {parseHexColor} from './colorUtils.js';
+
 const VALID_STATES = new Set([
     'IDLE',
     'LISTENING',
@@ -221,7 +223,7 @@ export class EyeRenderer {
         const nextHex = typeof hexColor === 'string' && hexColor.trim()
             ? hexColor.trim()
             : '#F7FAFF';
-        const nextColor = this._parseHexColor(nextHex);
+        const nextColor = parseHexColor(nextHex, [0.97, 0.98, 1.0, 1.0]);
         const changed = nextHex !== this._eyeColorHex ||
             nextColor.some((v, idx) => Math.abs(v - this._eyeColor[idx]) > 1e-4);
 
@@ -258,43 +260,6 @@ export class EyeRenderer {
     _normalizeEmotion(emotion) {
         const norm = typeof emotion === 'string' ? emotion.toLowerCase().trim() : 'neutral';
         return VALID_EMOTIONS.has(norm) ? norm : 'neutral';
-    }
-
-    _parseHexColor(hex, fallback = [0.97, 0.98, 1.0, 1.0]) {
-        if (typeof hex !== 'string')
-            return [...fallback];
-        const clean = hex.trim();
-        if (!clean.startsWith('#'))
-            return [...fallback];
-        const raw = clean.slice(1);
-        if (!/^[0-9a-fA-F]+$/.test(raw))
-            return [...fallback];
-
-        if (raw.length === 3) {
-            return [
-                parseInt(raw[0] + raw[0], 16) / 255,
-                parseInt(raw[1] + raw[1], 16) / 255,
-                parseInt(raw[2] + raw[2], 16) / 255,
-                1.0,
-            ];
-        }
-        if (raw.length === 6) {
-            return [
-                parseInt(raw.slice(0, 2), 16) / 255,
-                parseInt(raw.slice(2, 4), 16) / 255,
-                parseInt(raw.slice(4, 6), 16) / 255,
-                1.0,
-            ];
-        }
-        if (raw.length === 8) {
-            return [
-                parseInt(raw.slice(0, 2), 16) / 255,
-                parseInt(raw.slice(2, 4), 16) / 255,
-                parseInt(raw.slice(4, 6), 16) / 255,
-                parseInt(raw.slice(6, 8), 16) / 255,
-            ];
-        }
-        return [...fallback];
     }
 
     _queueRepaint() {

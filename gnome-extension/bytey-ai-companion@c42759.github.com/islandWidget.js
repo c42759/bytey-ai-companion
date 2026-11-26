@@ -7,6 +7,7 @@ import Pango from 'gi://Pango';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
+import {parseHexColor} from './colorUtils.js';
 import {EyeRenderer} from './eyeRenderer.js';
 
 const DRAG_THRESHOLD_PX = 5;
@@ -15,50 +16,6 @@ const DEFAULT_BG_RGBA = [10 / 255, 10 / 255, 12 / 255, 1.0];
 const DEFAULT_BORDER_RGBA = [42 / 255, 44 / 255, 52 / 255, 1.0];
 const NOTCH_TOP_FLARE_PX = 12;
 const NOTCH_BOTTOM_RADIUS_PX = 16;
-
-/**
- * Parse `#RGB`, `#RRGGBB`, or `#RRGGBBAA` into normalized `[r, g, b, a]` in `0..1`.
- *
- * @param {string} hex
- * @param {number[]} fallback
- * @returns {number[]}
- */
-function _parseHexColor(hex, fallback) {
-    if (typeof hex !== 'string')
-        return [...fallback];
-    const clean = hex.trim();
-    if (!clean.startsWith('#'))
-        return [...fallback];
-    const raw = clean.slice(1);
-    if (!/^[0-9a-fA-F]+$/.test(raw))
-        return [...fallback];
-
-    if (raw.length === 3) {
-        return [
-            parseInt(raw[0] + raw[0], 16) / 255,
-            parseInt(raw[1] + raw[1], 16) / 255,
-            parseInt(raw[2] + raw[2], 16) / 255,
-            1.0,
-        ];
-    }
-    if (raw.length === 6) {
-        return [
-            parseInt(raw.slice(0, 2), 16) / 255,
-            parseInt(raw.slice(2, 4), 16) / 255,
-            parseInt(raw.slice(4, 6), 16) / 255,
-            1.0,
-        ];
-    }
-    if (raw.length === 8) {
-        return [
-            parseInt(raw.slice(0, 2), 16) / 255,
-            parseInt(raw.slice(2, 4), 16) / 255,
-            parseInt(raw.slice(4, 6), 16) / 255,
-            parseInt(raw.slice(6, 8), 16) / 255,
-        ];
-    }
-    return [...fallback];
-}
 
 /**
  * Format `[r, g, b, a]` (`0..1`) as CSS `rgba(R, G, B, A)`.
@@ -308,8 +265,8 @@ export class IslandWidget {
             border_color: '#2A2C34',
         };
 
-        this._bgColor = _parseHexColor('#0A0A0C', DEFAULT_BG_RGBA);
-        this._borderColor = _parseHexColor('#2A2C34', DEFAULT_BORDER_RGBA);
+        this._bgColor = parseHexColor('#0A0A0C', DEFAULT_BG_RGBA);
+        this._borderColor = parseHexColor('#2A2C34', DEFAULT_BORDER_RGBA);
         this._rainbowPhase = 0;
         this._rainbowTimerId = 0;
         this._rainbowLastUs = 0;
@@ -566,8 +523,8 @@ export class IslandWidget {
             ...visualsConfig,
         };
 
-        this._bgColor = _parseHexColor(this._visualsConfig.background_color, DEFAULT_BG_RGBA);
-        this._borderColor = _parseHexColor(this._visualsConfig.border_color, DEFAULT_BORDER_RGBA);
+        this._bgColor = parseHexColor(this._visualsConfig.background_color, DEFAULT_BG_RGBA);
+        this._borderColor = parseHexColor(this._visualsConfig.border_color, DEFAULT_BORDER_RGBA);
 
         this._eyeRenderer.setAnimationConfig(
             this._visualsConfig.animation_mode ?? 'full',
