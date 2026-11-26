@@ -125,6 +125,50 @@ export function formatInlineMarkup(text) {
     return formatChunk(withPlaceholders);
 }
 
+function parseTableRow(line) {
+    const raw = String(line ?? '');
+    if (!raw.includes('|'))
+        return [];
+    const cells = [];
+    let current = '';
+    for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+        if (ch === '\\' && raw[i + 1] === '|') {
+            current += '|';
+            i++;
+        } else if (ch === '|') {
+            cells.push(current);
+            current = '';
+        } else {
+            current += ch;
+        }
+    }
+    cells.push(current);
+    if (cells.length > 0 && cells[0].trim() === '')
+        cells.shift();
+    if (cells.length > 0 && cells[cells.length - 1].trim() === '')
+        cells.pop();
+    return cells.map(c => c.trim());
+}
+
+function parseTableSeparator(line, expectedCols) {
+    const cells = parseTableRow(line);
+    if (cells.length === 0 || cells.length !== expectedCols)
+        return null;
+    const alignments = [];
+    for (const cell of cells) {
+        if (!/^:?-{1,}:?$/.test(cell))
+            return null;
+        if (cell.startsWith(':') && cell.endsWith(':'))
+            alignments.push('center');
+        else if (cell.endsWith(':'))
+            alignments.push('right');
+        else
+            alignments.push('left');
+    }
+    return alignments;
+}
+
 export function parseMarkdownBlocks(text) {
     const lines = String(text ?? '').split('\n');
     const blocks = [];
@@ -144,7 +188,8 @@ export function parseMarkdownBlocks(text) {
         }
     };
 
-    for (const line of lines) {
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
         const quoteMatch = /^\s*>\s?(.*)$/.exec(line);
         if (quoteMatch) {
             flushPara();
@@ -173,6 +218,32 @@ export function parseMarkdownBlocks(text) {
                 text: headingMatch[2],
             });
             continue;
+        }
+
+        if (i + 1 < lines.length && line.includes('|')) {
+            const headers = parseTableRow(line);
+            const alignments = headers.length > 0
+                ? parseTableSeparator(lines[i + 1], headers.length)
+                : null;
+            if (alignments) {
+                flushPara();
+                const rows = [];
+                let j = i + 2;
+                while (j < lines.length) {
+                    const rowLine = lines[j];
+                    if (!rowLine.trim() || !rowLine.includes('|'))
+                        break;
+                    if (/^\s*>/.test(rowLine) || /^(#{1,6})\s+/.test(rowLine))
+                        break;
+                    const parsed = parseTableRow(rowLine);
+                    const normalized = headers.map((_h, colIdx) => parsed[colIdx] ?? '');
+                    rows.push(normalized);
+                    j++;
+                }
+                blocks.push({type: 'table', headers, alignments, rows});
+                i = j - 1;
+                continue;
+            }
         }
 
         const listMatch = /^(\s*)([*+-]|\d+\.)\s+(.+)$/.exec(line);
@@ -209,6 +280,60 @@ function createFormattedLabel(text, styleClass = 'bytey-msg-text') {
     return label;
 }
 
+const TABLE_ALIGN_MAP = {
+    left: {actor: Clutter.ActorAlign.START, pango: Pango.Alignment.LEFT},
+    center: {actor: Clutter.ActorAlign.CENTER, pango: Pango.Alignment.CENTER},
+    right: {actor: Clutter.ActorAlign.END, pango: Pango.Alignment.RIGHT},
+};
+
+function renderMarkdownTable(block) {
+    const wrap = new St.BoxLayout({
+        style_class: 'bytey-md-table-wrap',
+        orientation: Clutter.Orientation.VERTICAL,
+        x_expand: true,
+    });
+
+    const buildRow = (cells, isHeader, altRow) => {
+        let rowClass = 'bytey-md-table-row';
+        if (isHeader)
+            rowClass += ' bytey-md-table-header';
+        else if (altRow)
+            rowClass += ' bytey-md-table-row-alt';
+
+        const rowBox = new St.BoxLayout({
+            style_class: rowClass,
+            x_expand: true,
+        });
+        rowBox.layout_manager.homogeneous = true;
+
+        for (let c = 0; c < block.headers.length; c++) {
+            const alignCfg = TABLE_ALIGN_MAP[block.alignments[c]] ?? TABLE_ALIGN_MAP.left;
+            const labelClass = isHeader
+                ? 'bytey-msg-text bytey-md-table-header-text'
+                : 'bytey-msg-text bytey-md-table-cell-text';
+            const label = createFormattedLabel(cells[c] ?? '', labelClass);
+            label.x_align = alignCfg.actor;
+            label.clutter_text.line_alignment = alignCfg.pango;
+
+            const cell = new St.Bin({
+                style_class: 'bytey-md-table-cell',
+                x_expand: true,
+                x_align: Clutter.ActorAlign.FILL,
+                y_align: Clutter.ActorAlign.FILL,
+                child: label,
+            });
+            rowBox.add_child(cell);
+        }
+        return rowBox;
+    };
+
+    wrap.add_child(buildRow(block.headers, true, false));
+    for (let r = 0; r < block.rows.length; r++)
+        wrap.add_child(buildRow(block.rows[r], false, r % 2 === 1));
+
+    return wrap;
+}
+
 export function renderMarkdownBlocks(container, text) {
     const blocks = parseMarkdownBlocks(text);
     for (const block of blocks) {
@@ -224,6 +349,8 @@ export function renderMarkdownBlocks(container, text) {
                 style_class: 'bytey-md-hr',
                 x_expand: true,
             }));
+        } else if (block.type === 'table') {
+            container.add_child(renderMarkdownTable(block));
         } else if (block.type === 'blockquote') {
             const quoteBox = new St.BoxLayout({
                 style_class: 'bytey-md-blockquote',
