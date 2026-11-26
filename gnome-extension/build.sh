@@ -101,6 +101,7 @@ files = [
     "icons/bytey-ai-companion.svg",
     "icons/bytey-double-check-symbolic.svg",
     "icons/bytey-god-mode-symbolic.svg",
+    "islandBorderPainter.js",
     "islandWidget.js",
     "markdownRenderer.js",
     "metadata.json",

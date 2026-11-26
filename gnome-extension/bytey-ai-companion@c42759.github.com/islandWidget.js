@@ -9,14 +9,13 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {parseHexColor} from './colorUtils.js';
 import {EyeRenderer} from './eyeRenderer.js';
+import {paintIslandBorder, paintNotchBackground} from './islandBorderPainter.js';
 import {connectTracked} from './sharedUtils.js';
 
 const DRAG_THRESHOLD_PX = 5;
 const EXPANDED_STATES = new Set(['LISTENING', 'THINKING', 'TOOL_CALLING', 'SPEAKING']);
 const DEFAULT_BG_RGBA = [10 / 255, 10 / 255, 12 / 255, 1.0];
 const DEFAULT_BORDER_RGBA = [42 / 255, 44 / 255, 52 / 255, 1.0];
-const NOTCH_TOP_FLARE_PX = 12;
-const NOTCH_BOTTOM_RADIUS_PX = 16;
 
 /**
  * Format `[r, g, b, a]` (`0..1`) as CSS `rgba(R, G, B, A)`.
@@ -30,205 +29,6 @@ function _rgbaCss(rgba) {
     const b = Math.round(Math.max(0, Math.min(1, rgba[2] ?? 0)) * 255);
     const a = Math.max(0, Math.min(1, rgba[3] ?? 1));
     return `rgba(${r}, ${g}, ${b}, ${Number(a.toFixed(3))})`;
-}
-
-/**
- * Convert HSL (`h, s, l` in `0..1`) to `[r, g, b]` (`0..1`).
- *
- * @param {number} h
- * @param {number} s
- * @param {number} l
- * @returns {number[]}
- */
-function _hslToRgb(h, s, l) {
-    const hn = ((h % 1) + 1) % 1;
-    if (s === 0)
-        return [l, l, l];
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    const hue2rgb = t => {
-        let tn = t;
-        if (tn < 0)
-            tn += 1;
-        if (tn > 1)
-            tn -= 1;
-        if (tn < 1 / 6)
-            return p + (q - p) * 6 * tn;
-        if (tn < 1 / 2)
-            return q;
-        if (tn < 2 / 3)
-            return p + (q - p) * (2 / 3 - tn) * 6;
-        return p;
-    };
-    return [hue2rgb(hn + 1 / 3), hue2rgb(hn), hue2rgb(hn - 1 / 3)];
-}
-
-/**
- * Sample `[px, py]` at arc-length `s` along a closed rounded-pill perimeter.
- *
- * @param {number} s
- * @param {number} x0
- * @param {number} y0
- * @param {number} w
- * @param {number} h
- * @param {number} r
- * @returns {number[]}
- */
-function _capsulePoint(s, x0, y0, w, h, r) {
-    const rc = Math.min(Math.max(0, r), w / 2, h / 2);
-    const horiz = Math.max(0, w - 2 * rc);
-    const vert = Math.max(0, h - 2 * rc);
-    const arcLen = 0.5 * Math.PI * rc;
-    const L = 2 * horiz + 2 * vert + 4 * arcLen;
-    if (L <= 0)
-        return [x0, y0];
-
-    let d = ((s % L) + L) % L;
-
-    // 1. Top straight
-    if (d < horiz)
-        return [x0 + rc + d, y0];
-    d -= horiz;
-
-    // 2. Top-right arc
-    if (d < arcLen) {
-        const angle = -Math.PI / 2 + (rc > 0 ? d / rc : 0);
-        return [x0 + w - rc + rc * Math.cos(angle), y0 + rc + rc * Math.sin(angle)];
-    }
-    d -= arcLen;
-
-    // 3. Right straight
-    if (d < vert)
-        return [x0 + w, y0 + rc + d];
-    d -= vert;
-
-    // 4. Bottom-right arc
-    if (d < arcLen) {
-        const angle = rc > 0 ? d / rc : 0;
-        return [x0 + w - rc + rc * Math.cos(angle), y0 + h - rc + rc * Math.sin(angle)];
-    }
-    d -= arcLen;
-
-    // 5. Bottom straight
-    if (d < horiz)
-        return [x0 + w - rc - d, y0 + h];
-    d -= horiz;
-
-    // 6. Bottom-left arc
-    if (d < arcLen) {
-        const angle = Math.PI / 2 + (rc > 0 ? d / rc : 0);
-        return [x0 + rc + rc * Math.cos(angle), y0 + h - rc + rc * Math.sin(angle)];
-    }
-    d -= arcLen;
-
-    // 7. Left straight
-    if (d < vert)
-        return [x0, y0 + h - rc - d];
-    d -= vert;
-
-    // 8. Top-left arc
-    const angle = Math.PI + (rc > 0 ? d / rc : 0);
-    return [x0 + rc + rc * Math.cos(angle), y0 + rc + rc * Math.sin(angle)];
-}
-
-/**
- * Compute MacBook-notch top flare and bottom corner radii for a given box size.
- *
- * @param {number} width
- * @param {number} height
- * @returns {{ flare: number, botR: number, bodyWidth: number }}
- */
-function _computeNotchGeometry(width, height) {
-    const w = Math.max(1, width);
-    const h = Math.max(1, height);
-    const flare = Math.max(4, Math.min(NOTCH_TOP_FLARE_PX, Math.floor(h * 0.38), Math.floor(w * 0.14)));
-    const bodyWidth = Math.max(4, w - 2 * flare);
-    const botR = Math.max(4, Math.min(NOTCH_BOTTOM_RADIUS_PX, Math.floor(h - flare), Math.floor(bodyWidth / 2)));
-    return {flare, botR, bodyWidth};
-}
-
-/**
- * Compute arc-length and segment metrics for the inset open U-contour of a notch.
- *
- * @param {number} width
- * @param {number} height
- * @param {number} inset
- * @returns {object}
- */
-function _notchBorderMetrics(width, height, inset) {
-    const {flare, botR} = _computeNotchGeometry(width, height);
-    const d = Math.max(0, inset);
-    const fOut = flare + d;
-    const rIn = Math.max(1, botR - d);
-    const thetaTop = Math.asin(Math.min(1, flare / fOut));
-    const topArcLen = fOut * thetaTop;
-    const vert = Math.max(0, height - flare - botR);
-    const botArcLen = 0.5 * Math.PI * rIn;
-    const horiz = Math.max(0, width - 2 * flare - 2 * botR);
-    const totalLength = 2 * topArcLen + 2 * vert + 2 * botArcLen + horiz;
-    return {flare, botR, d, fOut, rIn, thetaTop, topArcLen, vert, botArcLen, horiz, totalLength};
-}
-
-/**
- * Sample `[px, py]` at arc-length `s` along the open 7-segment notch U-contour.
- *
- * @param {number} s
- * @param {number} width
- * @param {number} height
- * @param {number} inset
- * @returns {number[]}
- */
-function _notchBorderPoint(s, width, height, inset) {
-    const {
-        flare,
-        botR,
-        d,
-        fOut,
-        rIn,
-        thetaTop,
-        topArcLen,
-        vert,
-        botArcLen,
-        horiz,
-        totalLength,
-    } = _notchBorderMetrics(width, height, inset);
-    if (totalLength <= 0)
-        return [width / 2, height / 2];
-
-    let u = Math.max(0, Math.min(totalLength, s));
-
-    if (u <= topArcLen) {
-        const angle = -thetaTop + (fOut > 0 ? u / fOut : 0);
-        return [fOut * Math.cos(angle), flare + fOut * Math.sin(angle)];
-    }
-    u -= topArcLen;
-
-    if (u <= vert)
-        return [flare + d, flare + u];
-    u -= vert;
-
-    if (u <= botArcLen) {
-        const angle = Math.PI - (rIn > 0 ? u / rIn : 0);
-        return [flare + botR + rIn * Math.cos(angle), height - botR + rIn * Math.sin(angle)];
-    }
-    u -= botArcLen;
-
-    if (u <= horiz)
-        return [flare + botR + u, height - d];
-    u -= horiz;
-
-    if (u <= botArcLen) {
-        const angle = Math.PI / 2 - (rIn > 0 ? u / rIn : 0);
-        return [width - flare - botR + rIn * Math.cos(angle), height - botR + rIn * Math.sin(angle)];
-    }
-    u -= botArcLen;
-
-    if (u <= vert)
-        return [width - flare - d, height - botR - u];
-    u -= vert;
-
-    const angle = Math.PI + (fOut > 0 ? Math.min(topArcLen, u) / fOut : 0);
-    return [width + fOut * Math.cos(angle), flare + fOut * Math.sin(angle)];
 }
 
 /**
@@ -681,60 +481,6 @@ export class IslandWidget {
         }
     }
 
-    _rainbowSegmentRgb(t, sat, light, palette = 'full') {
-        const phasePos = (t - this._rainbowPhase + 1) % 1.0;
-        if (palette === 'yellow') {
-            const blend = 0.5 - 0.5 * Math.cos(2 * Math.PI * phasePos);
-            // Interpolate between yellow (#FACC15) and light yellow (#FEF08A)
-            const r = (250 + (254 - 250) * blend) / 255;
-            const g = (204 + (240 - 204) * blend) / 255;
-            const b = (21 + (138 - 21) * blend) / 255;
-            return [r, g, b];
-        }
-        if (palette === 'green') {
-            const blend = 0.5 - 0.5 * Math.cos(2 * Math.PI * phasePos);
-            // Interpolate between green (#22C55E) and light green (#86EFAC)
-            const r = (34 + (134 - 34) * blend) / 255;
-            const g = (197 + (239 - 197) * blend) / 255;
-            const b = (94 + (172 - 94) * blend) / 255;
-            return [r, g, b];
-        }
-        return _hslToRgb(phasePos, sat, light);
-    }
-
-    _strokeRainbowCapsule(cr, width, height, inset, lineWidth, sat, light, alpha, palette = 'full') {
-        const w = width - 2 * inset;
-        const h = height - 2 * inset;
-        if (w <= 0 || h <= 0)
-            return;
-
-        const r = Math.max(2, Math.min(w, h) / 2);
-        const rc = Math.min(r, w / 2, h / 2);
-        const horiz = Math.max(0, w - 2 * rc);
-        const vert = Math.max(0, h - 2 * rc);
-        const L = 2 * horiz + 2 * vert + 2 * Math.PI * rc;
-        if (L <= 0)
-            return;
-
-        const N = 96;
-        cr.save();
-        cr.setLineCap(Cairo.LineCap.ROUND);
-        cr.setLineWidth(lineWidth);
-        for (let i = 0; i < N; i++) {
-            const s0 = (i / N) * L;
-            const s1 = ((i + 1.18) / N) * L;
-            const [x1, y1] = _capsulePoint(s0, inset, inset, w, h, rc);
-            const [x2, y2] = _capsulePoint(s1, inset, inset, w, h, rc);
-            const [crR, crG, crB] = this._rainbowSegmentRgb(i / N, sat, light, palette);
-            cr.setSourceRGBA(crR, crG, crB, alpha);
-            cr.newSubPath();
-            cr.moveTo(x1, y1);
-            cr.lineTo(x2, y2);
-            cr.stroke();
-        }
-        cr.restore();
-    }
-
     _onBgRepaint(area) {
         const [width, height] = area.get_surface_size();
         if (width <= 2 || height <= 2)
@@ -748,82 +494,9 @@ export class IslandWidget {
                 return;
 
             cr.setOperator(Cairo.Operator.OVER);
-            const {flare, botR} = _computeNotchGeometry(width, height);
-            const [r, g, b, a] = this._bgColor;
-
-            cr.save();
-            cr.newSubPath();
-            cr.moveTo(0, 0);
-            cr.lineTo(width, 0);
-            cr.arcNegative(width, flare, flare, -Math.PI / 2, -Math.PI);
-            cr.lineTo(width - flare, height - botR);
-            cr.arc(width - flare - botR, height - botR, botR, 0, Math.PI / 2);
-            cr.lineTo(flare + botR, height);
-            cr.arc(flare + botR, height - botR, botR, Math.PI / 2, Math.PI);
-            cr.lineTo(flare, flare);
-            cr.arcNegative(0, flare, flare, 0, -Math.PI / 2);
-            cr.closePath();
-            cr.setSourceRGBA(r, g, b, a);
-            cr.fill();
-            cr.restore();
+            paintNotchBackground(cr, width, height, this._bgColor);
         } finally {
             cr.$dispose();
-        }
-    }
-
-    _strokeStaticNotch(cr, width, height, border) {
-        const {flare, botR, d, fOut, rIn, thetaTop, totalLength} = _notchBorderMetrics(width, height, 0.75);
-        if (totalLength <= 0)
-            return;
-
-        cr.save();
-        cr.setSourceRGBA(border[0], border[1], border[2], border[3]);
-        cr.setLineWidth(1.5);
-        cr.setLineCap(Cairo.LineCap.BUTT);
-        cr.setLineJoin(Cairo.LineJoin.ROUND);
-        cr.newSubPath();
-        cr.arc(0, flare, fOut, -thetaTop, 0);
-        cr.lineTo(flare + d, height - botR);
-        cr.arcNegative(flare + botR, height - botR, rIn, Math.PI, Math.PI / 2);
-        cr.lineTo(width - flare - botR, height - d);
-        cr.arcNegative(width - flare - botR, height - botR, rIn, Math.PI / 2, 0);
-        cr.lineTo(width - flare - d, flare);
-        cr.arc(width, flare, fOut, Math.PI, Math.PI + thetaTop);
-        cr.stroke();
-        cr.restore();
-    }
-
-    _strokeRainbowNotch(cr, width, height, inset, lineWidth, sat, light, alpha, palette = 'full') {
-        const {totalLength} = _notchBorderMetrics(width, height, inset);
-        if (totalLength <= 0)
-            return;
-
-        const N = 72;
-        cr.save();
-        cr.setLineCap(Cairo.LineCap.ROUND);
-        cr.setLineWidth(lineWidth);
-        for (let i = 0; i < N; i++) {
-            const s0 = (i / N) * totalLength;
-            const s1 = Math.min(totalLength, ((i + 1.18) / N) * totalLength);
-            const [x1, y1] = _notchBorderPoint(s0, width, height, inset);
-            const [x2, y2] = _notchBorderPoint(s1, width, height, inset);
-            const [crR, crG, crB] = this._rainbowSegmentRgb(i / N, sat, light, palette);
-            cr.setSourceRGBA(crR, crG, crB, alpha);
-            cr.newSubPath();
-            cr.moveTo(x1, y1);
-            cr.lineTo(x2, y2);
-            cr.stroke();
-        }
-        cr.restore();
-    }
-
-    _strokeActivityBorder(cr, width, height, isNotch, palette) {
-        if (isNotch) {
-            this._strokeRainbowNotch(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, palette);
-            this._strokeRainbowNotch(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, palette);
-        } else {
-            this._strokeRainbowCapsule(cr, width, height, 2.0, 4.0, 0.92, 0.60, 0.24, palette);
-            this._strokeRainbowCapsule(cr, width, height, 1.4, 2.2, 0.94, 0.64, 0.96, palette);
         }
     }
 
@@ -837,86 +510,16 @@ export class IslandWidget {
             cr.setOperator(Cairo.Operator.CLEAR);
             cr.paint();
             cr.setOperator(Cairo.Operator.OVER);
-
-            const mode = this._visualsConfig.animation_mode ?? 'full';
-            const isNotch = this._isNotchMode();
-            let activityPalette = null;
-            if (this._state === 'THINKING' && mode !== 'disabled')
-                activityPalette = 'full';
-            else if (this._state === 'TOOL_CALLING' && mode !== 'disabled')
-                activityPalette = 'green';
-            else if (this._godMode && this._state !== 'ERROR' && mode !== 'disabled')
-                activityPalette = 'yellow';
-
-            if (activityPalette) {
-                this._strokeActivityBorder(cr, width, height, isNotch, activityPalette);
-                return;
-            }
-
-            let border;
-            switch (this._state) {
-            case 'LISTENING':
-                border = [56 / 255, 189 / 255, 248 / 255, 0.78];
-                break;
-            case 'TOOL_CALLING':
-                border = [251 / 255, 191 / 255, 36 / 255, 0.78];
-                break;
-            case 'SPEAKING':
-                border = [96 / 255, 165 / 255, 250 / 255, 0.78];
-                break;
-            case 'ERROR':
-                border = [1.0, 90 / 255, 95 / 255, 0.92];
-                break;
-            case 'MUTED':
-                border = [
-                    this._borderColor[0],
-                    this._borderColor[1],
-                    this._borderColor[2],
-                    this._borderColor[3] * 0.55,
-                ];
-                break;
-            case 'IDLE':
-            default: {
-                const [r, g, b, a] = this._borderColor;
-                if (this._dragging) {
-                    border = [
-                        Math.min(1, r + 0.22),
-                        Math.min(1, g + 0.22),
-                        Math.min(1, b + 0.22),
-                        Math.min(1, a + 0.24),
-                    ];
-                } else if (this._hovered) {
-                    border = [r, g, b, Math.min(1, a + 0.14)];
-                } else {
-                    border = this._borderColor;
-                }
-                break;
-            }
-            }
-
-            if (isNotch) {
-                this._strokeStaticNotch(cr, width, height, border);
-                return;
-            }
-
-            const inset = 1.0;
-            const w = width - 2 * inset;
-            const h = height - 2 * inset;
-            if (w <= 2 || h <= 2)
-                return;
-            const r = Math.min(w / 2, h / 2);
-
-            cr.save();
-            cr.setSourceRGBA(border[0], border[1], border[2], border[3]);
-            cr.setLineWidth(1.5);
-            cr.newSubPath();
-            cr.arc(inset + w - r, inset + r, r, -Math.PI / 2, 0);
-            cr.arc(inset + w - r, inset + h - r, r, 0, Math.PI / 2);
-            cr.arc(inset + r, inset + h - r, r, Math.PI / 2, Math.PI);
-            cr.arc(inset + r, inset + r, r, Math.PI, (3 * Math.PI) / 2);
-            cr.closePath();
-            cr.stroke();
-            cr.restore();
+            paintIslandBorder(cr, width, height, {
+                isNotch: this._isNotchMode(),
+                state: this._state,
+                mode: this._visualsConfig.animation_mode ?? 'full',
+                godMode: this._godMode,
+                rainbowPhase: this._rainbowPhase,
+                borderColor: this._borderColor,
+                dragging: this._dragging,
+                hovered: this._hovered,
+            });
         } finally {
             cr.$dispose();
         }
