@@ -153,6 +153,97 @@ class GeneralConfig(BaseModel):
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
 
+PROVIDER_DEFAULT_URLS: dict[str, str] = {
+    "ollama": "http://localhost:11434",
+    "gemini": "",
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+    "custom": "http://localhost:8000/v1",
+}
+
+_PROVIDER_PROFILE_FIELDS: tuple[str, ...] = (
+    "model",
+    "base_url",
+    "supports_tools_override",
+    "temperature",
+    "context_size",
+    "focus_window",
+    "max_tool_rounds",
+)
+
+
+def _normalize_focus_window_value(value: Any) -> int:
+    """Normalize focus_window to >= 0 (0 = full history), defaulting to 0 on blank/None."""
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return 0
+        value = int(cleaned)
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    raise ValueError(f"Invalid focus_window: {value!r}")
+
+
+def _normalize_max_tool_rounds_value(value: Any) -> int:
+    """Clamp max_tool_rounds to [1, 100], defaulting to 25 on blank/None."""
+    if value is None or isinstance(value, bool):
+        return 25
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return 25
+        value = int(cleaned)
+    if isinstance(value, (int, float)):
+        return max(1, min(100, int(value)))
+    raise ValueError(f"Invalid max_tool_rounds: {value!r}")
+
+
+def _normalize_context_size_value(value: Any) -> int | None:
+    """Normalize context_size, treating auto/empty/non-positive values as None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if not cleaned or cleaned in ("auto", "default", "none", "0"):
+            return None
+        value = int(cleaned)
+    if isinstance(value, (int, float)):
+        iv = int(value)
+        return iv if iv > 0 else None
+    raise ValueError(f"Invalid context_size: {value!r}")
+
+
+class ProviderProfile(BaseModel):
+    """Saved per-provider LLM settings restored when switching back to a provider."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    model: str = ""
+    base_url: str = ""
+    supports_tools_override: bool | None = None
+    temperature: float = 0.7
+    context_size: int | None = None
+    focus_window: int = 0
+    max_tool_rounds: int = 25
+
+    @field_validator("focus_window", mode="before")
+    @classmethod
+    def _validate_focus_window(cls, value: Any) -> int:
+        return _normalize_focus_window_value(value)
+
+    @field_validator("max_tool_rounds", mode="before")
+    @classmethod
+    def _validate_max_tool_rounds(cls, value: Any) -> int:
+        return _normalize_max_tool_rounds_value(value)
+
+    @field_validator("context_size", mode="before")
+    @classmethod
+    def _validate_context_size(cls, value: Any) -> int | None:
+        return _normalize_context_size_value(value)
+
+
 class ProviderConfig(BaseModel):
     """LLM provider selection and generation parameters."""
 
@@ -166,52 +257,28 @@ class ProviderConfig(BaseModel):
     context_size: int | None = None
     focus_window: int = 0
     max_tool_rounds: int = 25
+    profiles: dict[str, ProviderProfile] = Field(default_factory=dict)
+
+    @field_validator("active_provider", mode="before")
+    @classmethod
+    def _validate_active_provider(cls, value: Any) -> str:
+        cleaned = str(value or "").strip().lower()
+        return cleaned or "ollama"
 
     @field_validator("focus_window", mode="before")
     @classmethod
     def _validate_focus_window(cls, value: Any) -> int:
-        """Normalize focus_window to >= 0 (0 = full history), defaulting to 0 on blank/None."""
-        if value is None or isinstance(value, bool):
-            return 0
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                return 0
-            value = int(cleaned)
-        if isinstance(value, (int, float)):
-            return max(0, int(value))
-        raise ValueError(f"Invalid focus_window: {value!r}")
+        return _normalize_focus_window_value(value)
 
     @field_validator("max_tool_rounds", mode="before")
     @classmethod
     def _validate_max_tool_rounds(cls, value: Any) -> int:
-        """Clamp max_tool_rounds to [1, 100], defaulting to 25 on blank/None."""
-        if value is None or isinstance(value, bool):
-            return 25
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                return 25
-            value = int(cleaned)
-        if isinstance(value, (int, float)):
-            return max(1, min(100, int(value)))
-        raise ValueError(f"Invalid max_tool_rounds: {value!r}")
+        return _normalize_max_tool_rounds_value(value)
 
     @field_validator("context_size", mode="before")
     @classmethod
     def _validate_context_size(cls, value: Any) -> int | None:
-        """Normalize context_size, treating auto/empty/non-positive values as None."""
-        if value is None or isinstance(value, bool):
-            return None
-        if isinstance(value, str):
-            cleaned = value.strip().lower()
-            if not cleaned or cleaned in ("auto", "default", "none", "0"):
-                return None
-            value = int(cleaned)
-        if isinstance(value, (int, float)):
-            iv = int(value)
-            return iv if iv > 0 else None
-        raise ValueError(f"Invalid context_size: {value!r}")
+        return _normalize_context_size_value(value)
 
 
 class VoiceInConfig(BaseModel):
@@ -788,6 +855,21 @@ class ConfigManager:
             raise ValueError("Configuration patch must be a dictionary")
 
         current_data = self._config.model_dump(mode="json")
+        prev_provider = (
+            str(current_data.get("provider", {}).get("active_provider") or "ollama").strip().lower()
+            or "ollama"
+        )
+        provider_patch = patch.get("provider")
+        if isinstance(provider_patch, dict):
+            prov_section = current_data.setdefault("provider", {})
+            profiles = prov_section.get("profiles")
+            if not isinstance(profiles, dict):
+                profiles = {}
+                prov_section["profiles"] = profiles
+            profiles[prev_provider] = {
+                field: prov_section.get(field) for field in _PROVIDER_PROFILE_FIELDS
+            }
+
         for section in _MERGE_SECTIONS:
             if section in patch:
                 section_patch = patch[section]
@@ -796,6 +878,32 @@ class ConfigManager:
                 current_data[section] = _deep_merge_dicts(
                     current_data.get(section, {}), section_patch
                 )
+
+        if isinstance(provider_patch, dict):
+            prov_section = current_data["provider"]
+            new_provider = (
+                str(prov_section.get("active_provider") or prev_provider).strip().lower() or "ollama"
+            )
+            prov_section["active_provider"] = new_provider
+            profiles = prov_section.setdefault("profiles", {})
+            if new_provider != prev_provider:
+                saved = profiles.get(new_provider)
+                defaults = {
+                    "model": "",
+                    "base_url": PROVIDER_DEFAULT_URLS.get(new_provider, ""),
+                    "supports_tools_override": None,
+                    "temperature": 0.7,
+                    "context_size": None,
+                    "focus_window": 0,
+                    "max_tool_rounds": 25,
+                }
+                source = saved if isinstance(saved, dict) else defaults
+                for field in _PROVIDER_PROFILE_FIELDS:
+                    if field not in provider_patch:
+                        prov_section[field] = source.get(field, defaults[field])
+            profiles[new_provider] = {
+                field: prov_section.get(field) for field in _PROVIDER_PROFILE_FIELDS
+            }
 
         if "mcp_servers" in patch:
             servers_patch = patch["mcp_servers"]
