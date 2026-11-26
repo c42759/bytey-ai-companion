@@ -836,7 +836,10 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._build_import_export_page()
 
         self.connect("close-request", self._on_close_request)
+        self._ws_stop_event = threading.Event()
+        self._ws_conn: Any = None
         self.reload_all()
+        self._start_ws_listener()
 
     def add(self, page: Adw.PreferencesPage) -> None:
         """Expand the page's internal Adw.Clamp before adding it to the window."""
@@ -844,11 +847,76 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         super().add(page)
 
     def _on_close_request(self, *_: object) -> bool:
+        self._stop_ws_listener()
         for source_id in list(self._debounce_timers.values()):
             GLib.source_remove(source_id)
         self._debounce_timers.clear()
         self._flush_pending_entry_fields()
         return False
+
+    def _start_ws_listener(self) -> None:
+        try:
+            from websockets.sync.client import connect as ws_connect
+        except ImportError:
+            return
+
+        def worker() -> None:
+            ws_url = self.client.base_url.replace("http://", "ws://").replace("https://", "wss://")
+            ws_url = f"{ws_url.rstrip('/')}/ws"
+            while not self._ws_stop_event.is_set():
+                try:
+                    with ws_connect(ws_url, open_timeout=5, close_timeout=2) as conn:
+                        self._ws_conn = conn
+                        while not self._ws_stop_event.is_set():
+                            raw = conn.recv(timeout=1.0)
+                            if not isinstance(raw, str):
+                                continue
+                            try:
+                                event = json.loads(raw)
+                            except ValueError:
+                                continue
+                            if (
+                                isinstance(event, dict)
+                                and event.get("type") == "config_updated"
+                                and isinstance(event.get("config"), dict)
+                            ):
+                                GLib.idle_add(self._on_remote_config_updated, event["config"])
+                except TimeoutError:
+                    continue
+                except Exception:
+                    self._ws_conn = None
+                    if self._ws_stop_event.wait(3.0):
+                        break
+                finally:
+                    self._ws_conn = None
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stop_ws_listener(self) -> None:
+        self._ws_stop_event.set()
+        conn = self._ws_conn
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _on_remote_config_updated(self, cfg: dict[str, Any]) -> bool:
+        if self._ws_stop_event.is_set():
+            return GLib.SOURCE_REMOVE
+        secrets_meta = cfg.get("secrets_configured")
+        if isinstance(secrets_meta, dict):
+            self._secrets_configured = {str(k): bool(v) for k, v in secrets_meta.items()}
+        prov_data = cfg.get("provider") if isinstance(cfg.get("provider"), dict) else {}
+        llm_data = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+        provider = str(prov_data.get("active_provider") or llm_data.get("provider") or "ollama")
+        self._loading = True
+        try:
+            _set_combo_text(self.provider_row, provider)
+        finally:
+            self._loading = False
+        self._apply_restored_provider_payload(cfg, provider)
+        return GLib.SOURCE_REMOVE
 
     def _flush_pending_entry_fields(self) -> None:
         if self._loading:

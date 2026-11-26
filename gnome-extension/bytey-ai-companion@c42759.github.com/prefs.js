@@ -24,7 +24,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         window.set_search_enabled(true);
 
         const settings = this.getSettings();
-        const {cancellable, resolveBaseUrl, httpJson, abortAll} = createPrefsHttpClient(settings);
+        const {cancellable, resolveBaseUrl, httpJson, connectConfigSocket, abortAll} = createPrefsHttpClient(settings);
         let loading = false;
         let secretsConfigured = {};
 
@@ -230,5 +230,14 @@ export default class ByteyPreferences extends ExtensionPreferences {
         voice.syncInitialVisibility();
         ai.syncInitialVisibility();
         loadConfig();
+        connectConfigSocket(cfg => {
+            if (cancellable.is_cancelled())
+                return;
+            const nextSecrets = cfg.secrets_configured && typeof cfg.secrets_configured === 'object'
+                ? {...cfg.secrets_configured}
+                : secretsConfigured;
+            secretsConfigured = nextSecrets;
+            ai.syncFromRemoteConfig(cfg, secretsConfigured);
+        });
     }
 }

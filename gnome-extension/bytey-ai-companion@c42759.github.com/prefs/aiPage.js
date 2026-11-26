@@ -494,5 +494,30 @@ export function buildAiPage(ctx) {
         refreshContextSizeRow();
     };
 
-    return {page, applyConfig, syncVisibility, syncInitialVisibility, onPatchLlmMetadata};
+    const syncFromRemoteConfig = (cfg, nextSecretsConfigured) => {
+        const prevProvider = comboText(providerRow);
+        const prevUrl = baseUrlRow.get_text().trim();
+        secretsConfigured = nextSecretsConfigured;
+        ctx.withLoading(() => {
+            applyProviderFields(cfg);
+            syncProviderVisibility();
+            if (currentConfiguredModel) {
+                const idx = availableModels.findIndex(m => m.id === currentConfiguredModel);
+                if (idx >= 0)
+                    modelRow.set_selected(idx);
+            }
+        });
+        updateToolsSensitivity();
+        refreshContextSizeRow();
+        const nextProvider = comboText(providerRow);
+        const nextUrl = baseUrlRow.get_text().trim();
+        if (nextProvider !== prevProvider || nextUrl !== prevUrl) {
+            fetchModels(nextProvider, nextUrl, {
+                autoSelectIfMissing: false,
+                showResultToast: false,
+            }).catch(() => {});
+        }
+    };
+
+    return {page, applyConfig, syncVisibility, syncInitialVisibility, syncFromRemoteConfig, onPatchLlmMetadata};
 }
