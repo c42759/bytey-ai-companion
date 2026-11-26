@@ -997,6 +997,18 @@ export default class ByteyPreferences extends ExtensionPreferences {
             subtitle: 'Context window tokens (Auto uses provider default)',
             model: Gtk.StringList.new(contextPresetOptions.map(o => o.label)),
         });
+        const focusWindowRow = new Adw.SpinRow({
+            title: 'Focus Window',
+            subtitle: 'Latest history messages sent to LLM + user message (0 = full history)',
+            adjustment: new Gtk.Adjustment({
+                lower: 0,
+                upper: 500,
+                step_increment: 1,
+                page_increment: 5,
+                value: 0,
+            }),
+            digits: 0,
+        });
         const maxToolRoundsRow = new Adw.SpinRow({
             title: 'Max Tool Loops',
             subtitle: 'Max tool-call rounds per request before wrapping up (1-100)',
@@ -1014,6 +1026,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         aiGroup.add(aiApiKeyRow);
         aiGroup.add(modelRow);
         aiGroup.add(contextSizeRow);
+        aiGroup.add(focusWindowRow);
         aiGroup.add(maxToolRoundsRow);
 
         const toolsStatusRow = new Adw.ActionRow({
@@ -2568,6 +2581,12 @@ export default class ByteyPreferences extends ExtensionPreferences {
                 ));
                 currentContextSize = normalizePositiveInt(provider.context_size ?? llm.context_size);
                 detectedMaxContext = normalizePositiveInt(llm.max_context_size);
+                const rawFocusWindow = Number(provider.focus_window ?? llm.focus_window ?? 0);
+                focusWindowRow.set_value(
+                    Number.isFinite(rawFocusWindow)
+                        ? Math.max(0, Math.min(500, Math.round(rawFocusWindow)))
+                        : 0
+                );
                 const rawMaxRounds = Number(provider.max_tool_rounds ?? llm.max_tool_rounds ?? 25);
                 maxToolRoundsRow.set_value(
                     Number.isFinite(rawMaxRounds)
@@ -3476,6 +3495,14 @@ export default class ByteyPreferences extends ExtensionPreferences {
             patchConfig(
                 {provider: {context_size: currentContextSize}},
                 currentContextSize ? `Saved context size: ${opt.label}` : 'Context size set to Auto'
+            );
+        }));
+
+        focusWindowRow.connect('notify::value', () => onUserChange(() => {
+            const windowSize = Math.max(0, Math.min(500, Math.round(focusWindowRow.get_value())));
+            patchConfig(
+                {provider: {focus_window: windowSize}},
+                windowSize === 0 ? 'Focus window set to full history' : `Saved focus window: ${windowSize}`
             );
         }));
 

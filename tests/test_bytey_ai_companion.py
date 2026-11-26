@@ -1164,6 +1164,56 @@ class TestChunkerAndEmotions(unittest.TestCase):
                 self.assertEqual(titles, ["Async Tips"])
                 self.assertEqual(out, "Use gather.")
 
+    def test_emotion_stream_parser_mid_stream_aliases_and_brackets(self) -> None:
+        # Mid-stream emotion tag after prose (chunked & char-by-char)
+        for mode in ("chunked", "char"):
+            with self.subTest(mode=mode):
+                seen: list[str] = []
+                parser = EmotionStreamParser(on_emotion=seen.append)
+                chunks = (
+                    ["Let me check that. ", "[em", "otion:", "foc", "us] ", "Here are the specs."]
+                    if mode == "chunked"
+                    else list("Let me check that. [emotion:focus] Here are the specs.")
+                )
+                out = "".join(parser.feed(c) for c in chunks) + parser.flush()
+                self.assertEqual(parser.emotion, "focus")
+                self.assertEqual(seen, ["focus"])
+                self.assertEqual(out, "Let me check that. Here are the specs.")
+
+        # Alias tag [emotion:sorry] maps to neutral and is stripped
+        alias_seen: list[str] = []
+        alias_parser = EmotionStreamParser(on_emotion=alias_seen.append)
+        alias_out = (
+            "".join(alias_parser.feed(c) for c in ["[emotion:sorry]\n", "I am so sorry."])
+            + alias_parser.flush()
+        )
+        self.assertEqual(alias_parser.emotion, "neutral")
+        self.assertEqual(alias_seen, ["neutral"])
+        self.assertEqual(alias_out, "I am so sorry.")
+
+        # Unknown tag is still stripped without leaking raw [emotion:...]
+        unk_seen: list[str] = []
+        unk_parser = EmotionStreamParser(on_emotion=unk_seen.append)
+        unk_out = "".join(unk_parser.feed(c) for c in ["Hi [emotion:xyzzy] there!"]) + unk_parser.flush()
+        self.assertIsNone(unk_parser.emotion)
+        self.assertEqual(unk_seen, [])
+        self.assertEqual(unk_out, "Hi there!")
+
+        # Non-tag brackets remain untouched
+        bracket_parser = EmotionStreamParser()
+        bracket_out = (
+            "".join(bracket_parser.feed(c) for c in ["  [not a tag] and [link](url)."])
+            + bracket_parser.flush()
+        )
+        self.assertIsNone(bracket_parser.emotion)
+        self.assertEqual(bracket_out, "  [not a tag] and [link](url).")
+
+        # parse_reply_tags handles inline tags and aliases
+        em, ti, clean = parse_reply_tags("Checked! [emotion:sorry] My bad. [title: Laptop Specs]")
+        self.assertEqual(em, "neutral")
+        self.assertEqual(ti, "Laptop Specs")
+        self.assertEqual(clean, "Checked! My bad.")
+
 
 class TestSchemaSyncAndMCP(unittest.IsolatedAsyncioTestCase):
     """Test schema_sync round-trips and MCPClientManager against a real stdio server."""
@@ -6736,6 +6786,7 @@ class TestInterleavedMessageParts(unittest.IsolatedAsyncioTestCase):
                 await orig_broadcast(payload)
 
             daemon.ipc.connection_manager.broadcast = _capture_broadcast  # type: ignore[method-assign]
+            daemon.ipc.port = 0
             await daemon.start()
             try:
                 sess = await daemon.storage.get_or_create_active_session()
@@ -6878,6 +6929,208 @@ class TestModelDiscoverySorting(unittest.IsolatedAsyncioTestCase):
             ids,
             ["deepseek-r1:8b", "gemma2:9b", "Llama3.2:3b", "qwen2.5:7b"],
         )
+
+
+class TestTokenUsageTracking(unittest.IsolatedAsyncioTestCase):
+    async def test_usage_normalization_and_storage_roundtrip(self) -> None:
+        from bytey_ai_companion.llm.router import (
+            _extract_anthropic_usage,
+            _extract_openai_usage,
+            _normalize_usage,
+        )
+        from bytey_ai_companion.storage import StorageManager
+
+        self.assertEqual(
+            _normalize_usage(100, 50),
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        )
+        self.assertEqual(
+            _extract_openai_usage({"prompt_tokens": 200, "completion_tokens": 40, "total_tokens": 240}),
+            {"prompt_tokens": 200, "completion_tokens": 40, "total_tokens": 240},
+        )
+        self.assertEqual(
+            _extract_anthropic_usage({"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 25}),
+            {"prompt_tokens": 150, "completion_tokens": 25, "total_tokens": 175},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            storage = StorageManager(db_path=db_path)
+            await storage.init_db()
+            try:
+                sess = await storage.create_session("Usage Test")
+                msg = await storage.add_message(
+                    sess["id"],
+                    "assistant",
+                    "initial",
+                    usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                )
+                self.assertEqual(
+                    msg["usage"],
+                    {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                )
+                updated = await storage.update_message(
+                    msg["id"],
+                    content="final",
+                    usage={"prompt_tokens": 50000, "completion_tokens": 4834, "total_tokens": 54834},
+                )
+                self.assertEqual(updated["usage"]["total_tokens"], 54834)
+                listed = await storage.list_messages(sess["id"])
+                self.assertEqual(listed[0]["usage"]["total_tokens"], 54834)
+            finally:
+                await storage.close()
+
+    async def test_router_chat_returns_usage_and_daemon_broadcasts_it(self) -> None:
+        from bytey_ai_companion.llm.router import LLMRouter
+
+        router = LLMRouter(ConfigManager())
+        router._chat_ollama = unittest.mock.AsyncMock(
+            return_value=([], {"prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500})
+        )
+        res = await router.generate_chat(
+            provider="ollama",
+            messages=[{"role": "user", "content": "hi"}],
+            system_prompt="",
+            model="llama3.2",
+        )
+        self.assertEqual(
+            res["usage"],
+            {"prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = ByteyDaemon(
+                config_dir=tmp_path / "cfg",
+                data_dir=tmp_path / "data",
+                enable_voice_capture=False,
+            )
+            daemon.config_manager.update_config(
+                {
+                    "provider": {"active_provider": "ollama", "model": "llama3.2"},
+                    "voice_out": {"tts_provider": "disabled", "tts_muted": True},
+                }
+            )
+            daemon.llm_router.generate_chat = unittest.mock.AsyncMock(
+                return_value={
+                    "content": "hello",
+                    "emotion": "happy",
+                    "emotion_explicit": True,
+                    "title": None,
+                    "tool_calls": [],
+                    "usage": {"prompt_tokens": 50000, "completion_tokens": 4834, "total_tokens": 54834},
+                    "raw_assistant_message": {"role": "assistant", "content": "hello"},
+                }
+            )
+            broadcasts: list[dict[str, Any]] = []
+            orig_broadcast = daemon.ipc.connection_manager.broadcast
+
+            async def _capture_broadcast(payload: dict[str, Any]) -> None:
+                broadcasts.append(payload)
+                await orig_broadcast(payload)
+
+            daemon.ipc.connection_manager.broadcast = _capture_broadcast  # type: ignore[method-assign]
+            daemon.ipc.port = 0
+            await daemon.start()
+            try:
+                sess = await daemon.storage.create_session("Token Usage Session")
+                await daemon.handle_user_prompt("hi", input_mode="text", session_id=sess["id"])
+                finals = [
+                    b for b in broadcasts
+                    if b.get("type") == "transcript_delta"
+                    and b.get("role") == "assistant"
+                    and b.get("is_final") is True
+                ]
+                self.assertEqual(len(finals), 1)
+                self.assertEqual(
+                    finals[0].get("usage"),
+                    {"prompt_tokens": 50000, "completion_tokens": 4834, "total_tokens": 54834},
+                )
+                msgs = await daemon.storage.list_messages(sess["id"])
+                asst = [m for m in msgs if m["role"] == "assistant"][-1]
+                self.assertEqual(asst["usage"]["total_tokens"], 54834)
+            finally:
+                await daemon.stop()
+
+
+class TestFocusWindow(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_config_focus_window_validation(self) -> None:
+        from bytey_ai_companion.config import ProviderConfig
+
+        self.assertEqual(ProviderConfig().focus_window, 0)
+        self.assertEqual(ProviderConfig(focus_window=None).focus_window, 0)
+        self.assertEqual(ProviderConfig(focus_window="").focus_window, 0)
+        self.assertEqual(ProviderConfig(focus_window=-5).focus_window, 0)
+        self.assertEqual(ProviderConfig(focus_window="10").focus_window, 10)
+
+    async def test_focus_window_limits_llm_history_without_deleting_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = ByteyDaemon(
+                config_dir=tmp_path / "cfg",
+                data_dir=tmp_path / "data",
+                enable_voice_capture=False,
+            )
+            daemon.config_manager.update_config(
+                {
+                    "provider": {
+                        "active_provider": "ollama",
+                        "model": "llama3.2",
+                        "focus_window": 2,
+                    },
+                    "voice_out": {"tts_provider": "disabled", "tts_muted": True},
+                }
+            )
+            captured_messages: list[list[dict[str, Any]]] = []
+
+            async def _fake_generate_chat(**kwargs: Any) -> dict[str, Any]:
+                captured_messages.append(list(kwargs.get("messages") or []))
+                on_chunk = kwargs.get("on_text_chunk")
+                if callable(on_chunk):
+                    await on_chunk("ok")
+                return {
+                    "content": "ok",
+                    "emotion": "happy",
+                    "emotion_explicit": True,
+                    "title": None,
+                    "tool_calls": [],
+                    "raw_assistant_message": {"role": "assistant", "content": "ok"},
+                }
+
+            daemon.llm_router.generate_chat = _fake_generate_chat  # type: ignore[method-assign]
+            daemon.ipc.port = 0
+            await daemon.start()
+            try:
+                sess = await daemon.storage.create_session("Focus Window Session")
+                sid = sess["id"]
+                for i in range(6):
+                    role = "user" if i % 2 == 0 else "assistant"
+                    await daemon.storage.add_message(sid, role=role, content=f"msg-{i}")
+
+                await daemon.handle_user_prompt("msg-current", input_mode="text", session_id=sid)
+                self.assertEqual(len(captured_messages), 1)
+                self.assertEqual(
+                    [m["content"] for m in captured_messages[0]],
+                    ["msg-4", "msg-5", "msg-current"],
+                )
+
+                # DB still retains all 6 seeded + user + assistant = 8 messages
+                all_msgs = await daemon.storage.list_messages(sid, limit=None)
+                self.assertEqual(len(all_msgs), 8)
+                self.assertEqual(await daemon.storage.list_messages(sid, limit=0), [])
+
+                # Setting focus_window=0 sends full history (> 40 messages)
+                for i in range(45):
+                    role = "user" if i % 2 == 0 else "assistant"
+                    await daemon.storage.add_message(sid, role=role, content=f"extra-{i}")
+                daemon.config_manager.update_config({"provider": {"focus_window": 0}})
+                await daemon.handle_user_prompt("final-msg", input_mode="text", session_id=sid)
+                self.assertEqual(len(captured_messages), 2)
+                self.assertEqual(len(captured_messages[1]), 8 + 45 + 1)
+                self.assertEqual(captured_messages[1][0]["content"], "msg-0")
+                self.assertEqual(captured_messages[1][-1]["content"], "final-msg")
+            finally:
+                await daemon.stop()
 
 
 if __name__ == "__main__":

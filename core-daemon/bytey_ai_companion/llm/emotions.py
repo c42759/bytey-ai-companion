@@ -25,6 +25,45 @@ VALID_EMOTIONS: tuple[str, ...] = (
     "astonished",
 )
 
+EMOTION_ALIASES: dict[str, str] = {
+    "sorry": "neutral",
+    "apologetic": "neutral",
+    "sad": "neutral",
+    "calm": "neutral",
+    "excited": "happy",
+    "joy": "happy",
+    "glad": "happy",
+    "cheerful": "happy",
+    "thinking": "focus",
+    "thoughtful": "focus",
+    "focused": "focus",
+    "concentrating": "focus",
+    "angry": "annoyed",
+    "frustrated": "annoyed",
+    "irritated": "annoyed",
+    "confused": "curious",
+    "wondering": "curious",
+    "inquisitive": "curious",
+    "amazed": "astonished",
+    "shocked": "astonished",
+    "stunned": "astonished",
+    "affectionate": "love",
+    "caring": "love",
+    "warm": "love",
+    "tired": "sleepy",
+    "drowsy": "sleepy",
+    "failed": "error",
+    "broken": "error",
+}
+
+
+def normalize_emotion_tag(raw_tag: str) -> str | None:
+    """Normalize a parsed emotion tag against VALID_EMOTIONS and EMOTION_ALIASES."""
+    tag = (raw_tag or "").strip().lower()
+    if tag in VALID_EMOTIONS:
+        return tag
+    return EMOTION_ALIASES.get(tag)
+
 _DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).with_name("default_system_prompt.md")
 
 
@@ -43,6 +82,22 @@ _TITLE_PREFIX_RE = re.compile(
     r"^\s*\[title:\s*([^\]\r\n]+?)\s*\]\s*",
     re.IGNORECASE,
 )
+_EMOTION_AT_START_RE = re.compile(
+    r"^\[emotion:\s*([a-zA-Z0-9_-]+)\s*\]",
+    re.IGNORECASE,
+)
+_TITLE_AT_START_RE = re.compile(
+    r"^\[title:\s*([^\]\r\n]+?)\s*\]",
+    re.IGNORECASE,
+)
+_EMOTION_INLINE_RE = re.compile(
+    r"[ \t]*\[emotion:\s*([a-zA-Z0-9_-]+)\s*\][ \t]*",
+    re.IGNORECASE,
+)
+_TITLE_INLINE_RE = re.compile(
+    r"[ \t]*\[title:\s*([^\]\r\n]+?)\s*\][ \t]*",
+    re.IGNORECASE,
+)
 _TAG_PREFIXES: tuple[str, ...] = ("[emotion:", "[title:")
 _MAX_TAG_BUFFER_CHARS = 128
 _MAX_LEADING_WS_CHARS = 64
@@ -59,8 +114,31 @@ def _clean_title(raw: str) -> str | None:
     return cleaned or None
 
 
+def _strip_inline_tag(text: str, pattern: re.Pattern[str], on_match: Callable[[str], None]) -> str:
+    """Strip inline tag occurrences while preserving surrounding spacing cleanly."""
+    parts: list[str] = []
+    pos = 0
+    for m in pattern.finditer(text):
+        on_match(m.group(1))
+        before = text[pos:m.start()]
+        after = text[m.end():]
+        parts.append(before)
+        prev_char = text[m.start() - 1] if m.start() > 0 else ""
+        next_char = after[0] if after else ""
+        if (
+            prev_char
+            and next_char
+            and prev_char not in "\n\r"
+            and next_char not in "\n\r"
+        ):
+            parts.append(" ")
+        pos = m.end()
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
 def parse_reply_tags(text: str) -> tuple[str | None, str | None, str]:
-    """Parse leading `[emotion:<tag>]` and `[title:<text>]` prefixes in either order."""
+    """Parse `[emotion:<tag>]` and `[title:<text>]` prefixes or inline markers in either order."""
     if not text:
         return None, None, ""
     emotion: str | None = None
@@ -69,34 +147,48 @@ def parse_reply_tags(text: str) -> tuple[str | None, str | None, str]:
 
     for _ in range(2):
         matched = False
-        if emotion is None:
-            em_match = _EMOTION_PREFIX_RE.match(rest)
-            if em_match:
-                tag = em_match.group(1).strip().lower()
-                if tag in VALID_EMOTIONS:
-                    emotion = tag
-                    rest = rest[em_match.end():]
-                    matched = True
-        if not matched and title is None:
+        em_match = _EMOTION_PREFIX_RE.match(rest)
+        if em_match:
+            norm = normalize_emotion_tag(em_match.group(1))
+            if emotion is None and norm is not None:
+                emotion = norm
+            rest = rest[em_match.end():]
+            matched = True
+        if not matched:
             ti_match = _TITLE_PREFIX_RE.match(rest)
             if ti_match:
-                title = _clean_title(ti_match.group(1))
+                if title is None:
+                    title = _clean_title(ti_match.group(1))
                 rest = rest[ti_match.end():]
                 matched = True
         if not matched:
             break
 
+    def _capture_emotion(raw_tag: str) -> None:
+        nonlocal emotion
+        if emotion is None:
+            norm = normalize_emotion_tag(raw_tag)
+            if norm is not None:
+                emotion = norm
+
+    def _capture_title(raw_title: str) -> None:
+        nonlocal title
+        if title is None:
+            title = _clean_title(raw_title)
+
+    rest = _strip_inline_tag(rest, _EMOTION_INLINE_RE, _capture_emotion)
+    rest = _strip_inline_tag(rest, _TITLE_INLINE_RE, _capture_title)
     return emotion, title, rest
 
 
 def parse_emotion_prefix(text: str) -> tuple[str | None, str]:
-    """Parse leading `[emotion:<tag>]` (and strip any `[title:...]` prefix) and trailing whitespace."""
+    """Parse `[emotion:<tag>]` (and strip any `[title:...]` markers) and trailing whitespace."""
     emotion, _title, clean_text = parse_reply_tags(text)
     return emotion, clean_text
 
 
 class EmotionStreamParser:
-    """Incrementally detects and strips leading `[emotion:<tag>]` and `[title:<text>]` markers."""
+    """Incrementally detects and strips `[emotion:<tag>]` and `[title:<text>]` markers anywhere in stream."""
 
     def __init__(
         self,
@@ -106,9 +198,10 @@ class EmotionStreamParser:
         self._on_emotion = on_emotion
         self._on_title = on_title
         self._buffer: str = ""
-        self._resolved: bool = False
+        self._pending_leading_ws: str = ""
+        self._has_emitted: bool = False
         self._strip_leading_ws: bool = False
-        self._any_tag_consumed: bool = False
+        self._strip_post_tag_ws: bool = False
         self._callback_fired: bool = False
         self._title_callback_fired: bool = False
         self._pending_tasks: list[asyncio.Task[Any]] = []
@@ -158,29 +251,39 @@ class EmotionStreamParser:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def _try_consume_one_tag(self) -> bool:
-        """Attempt to consume one leading `[emotion:...]` or `[title:...]` tag from `_buffer`."""
-        if self.emotion is None:
-            em_match = _EMOTION_PREFIX_RE.match(self._buffer)
-            if em_match:
-                tag = em_match.group(1).strip().lower()
-                if tag in VALID_EMOTIONS:
-                    self.emotion = tag
-                    self._buffer = self._buffer[em_match.end():]
-                    self._any_tag_consumed = True
-                    self._strip_leading_ws = True
-                    self._fire_emotion(tag)
-                    return True
-        if self.captured_title is None:
-            ti_match = _TITLE_PREFIX_RE.match(self._buffer)
-            if ti_match:
-                title = _clean_title(ti_match.group(1))
-                self._buffer = self._buffer[ti_match.end():]
-                self._any_tag_consumed = True
+        """Attempt to consume one `[emotion:...]` or `[title:...]` tag at index 0 of `_buffer`."""
+        em_match = _EMOTION_AT_START_RE.match(self._buffer)
+        if em_match:
+            norm = normalize_emotion_tag(em_match.group(1))
+            self._buffer = self._buffer[em_match.end():]
+            if not self._has_emitted:
                 self._strip_leading_ws = True
-                if title:
-                    self.captured_title = title
-                    self._fire_title(title)
-                return True
+            else:
+                self._strip_post_tag_ws = True
+                self._buffer = self._buffer.lstrip(" \t")
+                if self._buffer:
+                    self._strip_post_tag_ws = False
+            if norm is not None and self.emotion is None:
+                self.emotion = norm
+                self._fire_emotion(norm)
+            return True
+
+        ti_match = _TITLE_AT_START_RE.match(self._buffer)
+        if ti_match:
+            title = _clean_title(ti_match.group(1))
+            self._buffer = self._buffer[ti_match.end():]
+            if not self._has_emitted:
+                self._strip_leading_ws = True
+            else:
+                self._strip_post_tag_ws = True
+                self._buffer = self._buffer.lstrip(" \t")
+                if self._buffer:
+                    self._strip_post_tag_ws = False
+            if title and self.captured_title is None:
+                self.captured_title = title
+                self._fire_title(title)
+            return True
+
         return False
 
     def feed(self, chunk: str) -> str:
@@ -188,80 +291,106 @@ class EmotionStreamParser:
         if not chunk:
             return ""
 
-        if self._resolved:
-            if self._strip_leading_ws:
-                cleaned = chunk.lstrip()
-                if not cleaned:
-                    return ""
-                self._strip_leading_ws = False
-                return cleaned
-            return chunk
-
         self._buffer += chunk
+        out_parts: list[str] = []
 
-        while not self._resolved:
-            stripped = self._buffer.lstrip()
-            if not stripped:
-                if len(self._buffer) > _MAX_LEADING_WS_CHARS:
-                    return self._release_raw_buffer()
-                return ""
+        while self._buffer:
+            if not self._has_emitted and self._strip_leading_ws:
+                self._buffer = self._buffer.lstrip()
+                if not self._buffer:
+                    break
+            elif self._strip_post_tag_ws:
+                self._buffer = self._buffer.lstrip(" \t")
+                if not self._buffer:
+                    break
+                self._strip_post_tag_ws = False
 
-            lowered = stripped.lower()
-            matching_prefix = any(
+            idx = self._buffer.find("[")
+            if idx == -1:
+                if not self._has_emitted and not self._buffer.strip():
+                    if len(self._pending_leading_ws) + len(self._buffer) <= _MAX_LEADING_WS_CHARS:
+                        self._pending_leading_ws += self._buffer
+                        self._buffer = ""
+                        break
+                text_out = (self._pending_leading_ws if not self._has_emitted else "") + self._buffer
+                self._pending_leading_ws = ""
+                self._buffer = ""
+                if text_out:
+                    self._has_emitted = True
+                    self._strip_leading_ws = False
+                    out_parts.append(text_out)
+                break
+
+            if idx > 0:
+                prefix = self._buffer[:idx]
+                self._buffer = self._buffer[idx:]
+                if (
+                    not self._has_emitted
+                    and not prefix.strip()
+                    and len(self._pending_leading_ws) + len(prefix) <= _MAX_LEADING_WS_CHARS
+                ):
+                    self._pending_leading_ws += prefix
+                else:
+                    text_out = (self._pending_leading_ws if not self._has_emitted else "") + prefix
+                    self._pending_leading_ws = ""
+                    if text_out:
+                        self._has_emitted = True
+                        self._strip_leading_ws = False
+                        out_parts.append(text_out)
+                continue
+
+            # self._buffer[0] == '['
+            lowered = self._buffer.lower()
+            could_be_tag = any(
                 p.startswith(lowered) if len(lowered) < len(p) else lowered.startswith(p)
                 for p in _TAG_PREFIXES
             )
-            if not matching_prefix:
-                return self._release_raw_buffer()
-
-            if len(lowered) < min(len(p) for p in _TAG_PREFIXES) or any(
-                len(lowered) < len(p) and p.startswith(lowered) for p in _TAG_PREFIXES
-            ):
-                if "\n" in stripped:
-                    return self._release_raw_buffer()
-                return ""
-
-            if "]" not in stripped:
-                if "\n" in stripped or len(stripped) > _MAX_TAG_BUFFER_CHARS:
-                    return self._release_raw_buffer()
-                return ""
-
-            if self._try_consume_one_tag():
-                if self.emotion is not None and self.captured_title is not None:
-                    self._resolved = True
-                    out = self._buffer.lstrip() if self._strip_leading_ws else self._buffer
-                    self._buffer = ""
-                    if out:
-                        self._strip_leading_ws = False
-                    return out
+            if not could_be_tag:
+                text_out = (self._pending_leading_ws if not self._has_emitted else "") + "["
+                self._pending_leading_ws = ""
+                self._buffer = self._buffer[1:]
+                self._has_emitted = True
+                self._strip_leading_ws = False
+                out_parts.append(text_out)
                 continue
 
-            return self._release_raw_buffer()
+            if "]" not in self._buffer:
+                if "\n" in self._buffer or len(self._buffer) > _MAX_TAG_BUFFER_CHARS:
+                    text_out = (self._pending_leading_ws if not self._has_emitted else "") + "["
+                    self._pending_leading_ws = ""
+                    self._buffer = self._buffer[1:]
+                    self._has_emitted = True
+                    self._strip_leading_ws = False
+                    out_parts.append(text_out)
+                    continue
+                break
 
-        return ""
+            if self._try_consume_one_tag():
+                self._pending_leading_ws = ""
+                continue
 
-    def _release_raw_buffer(self) -> str:
-        self._resolved = True
-        out = self._buffer
-        self._buffer = ""
-        if self._any_tag_consumed and self._strip_leading_ws:
-            out = out.lstrip()
-            if out:
-                self._strip_leading_ws = False
-        return out
+            text_out = (self._pending_leading_ws if not self._has_emitted else "") + "["
+            self._pending_leading_ws = ""
+            self._buffer = self._buffer[1:]
+            self._has_emitted = True
+            self._strip_leading_ws = False
+            out_parts.append(text_out)
+
+        return "".join(out_parts)
 
     def flush(self) -> str:
         """Flush any remaining buffered characters at end-of-stream."""
-        if not self._buffer:
-            return ""
-        if not self._resolved:
-            return self._release_raw_buffer()
-        out = self._buffer
+        out = (self._pending_leading_ws if not self._has_emitted else "") + self._buffer
+        self._pending_leading_ws = ""
         self._buffer = ""
-        if self._strip_leading_ws:
+        if not self._has_emitted and self._strip_leading_ws:
             out = out.lstrip()
-            if out:
-                self._strip_leading_ws = False
+        elif self._strip_post_tag_ws:
+            out = out.lstrip(" \t")
+        self._strip_post_tag_ws = False
+        if out:
+            self._has_emitted = True
+            self._strip_leading_ws = False
         return out
 
 

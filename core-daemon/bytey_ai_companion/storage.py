@@ -100,6 +100,7 @@ class StorageManager:
                     content TEXT NOT NULL,
                     parts_json TEXT NOT NULL DEFAULT '[]',
                     emotion TEXT NOT NULL DEFAULT 'neutral',
+                    usage_json TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
@@ -137,6 +138,8 @@ class StorageManager:
                 conn.execute(
                     "ALTER TABLE messages ADD COLUMN parts_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            if "usage_json" not in msg_cols:
+                conn.execute("ALTER TABLE messages ADD COLUMN usage_json TEXT")
             conn.commit()
 
     async def init_db(self) -> None:
@@ -423,6 +426,34 @@ class StorageManager:
                 fallback.append({"type": "tool_call", "call_id": cid})
         return fallback
 
+    def _serialize_usage(self, usage: dict[str, Any] | None) -> str | None:
+        if not isinstance(usage, dict):
+            return None
+        cleaned: dict[str, int] = {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            val = usage.get(key)
+            if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+                cleaned[key] = val
+        if not cleaned:
+            return None
+        return json.dumps(cleaned, ensure_ascii=False)
+
+    def _deserialize_usage(self, usage_json: str | None) -> dict[str, int] | None:
+        if not usage_json:
+            return None
+        try:
+            raw = json.loads(usage_json)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(raw, dict):
+            return None
+        cleaned: dict[str, int] = {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            val = raw.get(key)
+            if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
+                cleaned[key] = val
+        return cleaned or None
+
     def _add_message_sync(
         self,
         session_id: str,
@@ -432,19 +463,21 @@ class StorageManager:
         emotion: str,
         message_id: str | None,
         parts: list[dict[str, Any]] | None,
+        usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         mid = message_id or str(uuid.uuid4())
         now = _utc_now_iso()
         norm_parts = self._normalize_parts(parts)
         parts_json = json.dumps(norm_parts, ensure_ascii=False)
+        usage_json = self._serialize_usage(usage)
         with self._lock:
             conn = self._get_conn()
             conn.execute(
                 """
-                INSERT INTO messages (id, session_id, role, input_mode, content, parts_json, emotion, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (id, session_id, role, input_mode, content, parts_json, emotion, usage_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (mid, session_id, role, input_mode, content, parts_json, emotion, now),
+                (mid, session_id, role, input_mode, content, parts_json, emotion, usage_json, now),
             )
             conn.execute(
                 "UPDATE sessions SET updated_at = ? WHERE id = ?",
@@ -459,6 +492,7 @@ class StorageManager:
             "content": content,
             "parts": self._deserialize_parts(parts_json, content, []),
             "emotion": emotion,
+            "usage": self._deserialize_usage(usage_json),
             "created_at": now,
             "tool_calls": [],
         }
@@ -472,6 +506,7 @@ class StorageManager:
         emotion: str = "neutral",
         message_id: str | None = None,
         parts: list[dict[str, Any]] | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Insert a message into a session and refresh the session timestamp."""
         return await asyncio.to_thread(
@@ -483,6 +518,7 @@ class StorageManager:
             emotion,
             message_id,
             parts,
+            usage,
         )
 
     def _update_message_sync(
@@ -491,38 +527,36 @@ class StorageManager:
         content: str,
         emotion: str | None,
         parts: list[dict[str, Any]] | None,
+        usage: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         now = _utc_now_iso()
         parts_json = self._serialize_parts(parts) if parts is not None else None
+        usage_json = self._serialize_usage(usage) if usage is not None else None
+        set_clauses = ["content = ?"]
+        params: list[Any] = [content]
+        if emotion is not None:
+            set_clauses.append("emotion = ?")
+            params.append(emotion)
+        if parts_json is not None:
+            set_clauses.append("parts_json = ?")
+            params.append(parts_json)
+        if usage_json is not None:
+            set_clauses.append("usage_json = ?")
+            params.append(usage_json)
+        params.append(message_id)
         with self._lock:
             conn = self._get_conn()
-            if emotion is not None and parts_json is not None:
-                cur = conn.execute(
-                    "UPDATE messages SET content = ?, emotion = ?, parts_json = ? WHERE id = ?",
-                    (content, emotion, parts_json, message_id),
-                )
-            elif emotion is not None:
-                cur = conn.execute(
-                    "UPDATE messages SET content = ?, emotion = ? WHERE id = ?",
-                    (content, emotion, message_id),
-                )
-            elif parts_json is not None:
-                cur = conn.execute(
-                    "UPDATE messages SET content = ?, parts_json = ? WHERE id = ?",
-                    (content, parts_json, message_id),
-                )
-            else:
-                cur = conn.execute(
-                    "UPDATE messages SET content = ? WHERE id = ?",
-                    (content, message_id),
-                )
+            cur = conn.execute(
+                f"UPDATE messages SET {', '.join(set_clauses)} WHERE id = ?",
+                tuple(params),
+            )
             if cur.rowcount == 0:
                 conn.commit()
                 return None
 
             row = conn.execute(
                 """
-                SELECT id, session_id, role, input_mode, content, parts_json, emotion, created_at
+                SELECT id, session_id, role, input_mode, content, parts_json, emotion, usage_json, created_at
                 FROM messages
                 WHERE id = ?
                 """,
@@ -551,6 +585,7 @@ class StorageManager:
             msg = dict(row)
             msg_calls = [dict(c) for c in calls]
             msg["tool_calls"] = msg_calls
+            msg["usage"] = self._deserialize_usage(msg.pop("usage_json", None))
             msg["parts"] = self._deserialize_parts(
                 msg.pop("parts_json", None), msg["content"], msg_calls
             )
@@ -562,32 +597,44 @@ class StorageManager:
         content: str,
         emotion: str | None = None,
         parts: list[dict[str, Any]] | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Update message content and optionally emotion and ordered parts."""
+        """Update message content and optionally emotion, ordered parts, and token usage."""
         return await asyncio.to_thread(
-            self._update_message_sync, message_id, content, emotion, parts
+            self._update_message_sync, message_id, content, emotion, parts, usage
         )
 
-    def _list_messages_sync(self, session_id: str, limit: int) -> list[dict[str, Any]]:
-        if limit <= 0:
+    def _list_messages_sync(self, session_id: str, limit: int | None) -> list[dict[str, Any]]:
+        if limit is not None and limit <= 0:
             return []
         with self._lock:
             conn = self._get_conn()
-            rows = conn.execute(
-                """
-                SELECT id, session_id, role, input_mode, content, parts_json, emotion, created_at
-                FROM (
-                    SELECT id, session_id, role, input_mode, content, parts_json, emotion,
-                           created_at, rowid AS _rid
+            if limit is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, session_id, role, input_mode, content, parts_json, emotion, usage_json, created_at
                     FROM messages
                     WHERE session_id = ?
-                    ORDER BY created_at DESC, rowid DESC
-                    LIMIT ?
-                )
-                ORDER BY created_at ASC, _rid ASC
-                """,
-                (session_id, limit),
-            ).fetchall()
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (session_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, session_id, role, input_mode, content, parts_json, emotion, usage_json, created_at
+                    FROM (
+                        SELECT id, session_id, role, input_mode, content, parts_json, emotion,
+                               usage_json, created_at, rowid AS _rid
+                        FROM messages
+                        WHERE session_id = ?
+                        ORDER BY created_at DESC, rowid DESC
+                        LIMIT ?
+                    )
+                    ORDER BY created_at ASC, _rid ASC
+                    """,
+                    (session_id, limit),
+                ).fetchall()
             messages = [dict(row) for row in rows]
             if not messages:
                 return []
@@ -613,13 +660,14 @@ class StorageManager:
             for msg in messages:
                 msg_calls = calls_by_msg.get(msg["id"], [])
                 msg["tool_calls"] = msg_calls
+                msg["usage"] = self._deserialize_usage(msg.pop("usage_json", None))
                 msg["parts"] = self._deserialize_parts(
                     msg.pop("parts_json", None), msg["content"], msg_calls
                 )
             return messages
 
     async def list_messages(
-        self, session_id: str, limit: int = 100
+        self, session_id: str, limit: int | None = 100
     ) -> list[dict[str, Any]]:
         """List recent messages for a session in chronological order with tool_calls."""
         return await asyncio.to_thread(self._list_messages_sync, session_id, limit)

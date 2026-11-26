@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import Cairo from 'cairo';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -101,6 +102,11 @@ export class TranscriptDrawer {
         this._focusIdleId = 0;
         this._renameFocusIdleId = 0;
         this._signalIds = [];
+        this._contextWindowTokens = null;
+        this._latestTokenUsage = null;
+        this._modelContextMap = new Map();
+        this._contextRingBtn = null;
+        this._contextRingArea = null;
 
         this._container = new St.BoxLayout({
             style_class: 'bytey-drawer bytey-density-comfortable',
@@ -569,6 +575,32 @@ export class TranscriptDrawer {
             style_class: 'bytey-drawer-footer',
             x_expand: true,
         });
+
+        this._contextRingArea = new St.DrawingArea({
+            width: 32,
+            height: 32,
+            x_expand: false,
+            y_expand: false,
+        });
+        this._connect(this._contextRingArea, 'repaint', area => {
+            this._drawContextRing(area);
+        });
+        this._contextRingBtn = new St.Bin({
+            style_class: 'bytey-context-ring',
+            reactive: true,
+            track_hover: true,
+            can_focus: false,
+            y_align: Clutter.ActorAlign.END,
+            accessible_name: 'Context usage',
+            child: this._contextRingArea,
+        });
+        this._connect(this._contextRingBtn, 'notify::hover', () => {
+            if (this._contextRingBtn?.hover)
+                this._showTooltip(this._contextRingBtn, this._getContextTooltipText());
+            else
+                this._hideStatusTooltip();
+        });
+        footer.add_child(this._contextRingBtn);
 
         this._entry = new St.Entry({
             style_class: 'bytey-entry',
@@ -1189,6 +1221,105 @@ export class TranscriptDrawer {
             this._statusTooltip.visible = false;
     }
 
+    _formatSpaceNumber(num) {
+        return Math.max(0, Math.round(num))
+            .toString()
+            .replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+    }
+
+    _getContextStats() {
+        const usage = this._latestTokenUsage;
+        let used = null;
+        if (usage && typeof usage === 'object') {
+            if (typeof usage.total_tokens === 'number' && Number.isFinite(usage.total_tokens) && usage.total_tokens >= 0) {
+                used = usage.total_tokens;
+            } else {
+                const p = typeof usage.prompt_tokens === 'number' && Number.isFinite(usage.prompt_tokens) ? usage.prompt_tokens : null;
+                const c = typeof usage.completion_tokens === 'number' && Number.isFinite(usage.completion_tokens) ? usage.completion_tokens : null;
+                if (p !== null || c !== null)
+                    used = (p ?? 0) + (c ?? 0);
+            }
+        }
+        const limit = (typeof this._contextWindowTokens === 'number' &&
+            Number.isFinite(this._contextWindowTokens) &&
+            this._contextWindowTokens > 0)
+            ? this._contextWindowTokens
+            : null;
+        const pct = (used !== null && limit !== null)
+            ? Math.max(0, Math.min(100, Math.round((used / limit) * 100)))
+            : null;
+        return {used, limit, pct};
+    }
+
+    _getContextTooltipText() {
+        const {used, limit} = this._getContextStats();
+        if (used !== null && limit !== null)
+            return `${this._formatSpaceNumber(used)}/${this._formatSpaceNumber(limit)}`;
+        if (used !== null)
+            return `${this._formatSpaceNumber(used)} / —`;
+        if (limit !== null)
+            return `0/${this._formatSpaceNumber(limit)}`;
+        return 'Context usage unavailable';
+    }
+
+    _refreshContextRing() {
+        if (this._destroyed)
+            return;
+        if (this._contextRingBtn)
+            this._contextRingBtn.accessible_name = `Context usage: ${this._getContextTooltipText()}`;
+        this._contextRingArea?.queue_repaint();
+        if (this._contextRingBtn?.hover)
+            this._showTooltip(this._contextRingBtn, this._getContextTooltipText());
+    }
+
+    _drawContextRing(area) {
+        const cr = area.get_context();
+        const [w, h] = area.get_surface_size();
+        const cx = w / 2;
+        const cy = h / 2;
+        const stroke = 3.2;
+        const radius = Math.max(4, Math.min(w, h) / 2 - stroke / 2 - 1);
+
+        cr.setLineCap(Cairo.LineCap.ROUND);
+        cr.setLineWidth(stroke);
+
+        // Background track
+        cr.setSourceRGBA(1, 1, 1, 0.18);
+        cr.arc(cx, cy, radius, 0, Math.PI * 2);
+        cr.stroke();
+
+        const {pct} = this._getContextStats();
+        let r = 0.72;
+        let g = 0.75;
+        let b = 0.80;
+        if (pct !== null) {
+            if (pct <= 65) {
+                r = 0.133; g = 0.773; b = 0.369; // #22C55E green
+            } else if (pct <= 89) {
+                r = 0.918; g = 0.702; b = 0.031; // #EAB308 yellow
+            } else {
+                r = 0.937; g = 0.267; b = 0.267; // #EF4444 red
+            }
+            if (pct > 0) {
+                const startAngle = -Math.PI / 2;
+                const endAngle = startAngle + (pct / 100) * Math.PI * 2;
+                cr.setSourceRGBA(r, g, b, 1.0);
+                cr.arc(cx, cy, radius, startAngle, endAngle);
+                cr.stroke();
+            }
+        }
+
+        const label = pct !== null ? `${pct}%` : '--';
+        cr.selectFontFace('Sans', Cairo.FontSlant.NORMAL, Cairo.FontWeight.BOLD);
+        cr.setFontSize(pct === 100 ? 8.2 : 9.2);
+        const ext = cr.textExtents(label);
+        cr.setSourceRGBA(r, g, b, 1.0);
+        cr.moveTo(cx - ext.width / 2 - ext.xBearing, cy - ext.height / 2 - ext.yBearing);
+        cr.showText(label);
+
+        cr.$dispose();
+    }
+
     /**
      * Reflect active listening state on the footer Mic button.
      *
@@ -1234,6 +1365,22 @@ export class TranscriptDrawer {
         this._activeProvider = String(provider || 'ollama');
         this._activeModel = String(model || '');
         this._providerLabel.text = this._activeModel || this._activeProvider;
+
+        const cfgCtx = Number(
+            config.provider?.context_size ??
+            config.llm?.context_size ??
+            config.llm?.max_context_size ??
+            0
+        );
+        if (Number.isFinite(cfgCtx) && cfgCtx > 0) {
+            this._contextWindowTokens = Math.round(cfgCtx);
+        } else {
+            const cachedModelCtx = this._modelContextMap?.get(this._activeModel);
+            this._contextWindowTokens = (typeof cachedModelCtx === 'number' && cachedModelCtx > 0)
+                ? cachedModelCtx
+                : null;
+        }
+        this._refreshContextRing();
 
         const rawWidth = Number(config.visuals?.chat_width ?? config.chat_width);
         const rawHeight = Number(config.visuals?.chat_height ?? config.chat_height);
@@ -1419,15 +1566,22 @@ export class TranscriptDrawer {
 
         const list = Array.isArray(messages) ? messages : [];
         if (list.length === 0) {
+            this._latestTokenUsage = null;
+            this._refreshContextRing();
             this._renderEmptyState();
             return;
         }
 
+        let latestUsage = null;
         for (const raw of list) {
             const msg = this._normalizeMessage(raw);
             this._messages.push(msg);
             this._appendMessageWidget(msg);
+            if (msg.role === 'assistant' && msg.usage)
+                latestUsage = msg.usage;
         }
+        this._latestTokenUsage = latestUsage;
+        this._refreshContextRing();
 
         this._scheduleScrollToBottom();
     }
@@ -1958,6 +2112,11 @@ export class TranscriptDrawer {
             record.msg.content = nextContent;
             if (emotion)
                 this._updateEmotionBadge(record, emotion);
+            if (role === 'assistant' && event.usage && typeof event.usage === 'object') {
+                record.msg.usage = event.usage;
+                this._latestTokenUsage = event.usage;
+                this._refreshContextRing();
+            }
             const hasText = this._getMessageText(record.msg).trim().length > 0;
             if (record.replayBtn)
                 record.replayBtn.visible = hasText;
@@ -2094,9 +2253,20 @@ export class TranscriptDrawer {
         }
         if (this._destroyed || !this._modelMenuBox)
             return;
-        const names = models
-            .map(m => String(m?.id ?? m?.name ?? m ?? '').trim())
-            .filter(Boolean);
+        const names = [];
+        for (const m of models) {
+            const id = String(m?.id ?? m?.name ?? m ?? '').trim();
+            if (!id)
+                continue;
+            names.push(id);
+            const ctxLen = Number(m?.context_length ?? m?.context_window ?? 0);
+            if (Number.isFinite(ctxLen) && ctxLen > 0)
+                this._modelContextMap?.set(id, Math.round(ctxLen));
+        }
+        if (this._contextWindowTokens === null && this._modelContextMap?.has(this._activeModel)) {
+            this._contextWindowTokens = this._modelContextMap.get(this._activeModel);
+            this._refreshContextRing();
+        }
         const uniqueSorted = [...new Set(names)].sort((a, b) =>
             a.localeCompare(b, undefined, {sensitivity: 'base'})
         );
@@ -2519,6 +2689,8 @@ export class TranscriptDrawer {
         this._activeSessionId = null;
         this._entry = null;
         this._entryScroll = null;
+        this._contextRingBtn = null;
+        this._contextRingArea = null;
         this._skillSuggestBox = null;
         this._skillSuggestScroll = null;
         this._skillSuggestList = null;
@@ -2636,7 +2808,8 @@ export class TranscriptDrawer {
         const toolCalls = rawTools.map(t => this._normalizeTool({...t, message_id: id}));
         const parts = this._normalizeParts(raw.parts, content, toolCalls);
         const createdAt = raw.created_at ? String(raw.created_at) : null;
-        return {id, role, input_mode: inputMode, content, parts, emotion, tool_calls: toolCalls, created_at: createdAt};
+        const usage = (raw.usage && typeof raw.usage === 'object') ? raw.usage : null;
+        return {id, role, input_mode: inputMode, content, parts, emotion, usage, tool_calls: toolCalls, created_at: createdAt};
     }
 
     _formatTimestamp(iso) {

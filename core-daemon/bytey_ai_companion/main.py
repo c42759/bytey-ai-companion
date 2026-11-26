@@ -78,6 +78,8 @@ _FLAT_FIELD_MAP: dict[str, tuple[str, str]] = {
     "model": ("provider", "model"),
     "llm_context_size": ("provider", "context_size"),
     "context_size": ("provider", "context_size"),
+    "focus_window": ("provider", "focus_window"),
+    "llm_focus_window": ("provider", "focus_window"),
     "max_tool_rounds": ("provider", "max_tool_rounds"),
     "llm_max_tool_rounds": ("provider", "max_tool_rounds"),
     "mic_muted": ("voice_in", "mic_muted"),
@@ -1726,6 +1728,7 @@ class ByteyDaemon:
             "temperature": cfg.provider.temperature,
             "context_size": cfg.provider.context_size,
             "max_context_size": self._detected_context_length,
+            "focus_window": cfg.provider.focus_window,
             "max_tool_rounds": cfg.provider.max_tool_rounds,
         }
         data["voice_input"] = {
@@ -1802,6 +1805,8 @@ class ByteyDaemon:
                 mapped["temperature"] = llm["temperature"]
             if "context_size" in llm:
                 mapped["context_size"] = llm["context_size"]
+            if "focus_window" in llm:
+                mapped["focus_window"] = llm["focus_window"]
             if "max_tool_rounds" in llm:
                 mapped["max_tool_rounds"] = llm["max_tool_rounds"]
             if "supports_tools" in llm and isinstance(llm["supports_tools"], bool):
@@ -2364,7 +2369,10 @@ class ByteyDaemon:
 
             await self._set_state("THINKING", emotion="neutral")
 
-            history = await self.storage.list_messages(sid, limit=40)
+            cfg = self.config_manager.config
+            focus_window = max(0, int(cfg.provider.focus_window))
+            history_limit = None if focus_window == 0 else focus_window + 1
+            history = await self.storage.list_messages(sid, limit=history_limit)
             llm_messages: list[dict[str, Any]] = [
                 {"role": m["role"], "content": m["content"]}
                 for m in history
@@ -2625,7 +2633,9 @@ class ByteyDaemon:
                         chat_kwargs["context_size"] = effective_context_size
                     result = await self.llm_router.generate_chat(**chat_kwargs)
                     last_result = result
-                    if result.get("emotion"):
+                    if result.get("emotion_explicit") or (
+                        result.get("emotion") and result["emotion"] != "neutral"
+                    ):
                         final_emotion = str(result["emotion"])
                     tool_calls = result.get("tool_calls") or []
                     if not tool_calls:
@@ -2864,7 +2874,9 @@ class ByteyDaemon:
                         wrapup_kwargs["context_size"] = effective_context_size
                     wrapup_res = await self.llm_router.generate_chat(**wrapup_kwargs)
                     last_result = wrapup_res
-                    if wrapup_res.get("emotion"):
+                    if wrapup_res.get("emotion_explicit") or (
+                        wrapup_res.get("emotion") and wrapup_res["emotion"] != "neutral"
+                    ):
                         final_emotion = str(wrapup_res["emotion"])
 
                 if final_emotion == "neutral":
@@ -2887,7 +2899,9 @@ class ByteyDaemon:
                     await self.tts_player.enqueue_sentence(tail)
 
                 raw_content = "".join(accumulated_parts).strip()
-                _, parsed_title, clean_reply = parse_reply_tags(raw_content)
+                parsed_emotion, parsed_title, clean_reply = parse_reply_tags(raw_content)
+                if parsed_emotion and final_emotion == "neutral":
+                    final_emotion = parsed_emotion
                 clean_reply = clean_reply.strip()
                 cleaned_parts: list[dict[str, Any]] = []
                 for part in message_parts:
@@ -2903,11 +2917,13 @@ class ByteyDaemon:
                         cleaned_parts.append(
                             {"type": "tool_call", "call_id": str(part["call_id"])}
                         )
+                usage = last_result.get("usage") if isinstance(last_result, dict) else None
                 updated_msg = await self.storage.update_message(
                     assistant_id,
                     content=clean_reply,
                     emotion=final_emotion,
                     parts=cleaned_parts,
+                    usage=usage,
                 )
                 if needs_auto_title:
                     captured_title = (
@@ -2928,6 +2944,7 @@ class ByteyDaemon:
                         "text": clean_reply,
                         "parts": cleaned_parts,
                         "emotion": final_emotion,
+                        "usage": usage,
                         "is_final": True,
                     }
                 )

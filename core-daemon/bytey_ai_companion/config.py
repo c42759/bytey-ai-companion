@@ -164,7 +164,23 @@ class ProviderConfig(BaseModel):
     supports_tools_override: bool | None = None
     temperature: float = 0.7
     context_size: int | None = None
+    focus_window: int = 0
     max_tool_rounds: int = 25
+
+    @field_validator("focus_window", mode="before")
+    @classmethod
+    def _validate_focus_window(cls, value: Any) -> int:
+        """Normalize focus_window to >= 0 (0 = full history), defaulting to 0 on blank/None."""
+        if value is None or isinstance(value, bool):
+            return 0
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return 0
+            value = int(cleaned)
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+        raise ValueError(f"Invalid focus_window: {value!r}")
 
     @field_validator("max_tool_rounds", mode="before")
     @classmethod

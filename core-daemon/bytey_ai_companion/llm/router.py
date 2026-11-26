@@ -81,6 +81,58 @@ def _parse_positive_int(val: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _parse_nonneg_int(val: Any) -> int | None:
+    """Return a non-negative integer from val, or None if invalid/negative."""
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        parsed = int(val)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _normalize_usage(
+    prompt_tokens: Any,
+    completion_tokens: Any,
+    total_tokens: Any = None,
+) -> dict[str, int | None] | None:
+    """Normalize provider token counts into {prompt_tokens, completion_tokens, total_tokens}."""
+    p = _parse_nonneg_int(prompt_tokens)
+    c = _parse_nonneg_int(completion_tokens)
+    t = _parse_nonneg_int(total_tokens)
+    if p is None and c is None and t is None:
+        return None
+    if t is None and p is not None and c is not None:
+        t = p + c
+    return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": t}
+
+
+def _extract_openai_usage(raw_usage: Any) -> dict[str, int | None] | None:
+    """Extract normalized token usage from an OpenAI-compatible usage payload."""
+    if not isinstance(raw_usage, dict):
+        return None
+    prompt = raw_usage.get("prompt_tokens")
+    if prompt is None:
+        prompt = raw_usage.get("input_tokens")
+    completion = raw_usage.get("completion_tokens")
+    if completion is None:
+        completion = raw_usage.get("output_tokens")
+    return _normalize_usage(prompt, completion, raw_usage.get("total_tokens"))
+
+
+def _extract_anthropic_usage(raw_usage: Any) -> dict[str, int | None] | None:
+    """Extract normalized token usage from an Anthropic usage payload."""
+    if not isinstance(raw_usage, dict):
+        return None
+    base_in = _parse_nonneg_int(raw_usage.get("input_tokens"))
+    cache_read = _parse_nonneg_int(raw_usage.get("cache_read_input_tokens")) or 0
+    cache_create = _parse_nonneg_int(raw_usage.get("cache_creation_input_tokens")) or 0
+    prompt = (base_in + cache_read + cache_create) if base_in is not None else None
+    completion = raw_usage.get("output_tokens")
+    return _normalize_usage(prompt, completion)
+
+
 def _extract_ollama_context_length(show_data: Any) -> int | None:
     """Extract positive integer context length from an Ollama /api/show payload."""
     if not isinstance(show_data, dict):
@@ -679,12 +731,13 @@ class LLMRouter:
                 await _invoke_callback(on_text_chunk, clean)
 
         gemini_parts: list[Any] | None = None
+        usage: dict[str, int | None] | None = None
         if prov in ("openai", "custom"):
-            tool_calls = await self._chat_openai_compat(
+            tool_calls, usage = await self._chat_openai_compat(
                 prov, messages, effective_prompt, model, base_url, api_key, temperature, tools, emit_delta
             )
         elif prov == "ollama":
-            tool_calls = await self._chat_ollama(
+            tool_calls, usage = await self._chat_ollama(
                 messages,
                 effective_prompt,
                 model,
@@ -695,11 +748,11 @@ class LLMRouter:
                 context_size=context_size,
             )
         elif prov == "gemini":
-            tool_calls, gemini_parts = await self._chat_gemini(
+            tool_calls, gemini_parts, usage = await self._chat_gemini(
                 messages, effective_prompt, model, base_url, api_key, temperature, tools, emit_delta
             )
         elif prov == "anthropic":
-            tool_calls = await self._chat_anthropic(
+            tool_calls, usage = await self._chat_anthropic(
                 messages, effective_prompt, model, base_url, api_key, temperature, tools, emit_delta
             )
         else:
@@ -716,8 +769,10 @@ class LLMRouter:
         return {
             "content": content,
             "emotion": emotion,
+            "emotion_explicit": parser.emotion is not None,
             "title": parser.captured_title,
             "tool_calls": tool_calls,
+            "usage": usage,
             "raw_assistant_message": _build_raw_assistant_message(
                 content, tool_calls, gemini_parts=gemini_parts
             ),
@@ -805,6 +860,7 @@ class LLMRouter:
             "messages": wire_messages,
             "temperature": temperature,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             body["tools"] = [
@@ -822,77 +878,95 @@ class LLMRouter:
 
         client = self._get_client()
         tc_acc: dict[int, dict[str, Any]] = {}
+        usage: dict[str, int | None] | None = None
 
-        async with client.stream("POST", url, headers=headers, json=body) as resp:
-            if resp.status_code >= 400:
-                err_body = (await resp.aread()).decode("utf-8", errors="replace")
-                raise RuntimeError(f"{provider} API error {resp.status_code}: {err_body}")
+        async def _stream_once(req_body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int | None] | None] | None:
+            nonlocal usage
+            async with client.stream("POST", url, headers=headers, json=req_body) as resp:
+                if resp.status_code == 400 and "stream_options" in req_body:
+                    await resp.aread()
+                    return None
+                if resp.status_code >= 400:
+                    err_body = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"{provider} API error {resp.status_code}: {err_body}")
 
-            content_type = resp.headers.get("content-type", "").lower()
-            if "application/json" in content_type and "event-stream" not in content_type:
-                raw_bytes = await resp.aread()
-                data = json.loads(raw_bytes.decode("utf-8"))
-                choice = (data.get("choices") or [{}])[0]
-                message = choice.get("message") or {}
-                if message.get("content"):
-                    await emit_delta(str(message["content"]))
-                return _extract_message_tool_calls(message)
+                content_type = resp.headers.get("content-type", "").lower()
+                if "application/json" in content_type and "event-stream" not in content_type:
+                    raw_bytes = await resp.aread()
+                    data = json.loads(raw_bytes.decode("utf-8"))
+                    usage = _extract_openai_usage(data.get("usage"))
+                    choice = (data.get("choices") or [{}])[0]
+                    message = choice.get("message") or {}
+                    if message.get("content"):
+                        await emit_delta(str(message["content"]))
+                    return _extract_message_tool_calls(message), usage
 
-            last_implicit_idx = -1
-            last_seen_id = ""
-            async for line in resp.aiter_lines():
-                stripped = line.strip()
-                if not stripped or stripped.startswith(":"):
-                    continue
-                if stripped.startswith("data:"):
-                    stripped = stripped[5:].strip()
-                if stripped == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                if delta.get("content"):
-                    await emit_delta(str(delta["content"]))
-                for tc_delta in delta.get("tool_calls") or []:
-                    if not isinstance(tc_delta, dict):
+                last_implicit_idx = -1
+                last_seen_id = ""
+                async for line in resp.aiter_lines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith(":"):
                         continue
-                    if "index" in tc_delta and tc_delta["index"] is not None:
-                        idx = int(tc_delta["index"])
-                    else:
-                        tc_id = tc_delta.get("id") or ""
-                        if tc_id and tc_id != last_seen_id:
-                            last_implicit_idx += 1
-                            last_seen_id = tc_id
-                        elif last_implicit_idx < 0:
-                            last_implicit_idx = 0
-                        idx = last_implicit_idx
-                    slot = tc_acc.setdefault(idx, {"id": "", "name": "", "args_parts": []})
-                    if tc_delta.get("id"):
-                        slot["id"] = str(tc_delta["id"])
-                    fn = tc_delta.get("function") or {}
-                    if fn.get("name"):
-                        slot["name"] += str(fn["name"])
-                    if "arguments" in fn and fn["arguments"] is not None:
-                        raw_args = fn["arguments"]
-                        if isinstance(raw_args, dict):
-                            slot["args_parts"].append(json.dumps(raw_args))
+                    if stripped.startswith("data:"):
+                        stripped = stripped[5:].strip()
+                    if stripped == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(chunk, dict) and chunk.get("usage"):
+                        parsed_usage = _extract_openai_usage(chunk.get("usage"))
+                        if parsed_usage is not None:
+                            usage = parsed_usage
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    if delta.get("content"):
+                        await emit_delta(str(delta["content"]))
+                    for tc_delta in delta.get("tool_calls") or []:
+                        if not isinstance(tc_delta, dict):
+                            continue
+                        if "index" in tc_delta and tc_delta["index"] is not None:
+                            idx = int(tc_delta["index"])
                         else:
-                            slot["args_parts"].append(str(raw_args))
+                            tc_id = tc_delta.get("id") or ""
+                            if tc_id and tc_id != last_seen_id:
+                                last_implicit_idx += 1
+                                last_seen_id = tc_id
+                            elif last_implicit_idx < 0:
+                                last_implicit_idx = 0
+                            idx = last_implicit_idx
+                        slot = tc_acc.setdefault(idx, {"id": "", "name": "", "args_parts": []})
+                        if tc_delta.get("id"):
+                            slot["id"] = str(tc_delta["id"])
+                        fn = tc_delta.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] += str(fn["name"])
+                        if "arguments" in fn and fn["arguments"] is not None:
+                            raw_args = fn["arguments"]
+                            if isinstance(raw_args, dict):
+                                slot["args_parts"].append(json.dumps(raw_args))
+                            else:
+                                slot["args_parts"].append(str(raw_args))
 
-        return [
-            {
-                "id": slot["id"] or f"call_{idx}",
-                "name": slot["name"],
-                "arguments": _safe_json_loads("".join(slot["args_parts"])),
-            }
-            for idx, slot in sorted(tc_acc.items())
-            if slot["name"]
-        ]
+                return [
+                    {
+                        "id": slot["id"] or f"call_{idx}",
+                        "name": slot["name"],
+                        "arguments": _safe_json_loads("".join(slot["args_parts"])),
+                    }
+                    for idx, slot in sorted(tc_acc.items())
+                    if slot["name"]
+                ], usage
+
+        res = await _stream_once(body)
+        if res is None:
+            fallback_body = {k: v for k, v in body.items() if k != "stream_options"}
+            res = await _stream_once(fallback_body)
+            assert res is not None
+        return res
 
     async def _chat_ollama(
         self,
@@ -977,6 +1051,7 @@ class LLMRouter:
 
         client = self._get_client()
         tool_calls: list[dict[str, Any]] = []
+        usage: dict[str, int | None] | None = None
 
         async with client.stream("POST", url, json=body) as resp:
             if resp.status_code >= 400:
@@ -1012,6 +1087,7 @@ class LLMRouter:
                     prompt_eval_count = chunk.get("prompt_eval_count")
                     eval_count = chunk.get("eval_count")
                     done_reason = chunk.get("done_reason")
+                    usage = _normalize_usage(prompt_eval_count, eval_count)
                     prompt_tokens = _parse_positive_int(prompt_eval_count)
                     if prompt_eval_count is not None or eval_count is not None:
                         logger.info(
@@ -1035,7 +1111,7 @@ class LLMRouter:
                         )
                     break
 
-        return tool_calls
+        return tool_calls, usage
 
     async def _chat_gemini(
         self,
@@ -1172,6 +1248,7 @@ class LLMRouter:
         client = _google_genai.Client(api_key=api_key)
         tool_calls: list[dict[str, Any]] = []
         raw_parts: list[Any] = []
+        usage: dict[str, int | None] | None = None
         try:
             stream = await client.aio.models.generate_content_stream(
                 model=model_name,
@@ -1179,6 +1256,18 @@ class LLMRouter:
                 config=config,
             )
             async for chunk in stream:
+                um = getattr(chunk, "usage_metadata", None)
+                if um is not None:
+                    p_tok = getattr(um, "prompt_token_count", None)
+                    c_tok = _parse_nonneg_int(getattr(um, "candidates_token_count", None))
+                    th_tok = _parse_nonneg_int(getattr(um, "thoughts_token_count", None))
+                    comp_sum: int | None = None
+                    if c_tok is not None or th_tok is not None:
+                        comp_sum = (c_tok or 0) + (th_tok or 0)
+                    t_tok = getattr(um, "total_token_count", None)
+                    parsed_um = _normalize_usage(p_tok, comp_sum, t_tok)
+                    if parsed_um is not None:
+                        usage = parsed_um
                 for cand in getattr(chunk, "candidates", None) or []:
                     content_obj = getattr(cand, "content", None)
                     for part in getattr(content_obj, "parts", None) or []:
@@ -1209,7 +1298,7 @@ class LLMRouter:
             except Exception:
                 pass
 
-        return tool_calls, raw_parts
+        return tool_calls, raw_parts, usage
 
     async def _chat_anthropic(
         self,
@@ -1317,6 +1406,9 @@ class LLMRouter:
 
         client = self._get_client()
         tool_blocks: dict[int, dict[str, Any]] = {}
+        usage: dict[str, int | None] | None = None
+        in_tokens: int | None = None
+        out_tokens: int | None = None
 
         async with client.stream("POST", url, headers=headers, json=body) as resp:
             if resp.status_code >= 400:
@@ -1327,6 +1419,7 @@ class LLMRouter:
             if "application/json" in content_type and "event-stream" not in content_type:
                 raw_bytes = await resp.aread()
                 data = json.loads(raw_bytes.decode("utf-8"))
+                usage = _extract_anthropic_usage(data.get("usage"))
                 tool_calls: list[dict[str, Any]] = []
                 for idx, block in enumerate(data.get("content") or []):
                     if not isinstance(block, dict):
@@ -1341,7 +1434,7 @@ class LLMRouter:
                                 "arguments": block.get("input") if isinstance(block.get("input"), dict) else {},
                             }
                         )
-                return tool_calls
+                return tool_calls, usage
 
             async for line in resp.aiter_lines():
                 stripped = line.strip()
@@ -1359,7 +1452,24 @@ class LLMRouter:
                 if ev_type == "error":
                     err_obj = event.get("error") or {}
                     raise RuntimeError(f"anthropic stream error: {err_obj.get('message', err_obj)}")
-                if ev_type == "content_block_start":
+                if ev_type == "message_start":
+                    msg_usage = (event.get("message") or {}).get("usage")
+                    parsed_start = _extract_anthropic_usage(msg_usage)
+                    if parsed_start is not None:
+                        if parsed_start.get("prompt_tokens") is not None:
+                            in_tokens = parsed_start["prompt_tokens"]
+                        if parsed_start.get("completion_tokens") is not None:
+                            out_tokens = parsed_start["completion_tokens"]
+                elif ev_type == "message_delta":
+                    delta_usage = event.get("usage")
+                    if isinstance(delta_usage, dict):
+                        d_out = _parse_nonneg_int(delta_usage.get("output_tokens"))
+                        if d_out is not None:
+                            out_tokens = d_out
+                        d_in = _extract_anthropic_usage(delta_usage)
+                        if d_in is not None and d_in.get("prompt_tokens") is not None:
+                            in_tokens = d_in["prompt_tokens"]
+                elif ev_type == "content_block_start":
                     idx = int(event.get("index", 0))
                     block = event.get("content_block") or {}
                     btype = block.get("type")
@@ -1385,6 +1495,7 @@ class LLMRouter:
                 elif ev_type == "message_stop":
                     break
 
+        usage = _normalize_usage(in_tokens, out_tokens)
         return [
             {
                 "id": slot["id"],
@@ -1397,4 +1508,4 @@ class LLMRouter:
             }
             for _, slot in sorted(tool_blocks.items())
             if slot["name"]
-        ]
+        ], usage
