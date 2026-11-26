@@ -7133,5 +7133,87 @@ class TestFocusWindow(unittest.IsolatedAsyncioTestCase):
                 await daemon.stop()
 
 
+class TestProviderProfilesAndSecretReveal(unittest.IsolatedAsyncioTestCase):
+    async def test_provider_profiles_persist_and_restore_on_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg_mgr = ConfigManager(config_dir=tmp_path / "cfg")
+            cfg_mgr.update_config(
+                {
+                    "provider": {
+                        "active_provider": "ollama",
+                        "base_url": "http://192.168.1.10:11434",
+                        "model": "qwen2.5:14b",
+                        "context_size": 32768,
+                        "focus_window": 12,
+                        "max_tool_rounds": 40,
+                        "supports_tools_override": True,
+                    }
+                }
+            )
+
+            # Switch to gemini: starts with gemini defaults, preserves ollama profile
+            cfg_gemini = cfg_mgr.update_config({"provider": {"active_provider": "gemini"}})
+            self.assertEqual(cfg_gemini.provider.active_provider, "gemini")
+            self.assertEqual(cfg_gemini.provider.base_url, "")
+            self.assertEqual(cfg_gemini.provider.model, "")
+            self.assertIsNone(cfg_gemini.provider.context_size)
+
+            cfg_mgr.update_config(
+                {
+                    "provider": {
+                        "model": "gemini-2.5-flash",
+                        "context_size": 65536,
+                        "focus_window": 6,
+                    }
+                }
+            )
+
+            # Switch back to ollama: all ollama settings must be restored
+            cfg_ollama = cfg_mgr.update_config({"provider": {"active_provider": "ollama"}})
+            self.assertEqual(cfg_ollama.provider.active_provider, "ollama")
+            self.assertEqual(cfg_ollama.provider.base_url, "http://192.168.1.10:11434")
+            self.assertEqual(cfg_ollama.provider.model, "qwen2.5:14b")
+            self.assertEqual(cfg_ollama.provider.context_size, 32768)
+            self.assertEqual(cfg_ollama.provider.focus_window, 12)
+            self.assertEqual(cfg_ollama.provider.max_tool_rounds, 40)
+            self.assertTrue(cfg_ollama.provider.supports_tools_override)
+
+            # Switch back to gemini: all gemini settings must be restored
+            cfg_gemini_again = cfg_mgr.update_config({"provider": {"active_provider": "gemini"}})
+            self.assertEqual(cfg_gemini_again.provider.model, "gemini-2.5-flash")
+            self.assertEqual(cfg_gemini_again.provider.context_size, 65536)
+            self.assertEqual(cfg_gemini_again.provider.focus_window, 6)
+
+    async def test_get_secret_route_returns_known_secret_and_rejects_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            daemon = ByteyDaemon(
+                config_dir=tmp_path / "cfg",
+                data_dir=tmp_path / "data",
+                enable_voice_capture=False,
+            )
+            daemon.config_manager.update_config(
+                {"voice_out": {"tts_provider": "disabled", "tts_muted": True}}
+            )
+            daemon.ipc.port = 0
+            await daemon.start()
+            try:
+                base_url = f"http://127.0.0.1:{daemon.ipc.port}"
+                with patch.dict(os.environ, {"GEMINI_API_KEY": "test-secret-xyz"}):
+                    async with httpx.AsyncClient(base_url=base_url) as client:
+                        get_res = await client.get("/api/v1/secrets/GEMINI_API_KEY")
+                        self.assertEqual(get_res.status_code, 200)
+                        body = get_res.json()
+                        self.assertEqual(body["key"], "GEMINI_API_KEY")
+                        self.assertEqual(body["value"], "test-secret-xyz")
+                        self.assertTrue(body["configured"])
+
+                        bad_res = await client.get("/api/v1/secrets/UNKNOWN_SECRET")
+                        self.assertEqual(bad_res.status_code, 400)
+            finally:
+                await daemon.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

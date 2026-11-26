@@ -16,6 +16,7 @@ import {
     sampleTextForLanguage,
 } from './constants.js';
 import {
+    bindSecretReveal,
     comboText,
     makeComboRow,
     makeFloatSpinRow,
@@ -42,6 +43,7 @@ export function buildVoicePage(ctx) {
         show_apply_button: true,
     });
     const {row: sttApiKeyRow, badge: sttApiKeyBadge} = makeSecretRow('API Key');
+    bindSecretReveal(sttApiKeyRow, () => 'STT_API_KEY', ctx);
     sttGroup.add(micMuteRow);
     sttGroup.add(sttBackendRow);
     sttGroup.add(sttApiUrlRow);
@@ -60,6 +62,8 @@ export function buildVoicePage(ctx) {
     });
     const {row: kokoroApiKeyRow, badge: kokoroApiKeyBadge} = makeSecretRow('Kokoro API Key');
     const {row: elevenlabsApiKeyRow, badge: elevenlabsApiKeyBadge} = makeSecretRow('ElevenLabs API Key');
+    bindSecretReveal(kokoroApiKeyRow, () => 'KOKORO_API_KEY', ctx);
+    bindSecretReveal(elevenlabsApiKeyRow, () => 'ELEVENLABS_API_KEY', ctx);
     const elevenlabsVoiceRow = makeSearchableComboRow({
         title: 'ElevenLabs Voice',
         subtitle: 'Select a voice or refresh from your ElevenLabs account',

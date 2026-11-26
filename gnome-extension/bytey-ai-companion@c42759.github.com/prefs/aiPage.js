@@ -15,6 +15,7 @@ import {
 } from './constants.js';
 import {buildMcpSection} from './mcpSection.js';
 import {
+    bindSecretReveal,
     comboText,
     makeComboRow,
     makeSearchableComboRow,
@@ -314,20 +315,58 @@ export function buildAiPage(ctx) {
         }
     };
 
+    const applyProviderFields = (cfg, {updateProviderCombo = true} = {}) => {
+        const provider = cfg.provider ?? {};
+        const llm = cfg.llm ?? {};
+        if (updateProviderCombo)
+            setComboText(providerRow, provider.active_provider ?? llm.provider ?? 'ollama');
+        currentConfiguredModel = String(provider.model ?? llm.model ?? '').trim();
+        baseUrlRow.set_text(String(provider.base_url ?? llm.base_url ?? ''));
+        detectedToolsSupport = Boolean(llm.supports_tools ?? false);
+        forceToolsRow.set_active(Boolean(
+            llm.force_enable_tools ?? (provider.supports_tools_override === true)
+        ));
+        currentContextSize = normalizePositiveInt(provider.context_size ?? llm.context_size);
+        detectedMaxContext = normalizePositiveInt(llm.max_context_size);
+        const rawFocusWindow = Number(provider.focus_window ?? llm.focus_window ?? 0);
+        focusWindowRow.set_value(
+            Number.isFinite(rawFocusWindow)
+                ? Math.max(0, Math.min(500, Math.round(rawFocusWindow)))
+                : 0
+        );
+        const rawMaxRounds = Number(provider.max_tool_rounds ?? llm.max_tool_rounds ?? 25);
+        maxToolRoundsRow.set_value(
+            Number.isFinite(rawMaxRounds)
+                ? Math.max(1, Math.min(100, Math.round(rawMaxRounds)))
+                : 25
+        );
+    };
+
+    bindSecretReveal(aiApiKeyRow, () => PROVIDER_SECRET_MAP[comboText(providerRow)] ?? '', ctx);
+
     providerRow.connect('notify::selected', () => ctx.onUserChange(async () => {
         const prov = comboText(providerRow);
-        const defaultUrl = PROVIDER_DEFAULT_URLS[prov] ?? '';
         modelToolMap.clear();
         modelContextMap.clear();
         detectedMaxContext = null;
-        ctx.withLoading(() => {
-            baseUrlRow.set_text(defaultUrl);
-            syncProviderVisibility();
-        });
+        const savedCfg = await ctx.patchConfig({provider: {active_provider: prov}}, 'Saved AI provider');
+        if (ctx.cancellable.is_cancelled() || comboText(providerRow) !== prov)
+            return;
+        if (savedCfg) {
+            ctx.withLoading(() => {
+                applyProviderFields(savedCfg, {updateProviderCombo: false});
+                syncProviderVisibility();
+            });
+        } else {
+            const fallbackUrl = PROVIDER_DEFAULT_URLS[prov] ?? '';
+            ctx.withLoading(() => {
+                baseUrlRow.set_text(fallbackUrl);
+                syncProviderVisibility();
+            });
+        }
+        updateToolsSensitivity();
         refreshContextSizeRow();
-        await ctx.patchConfig({provider: {active_provider: prov, base_url: defaultUrl}}, 'Saved AI provider');
-        if (!ctx.cancellable.is_cancelled() && comboText(providerRow) === prov)
-            await fetchModels(prov, defaultUrl, {autoSelectIfMissing: true});
+        await fetchModels(prov, baseUrlRow.get_text().trim(), {autoSelectIfMissing: true});
     }));
 
     baseUrlRow.connect('apply', () => ctx.onUserChange(async () => {
@@ -414,30 +453,7 @@ export function buildAiPage(ctx) {
 
     const applyConfig = (cfg, nextSecretsConfigured) => {
         secretsConfigured = nextSecretsConfigured;
-        const provider = cfg.provider ?? {};
-        const llm = cfg.llm ?? {};
-
-        setComboText(providerRow, provider.active_provider ?? llm.provider ?? 'ollama');
-        currentConfiguredModel = String(provider.model ?? llm.model ?? '').trim();
-        baseUrlRow.set_text(String(provider.base_url ?? llm.base_url ?? ''));
-        detectedToolsSupport = Boolean(llm.supports_tools ?? false);
-        forceToolsRow.set_active(Boolean(
-            llm.force_enable_tools ?? (provider.supports_tools_override === true)
-        ));
-        currentContextSize = normalizePositiveInt(provider.context_size ?? llm.context_size);
-        detectedMaxContext = normalizePositiveInt(llm.max_context_size);
-        const rawFocusWindow = Number(provider.focus_window ?? llm.focus_window ?? 0);
-        focusWindowRow.set_value(
-            Number.isFinite(rawFocusWindow)
-                ? Math.max(0, Math.min(500, Math.round(rawFocusWindow)))
-                : 0
-        );
-        const rawMaxRounds = Number(provider.max_tool_rounds ?? llm.max_tool_rounds ?? 25);
-        maxToolRoundsRow.set_value(
-            Number.isFinite(rawMaxRounds)
-                ? Math.max(1, Math.min(100, Math.round(rawMaxRounds)))
-                : 25
-        );
+        applyProviderFields(cfg);
         mcp.setConfig(cfg.mcpServers ?? cfg.mcp_servers ?? {});
     };
 
@@ -478,5 +494,30 @@ export function buildAiPage(ctx) {
         refreshContextSizeRow();
     };
 
-    return {page, applyConfig, syncVisibility, syncInitialVisibility, onPatchLlmMetadata};
+    const syncFromRemoteConfig = (cfg, nextSecretsConfigured) => {
+        const prevProvider = comboText(providerRow);
+        const prevUrl = baseUrlRow.get_text().trim();
+        secretsConfigured = nextSecretsConfigured;
+        ctx.withLoading(() => {
+            applyProviderFields(cfg);
+            syncProviderVisibility();
+            if (currentConfiguredModel) {
+                const idx = availableModels.findIndex(m => m.id === currentConfiguredModel);
+                if (idx >= 0)
+                    modelRow.set_selected(idx);
+            }
+        });
+        updateToolsSensitivity();
+        refreshContextSizeRow();
+        const nextProvider = comboText(providerRow);
+        const nextUrl = baseUrlRow.get_text().trim();
+        if (nextProvider !== prevProvider || nextUrl !== prevUrl) {
+            fetchModels(nextProvider, nextUrl, {
+                autoSelectIfMissing: false,
+                showResultToast: false,
+            }).catch(() => {});
+        }
+    };
+
+    return {page, applyConfig, syncVisibility, syncInitialVisibility, syncFromRemoteConfig, onPatchLlmMetadata};
 }

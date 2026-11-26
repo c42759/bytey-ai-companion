@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-26
+
+### Added
+
+- Per-provider AI configuration persistence (`ProviderProfile` and `ProviderConfig.profiles` in `core-daemon/bytey_ai_companion/config.py`) so switching providers and returning restores saved `model`, `base_url`, `context_size`, `focus_window`, `max_tool_rounds`, `temperature`, and `supports_tools_override` across `gnome-extension` (`prefs/aiPage.js`) and `settings-ui` (`window.py`) (`1c9f0f2`).
+- On-demand API key reveal via `GET /api/v1/secrets/{key}` (`core-daemon/bytey_ai_companion/main.py`) when clicking the eye icon on `Adw.PasswordEntryRow` in `gnome-extension` (`prefs/widgets.js`, `prefs.js`) and `settings-ui` (`api_client.py`, `window.py`) (`1c9f0f2`).
+
+### Fixed
+
+- Bidirectional real-time model synchronization between `gnome-extension` `prefs`, `settings-ui`, and the Bytey chat drawer over `/ws` `config_updated` events, and hiding stale open `_modelMenuBox` when the active provider or model changes (`52f1fda`).
+
 ## [1.6.1] - 2026-11-26
 
 ### Changed
@@ -140,7 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `PLAN.md` (`5f16fb1`).
 - Removed floating mode option from right-click context menu (`f253fd7`).
 
-[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/c42759/bytey-ai-companion/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/c42759/bytey-ai-companion/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/c42759/bytey-ai-companion/compare/v1.4.0...v1.5.0

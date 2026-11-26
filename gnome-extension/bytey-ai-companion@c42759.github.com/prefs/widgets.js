@@ -3,7 +3,7 @@
 import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 
-import {SECRET_MASK_PLACEHOLDER} from './constants.js';
+import {SECRET_MASK_PLACEHOLDER, isMaskedPlaceholder} from './constants.js';
 
 export function makeSearchableComboRow(props) {
     return new Adw.ComboRow({
@@ -83,6 +83,7 @@ export function makeSecretRow(title) {
 }
 
 export function setSecretRowState(row, badge, configured) {
+    row.get_delegate().set_visibility(false);
     if (configured) {
         badge.set_label('Configured');
         badge.remove_css_class('dim-label');
@@ -94,6 +95,33 @@ export function setSecretRowState(row, badge, configured) {
         badge.add_css_class('dim-label');
         row.set_text('');
     }
+}
+
+export function bindSecretReveal(row, getSecretKey, ctx) {
+    const delegate = row.get_delegate();
+    let revealSeq = 0;
+    delegate.connect('notify::visibility', () => {
+        if (!delegate.get_visibility())
+            return;
+        const secretKey = getSecretKey();
+        if (!secretKey || !isMaskedPlaceholder(row.get_text()))
+            return;
+        const seq = ++revealSeq;
+        ctx.getSecret(secretKey).then(result => {
+            if (ctx.cancellable.is_cancelled() || seq !== revealSeq || !delegate.get_visibility())
+                return;
+            if (!result.ok) {
+                delegate.set_visibility(false);
+                ctx.showToast(
+                    result.offline
+                        ? 'Daemon offline — unable to reveal API key'
+                        : `Failed to load ${secretKey}`
+                );
+                return;
+            }
+            ctx.withLoading(() => row.set_text(result.value || ''));
+        }).catch(() => {});
+    });
 }
 
 export function readTextBuffer(view) {

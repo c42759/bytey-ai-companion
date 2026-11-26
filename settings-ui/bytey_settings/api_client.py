@@ -418,6 +418,31 @@ class DaemonClient:
             status_code=resp.status_code,
         )
 
+    def get_secret(self, key: str) -> ApiResult:
+        """Fetch a known secret value from the daemon for on-demand UI reveal."""
+        cleaned = (key or "").strip()
+        if not cleaned:
+            return ApiResult(ok=False, error="No secret key provided")
+        resp, err, offline = self._request("GET", f"/api/v1/secrets/{quote(cleaned, safe='')}")
+        if resp is None:
+            return ApiResult(
+                ok=False,
+                offline=offline,
+                error="Daemon offline: unable to reveal API key" if offline else err,
+            )
+        if resp.is_success:
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+            return ApiResult(ok=True, offline=False, data=data, status_code=resp.status_code)
+        return ApiResult(
+            ok=False,
+            offline=False,
+            error=_extract_error(resp),
+            status_code=resp.status_code,
+        )
+
     def list_models(self, provider: str, base_url: str = "") -> ApiResult:
         """Fetch available models and tool capabilities for *provider*."""
         params = {"base_url": base_url} if base_url else {}

@@ -3035,6 +3035,7 @@ class ByteyDaemon:
         self.ipc.register_route("PATCH", "/api/v1/config", self._route_patch_config)
         self.ipc.register_route("PUT", "/api/v1/config", self._route_put_config)
         self.ipc.register_route("PUT", "/api/v1/secrets", self._route_put_secrets)
+        self.ipc.register_route("GET", "/api/v1/secrets/{key}", self._route_get_secret)
 
         self.ipc.register_route("GET", "/api/v1/providers/{provider}/models", self._route_list_models)
 
@@ -3195,6 +3196,18 @@ class ByteyDaemon:
             "ok": True,
             "updated": updated_keys,
             "secrets_configured": self.secret_store.list_configured_secrets(),
+        }
+
+    async def _route_get_secret(self, req: IPCRequest) -> dict[str, Any]:
+        """Return a known secret value for on-demand UI reveal."""
+        key = req.path_params["key"].strip()
+        if key not in SecretStore.KNOWN_SECRETS:
+            raise ValueError(f"Unknown secret key: {key!r}")
+        value = self.secret_store.get_secret(key) or ""
+        return {
+            "key": key,
+            "value": value,
+            "configured": bool(value),
         }
 
     async def _route_list_models(self, req: IPCRequest) -> dict[str, Any]:

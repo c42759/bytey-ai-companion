@@ -1224,9 +1224,14 @@ export class TranscriptDrawer {
         if (Number.isInteger(monIdx))
             this._monitorIndex = monIdx;
 
-        this._activeProvider = String(provider || 'ollama');
-        this._activeModel = String(model || '');
+        const nextProvider = String(provider || 'ollama');
+        const nextModel = String(model || '');
+        const selectionChanged = nextProvider !== this._activeProvider || nextModel !== this._activeModel;
+        this._activeProvider = nextProvider;
+        this._activeModel = nextModel;
         this._providerLabel.text = this._activeModel || this._activeProvider;
+        if (selectionChanged && this._modelMenuBox?.visible)
+            this._hideModelMenu();
 
         const cfgCtx = Number(
             config.provider?.context_size ??

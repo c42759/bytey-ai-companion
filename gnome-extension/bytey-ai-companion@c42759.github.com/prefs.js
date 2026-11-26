@@ -24,7 +24,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
         window.set_search_enabled(true);
 
         const settings = this.getSettings();
-        const {cancellable, resolveBaseUrl, httpJson, abortAll} = createPrefsHttpClient(settings);
+        const {cancellable, resolveBaseUrl, httpJson, connectConfigSocket, abortAll} = createPrefsHttpClient(settings);
         let loading = false;
         let secretsConfigured = {};
 
@@ -117,18 +117,33 @@ export default class ByteyPreferences extends ExtensionPreferences {
 
         const patchConfig = async (patch, toastMsg = 'Saved') => {
             if (cancellable.is_cancelled() || loading)
-                return;
+                return null;
             const resp = await httpJson('PATCH', '/api/v1/config', patch);
             if (cancellable.is_cancelled())
-                return;
+                return null;
             if (resp.ok) {
                 setOfflineState(false);
                 ai.onPatchLlmMetadata(patch, resp.data?.llm);
                 showToast(toastMsg);
-            } else {
-                setOfflineState(true);
-                showToast('Daemon offline — changes not saved');
+                return resp.data && typeof resp.data === 'object' ? resp.data : null;
             }
+            setOfflineState(true);
+            showToast('Daemon offline — changes not saved');
+            return null;
+        };
+
+        const getSecret = async secretKey => {
+            if (cancellable.is_cancelled())
+                return {ok: false, offline: false, value: ''};
+            const resp = await httpJson('GET', `/api/v1/secrets/${encodeURIComponent(secretKey)}`);
+            if (cancellable.is_cancelled())
+                return {ok: false, offline: false, value: ''};
+            if (!resp.ok || !resp.data || typeof resp.data !== 'object') {
+                setOfflineState(true);
+                return {ok: false, offline: true, value: ''};
+            }
+            setOfflineState(false);
+            return {ok: true, offline: false, value: String(resp.data.value ?? '')};
         };
 
         const saveSecret = async (secretKey, row, badge) => {
@@ -179,6 +194,7 @@ export default class ByteyPreferences extends ExtensionPreferences {
             checkHealth,
             patchConfig,
             saveSecret,
+            getSecret,
         };
 
         general = buildGeneralPage(ctx);
@@ -214,5 +230,14 @@ export default class ByteyPreferences extends ExtensionPreferences {
         voice.syncInitialVisibility();
         ai.syncInitialVisibility();
         loadConfig();
+        connectConfigSocket(cfg => {
+            if (cancellable.is_cancelled())
+                return;
+            const nextSecrets = cfg.secrets_configured && typeof cfg.secrets_configured === 'object'
+                ? {...cfg.secrets_configured}
+                : secretsConfigured;
+            secretsConfigured = nextSecrets;
+            ai.syncFromRemoteConfig(cfg, secretsConfigured);
+        });
     }
 }

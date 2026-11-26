@@ -445,6 +445,7 @@ def _set_secret_row_state(
     row: Adw.PasswordEntryRow, badge: Gtk.Label, configured: bool
 ) -> None:
     _set_secret_badge(badge, configured)
+    row.get_delegate().set_visibility(False)
     row.set_text(SECRET_MASK_PLACEHOLDER if configured else "")
 
 
@@ -835,7 +836,10 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         self._build_import_export_page()
 
         self.connect("close-request", self._on_close_request)
+        self._ws_stop_event = threading.Event()
+        self._ws_conn: Any = None
         self.reload_all()
+        self._start_ws_listener()
 
     def add(self, page: Adw.PreferencesPage) -> None:
         """Expand the page's internal Adw.Clamp before adding it to the window."""
@@ -843,11 +847,76 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         super().add(page)
 
     def _on_close_request(self, *_: object) -> bool:
+        self._stop_ws_listener()
         for source_id in list(self._debounce_timers.values()):
             GLib.source_remove(source_id)
         self._debounce_timers.clear()
         self._flush_pending_entry_fields()
         return False
+
+    def _start_ws_listener(self) -> None:
+        try:
+            from websockets.sync.client import connect as ws_connect
+        except ImportError:
+            return
+
+        def worker() -> None:
+            ws_url = self.client.base_url.replace("http://", "ws://").replace("https://", "wss://")
+            ws_url = f"{ws_url.rstrip('/')}/ws"
+            while not self._ws_stop_event.is_set():
+                try:
+                    with ws_connect(ws_url, open_timeout=5, close_timeout=2) as conn:
+                        self._ws_conn = conn
+                        while not self._ws_stop_event.is_set():
+                            raw = conn.recv(timeout=1.0)
+                            if not isinstance(raw, str):
+                                continue
+                            try:
+                                event = json.loads(raw)
+                            except ValueError:
+                                continue
+                            if (
+                                isinstance(event, dict)
+                                and event.get("type") == "config_updated"
+                                and isinstance(event.get("config"), dict)
+                            ):
+                                GLib.idle_add(self._on_remote_config_updated, event["config"])
+                except TimeoutError:
+                    continue
+                except Exception:
+                    self._ws_conn = None
+                    if self._ws_stop_event.wait(3.0):
+                        break
+                finally:
+                    self._ws_conn = None
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stop_ws_listener(self) -> None:
+        self._ws_stop_event.set()
+        conn = self._ws_conn
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _on_remote_config_updated(self, cfg: dict[str, Any]) -> bool:
+        if self._ws_stop_event.is_set():
+            return GLib.SOURCE_REMOVE
+        secrets_meta = cfg.get("secrets_configured")
+        if isinstance(secrets_meta, dict):
+            self._secrets_configured = {str(k): bool(v) for k, v in secrets_meta.items()}
+        prov_data = cfg.get("provider") if isinstance(cfg.get("provider"), dict) else {}
+        llm_data = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+        provider = str(prov_data.get("active_provider") or llm_data.get("provider") or "ollama")
+        self._loading = True
+        try:
+            _set_combo_text(self.provider_row, provider)
+        finally:
+            self._loading = False
+        self._apply_restored_provider_payload(cfg, provider)
+        return GLib.SOURCE_REMOVE
 
     def _flush_pending_entry_fields(self) -> None:
         if self._loading:
@@ -1005,6 +1074,39 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             suffix = " (offline)" if res.offline else ""
             self._toast(f"{toast_msg}{suffix}")
 
+    def _bind_secret_reveal(
+        self, row: Adw.PasswordEntryRow, get_secret_key: Callable[[], str]
+    ) -> None:
+        delegate = row.get_delegate()
+
+        def on_visibility_changed(*_: object) -> None:
+            if not delegate.get_visibility():
+                return
+            secret_key = get_secret_key()
+            if not secret_key or not _is_masked_placeholder(row.get_text()):
+                return
+
+            def on_done(res: ApiResult) -> None:
+                self._set_offline(res.offline)
+                if not delegate.get_visibility():
+                    return
+                if not res.ok:
+                    delegate.set_visibility(False)
+                    self._toast(
+                        "Daemon offline — unable to reveal API key"
+                        if res.offline
+                        else f"Failed to load {secret_key}: {res.error}"
+                    )
+                    return
+                val = str((res.data or {}).get("value") or "")
+                self._loading = True
+                row.set_text(val)
+                self._loading = False
+
+            self._run_async(lambda: self.client.get_secret(secret_key), on_done)
+
+        delegate.connect("notify::visibility", on_visibility_changed)
+
     def _save_secret(self, secret_name: str, entry: Adw.PasswordEntryRow, badge: Gtk.Label) -> None:
         value = entry.get_text().strip()
         if not value or _is_masked_placeholder(value):
@@ -1139,6 +1241,10 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
 
         self.llm_api_key_row, self.llm_api_key_badge = _make_secret_row("API Key")
         self.llm_api_key_row.connect("apply", self._on_apply_llm_api_key)
+        self._bind_secret_reveal(
+            self.llm_api_key_row,
+            lambda: PROVIDER_SECRET_MAP.get(_combo_selected_text(self.provider_row), ""),
+        )
         ai_group.add(self.llm_api_key_row)
 
         self.model_combo_row = _make_string_combo(
@@ -1259,16 +1365,55 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
         if self._loading:
             return
         provider = _combo_selected_text(self.provider_row)
-        default_url = PROVIDER_DEFAULT_URLS.get(provider, "")
         self._model_tool_map.clear()
         self._model_context_map.clear()
         self._config.setdefault("llm", {})["max_context_size"] = None
         self._loading = True
-        self.llm_base_url_row.set_text(default_url)
         self._refresh_llm_secret_indicator()
         self._loading = False
+
+        def on_done(res: ApiResult) -> None:
+            self._set_offline(res.offline)
+            if not res.ok:
+                self._toast(f"Save failed: {res.error}")
+                return
+            if isinstance(res.data, dict) and _combo_selected_text(self.provider_row) == provider:
+                self._apply_restored_provider_payload(res.data, provider)
+            self._toast(f"Provider: {provider}")
+
+        patch = self._build_patch({"llm_provider": provider})
+        self._run_async(lambda: self.client.patch_config(patch), on_done)
+
+    def _apply_restored_provider_payload(self, payload: dict[str, Any], provider: str) -> None:
+        prov_data = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
+        llm_data = payload.get("llm") if isinstance(payload.get("llm"), dict) else {}
+        self._config["provider"] = dict(prov_data)
+        self._config["llm"] = dict(llm_data)
+        self._loading = True
+        try:
+            self.llm_base_url_row.set_text(
+                str(prov_data.get("base_url") or llm_data.get("base_url") or "")
+            )
+            model_name = str(prov_data.get("model") or llm_data.get("model") or "").strip()
+            self.model_entry_row.set_text(model_name)
+            if model_name:
+                self.model_combo_row.set_model(Gtk.StringList.new([model_name]))
+                self.model_combo_row.set_selected(0)
+            else:
+                self.model_combo_row.set_model(Gtk.StringList.new([""]))
+                self.model_combo_row.set_selected(0)
+            self.force_tools_row.set_active(
+                bool(llm_data.get("force_enable_tools") or prov_data.get("supports_tools_override") is True)
+            )
+            raw_focus = prov_data.get("focus_window", llm_data.get("focus_window", 0))
+            self.focus_window_row.set_value(float(max(0, min(500, int(raw_focus or 0)))))
+            raw_rounds = prov_data.get("max_tool_rounds", llm_data.get("max_tool_rounds", 25))
+            self.max_tool_rounds_row.set_value(float(max(1, min(100, int(raw_rounds or 25)))))
+            self._refresh_llm_secret_indicator()
+        finally:
+            self._loading = False
         self._refresh_context_size_row()
-        self._patch_fields({"llm_provider": provider, "llm_base_url": default_url}, f"Provider: {provider}")
+        self._update_tools_sensitivity()
 
     def _refresh_llm_secret_indicator(self) -> None:
         provider = _combo_selected_text(self.provider_row)
@@ -2735,6 +2880,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             "apply",
             lambda *_: self._save_secret("STT_API_KEY", self.stt_api_key_row, self.stt_api_key_badge),
         )
+        self._bind_secret_reveal(self.stt_api_key_row, lambda: "STT_API_KEY")
         stt_group.add(self.stt_api_key_row)
 
         page.add(stt_group)
@@ -2903,6 +3049,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
                 "KOKORO_API_KEY", self.kokoro_api_key_row, self.kokoro_api_key_badge
             ),
         )
+        self._bind_secret_reveal(self.kokoro_api_key_row, lambda: "KOKORO_API_KEY")
         kokoro_group.add(self.kokoro_api_key_row)
 
         self.kokoro_voice_combo = _make_string_combo("Kokoro Voices", "", [""])
@@ -2945,6 +3092,7 @@ class ByteyPreferencesWindow(Adw.PreferencesWindow):
             "apply",
             lambda *_: self._save_secret("ELEVENLABS_API_KEY", self.el_api_key_row, self.el_api_key_badge),
         )
+        self._bind_secret_reveal(self.el_api_key_row, lambda: "ELEVENLABS_API_KEY")
         el_group.add(self.el_api_key_row)
 
         self.el_voice_combo = _make_string_combo("ElevenLabs Voices", "", [""])

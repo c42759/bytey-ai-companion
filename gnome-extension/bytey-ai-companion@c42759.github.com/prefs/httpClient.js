@@ -52,11 +52,80 @@ export function createPrefsHttpClient(settings) {
         });
     });
 
+    let wsConn = null;
+    let wsReconnectId = 0;
+
+    const clearWsReconnect = () => {
+        if (wsReconnectId) {
+            GLib.Source.remove(wsReconnectId);
+            wsReconnectId = 0;
+        }
+    };
+
+    const connectConfigSocket = onConfigUpdated => {
+        clearWsReconnect();
+        if (cancellable.is_cancelled())
+            return;
+        const wsUrl = `${resolveBaseUrl().replace(/^http/, 'ws')}/ws`;
+        const msg = Soup.Message.new('GET', wsUrl);
+        if (!msg)
+            return;
+        httpSession.websocket_connect_async(msg, null, null, GLib.PRIORITY_DEFAULT, cancellable, (session, res) => {
+            if (cancellable.is_cancelled())
+                return;
+            let conn = null;
+            try {
+                conn = session.websocket_connect_finish(res);
+            } catch (_err) {
+                if (!cancellable.is_cancelled()) {
+                    clearWsReconnect();
+                    wsReconnectId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
+                        wsReconnectId = 0;
+                        connectConfigSocket(onConfigUpdated);
+                        return GLib.SOURCE_REMOVE;
+                    });
+                }
+                return;
+            }
+            wsConn = conn;
+            conn.connect('message', (_c, type, bytes) => {
+                if (type !== Soup.WebsocketDataType.TEXT || cancellable.is_cancelled())
+                    return;
+                const text = new TextDecoder().decode(bytes.toArray());
+                let event = null;
+                try {
+                    event = JSON.parse(text);
+                } catch (_err) {
+                    return;
+                }
+                if (event && event.type === 'config_updated' && event.config && typeof event.config === 'object')
+                    onConfigUpdated(event.config);
+            });
+            conn.connect('closed', () => {
+                if (wsConn === conn)
+                    wsConn = null;
+                if (!cancellable.is_cancelled()) {
+                    clearWsReconnect();
+                    wsReconnectId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
+                        wsReconnectId = 0;
+                        connectConfigSocket(onConfigUpdated);
+                        return GLib.SOURCE_REMOVE;
+                    });
+                }
+            });
+        });
+    };
+
     const abortAll = () => {
+        clearWsReconnect();
         cancellable.cancel();
+        if (wsConn) {
+            wsConn.close(Soup.WebsocketCloseCode.NORMAL, null);
+            wsConn = null;
+        }
         httpSession.abort();
         longHttpSession.abort();
     };
 
-    return {cancellable, resolveBaseUrl, httpJson, abortAll};
+    return {cancellable, resolveBaseUrl, httpJson, connectConfigSocket, abortAll};
 }
