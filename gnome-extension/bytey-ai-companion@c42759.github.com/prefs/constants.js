@@ -2,6 +2,8 @@
 
 import Gdk from 'gi://Gdk';
 
+import {parseHexColor} from '../colorUtils.js';
+
 export const DEFAULT_DAEMON_URL = 'http://127.0.0.1:8765';
 export const DEFAULT_EYE_COLOR = '#F7FAFF';
 export const DEFAULT_BG_COLOR = '#0A0A0C';
@@ -220,32 +222,9 @@ export function normalizePiperVoiceEntry(entry) {
     };
 }
 
-export function parseHexChannels(hexStr) {
-    if (typeof hexStr !== 'string')
-        return null;
-    const cleaned = hexStr.trim();
-    if (!cleaned.startsWith('#'))
-        return null;
-    let raw = cleaned.slice(1);
-    if (!/^[0-9a-fA-F]+$/.test(raw))
-        return null;
-    if (raw.length === 3)
-        raw = `${raw[0]}${raw[0]}${raw[1]}${raw[1]}${raw[2]}${raw[2]}FF`;
-    else if (raw.length === 6)
-        raw = `${raw}FF`;
-    else if (raw.length !== 8)
-        return null;
-    return [
-        parseInt(raw.slice(0, 2), 16) / 255.0,
-        parseInt(raw.slice(2, 4), 16) / 255.0,
-        parseInt(raw.slice(4, 6), 16) / 255.0,
-        parseInt(raw.slice(6, 8), 16) / 255.0,
-    ];
-}
-
 export function hexToRgba(hexStr, fallback = '#FFFFFFFF') {
-    const channels = parseHexChannels(hexStr) ?? parseHexChannels(fallback) ?? [1.0, 1.0, 1.0, 1.0];
-    const [red, green, blue, alpha] = channels;
+    const fb = parseHexColor(fallback, [1.0, 1.0, 1.0, 1.0]);
+    const [red, green, blue, alpha] = parseHexColor(hexStr, fb);
     return new Gdk.RGBA({red, green, blue, alpha});
 }
 

@@ -196,21 +196,23 @@ export function buildVisualsPage(ctx) {
     previewAnimBtn.connect('clicked', async () => {
         const state = comboText(testStateRow) || 'IDLE';
         const emotion = comboText(testEmotionRow) || 'neutral';
-        try {
-            await ctx.httpJson('POST', '/api/v1/visuals/preview', {state, emotion});
+        const resp = await ctx.httpJson('POST', '/api/v1/visuals/preview', {state, emotion});
+        if (ctx.cancellable.is_cancelled())
+            return;
+        if (resp.ok)
             ctx.showToast(`Previewing ${state} (${emotion})`);
-        } catch (err) {
-            ctx.showToast(`Preview failed: ${err.message}`);
-        }
+        else
+            ctx.showToast(`Preview failed: ${resp.error || `HTTP ${resp.status || 'offline'}`}`);
     });
 
     resetAnimBtn.connect('clicked', async () => {
-        try {
-            await ctx.httpJson('POST', '/api/v1/visuals/preview', {reset: true});
+        const resp = await ctx.httpJson('POST', '/api/v1/visuals/preview', {reset: true});
+        if (ctx.cancellable.is_cancelled())
+            return;
+        if (resp.ok)
             ctx.showToast('Reset animation to idle');
-        } catch (err) {
-            ctx.showToast(`Reset failed: ${err.message}`);
-        }
+        else
+            ctx.showToast(`Reset failed: ${resp.error || `HTTP ${resp.status || 'offline'}`}`);
     });
 
     posModeRow.connect('notify::selected', () => ctx.onUserChange(() => {

@@ -548,11 +548,7 @@ export default class ByteyExtension extends Extension {
 
     async _handleExit() {
         this._beginShutdown();
-        try {
-            await this._daemon?.exitSystem();
-        } catch (_e) {
-            // Daemon may terminate immediately after accepting exit.
-        }
+        await this._daemon?.exitSystem();
         this._daemon?.closeWebSocket();
     }
 

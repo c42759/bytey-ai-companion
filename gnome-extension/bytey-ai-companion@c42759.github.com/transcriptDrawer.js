@@ -91,7 +91,6 @@ export class TranscriptDrawer {
         this._skillsEnabled = true;
         this._skillMatches = [];
         this._skillSuggestIdx = 0;
-        this._pickCancellable = null;
         this._activeSessionId = null;
         this._pendingDeleteSessionId = null;
         this._pendingDeleteMessageId = null;
@@ -981,7 +980,6 @@ export class TranscriptDrawer {
     _hideSkillSuggestions() {
         this._skillMatches = [];
         this._skillSuggestIdx = 0;
-        this._pickCancellable = null;
         this._skillSuggestList?.destroy_all_children();
         this._skillSuggestBox?.hide();
     }
@@ -1698,12 +1696,6 @@ export class TranscriptDrawer {
         if (!this._container || !this._sessionsList)
             return;
 
-        if (this._copyTimers) {
-            for (const tid of this._copyTimers)
-                GLib.Source.remove(tid);
-            this._copyTimers.clear();
-        }
-
         this._sessionsList.destroy_all_children();
 
         if (this._sessions.length === 0) {
@@ -2378,13 +2370,7 @@ export class TranscriptDrawer {
             if (!hasPart)
                 msgRecord.msg.parts.push({type: 'tool_call', call_id: tool.id});
 
-            const lastSeg = msgRecord.segments[msgRecord.segments.length - 1];
-            let targetGroup = lastSeg && lastSeg.type === 'tool_group' ? lastSeg.group : null;
-            if (!targetGroup) {
-                targetGroup = this._createToolGroup();
-                msgRecord.contentBox.add_child(targetGroup.container);
-                msgRecord.segments.push({type: 'tool_group', group: targetGroup});
-            }
+            const targetGroup = this._ensureToolGroup(msgRecord);
             this._appendToolWidget(targetGroup.listBox, tool, targetGroup);
             this._scheduleScrollToBottom();
         }
@@ -2468,16 +2454,7 @@ export class TranscriptDrawer {
         this.updatePosition(islandX, islandY, islandW, islandH, monitorIndex);
 
         this._scheduleScrollToBottom();
-        if (this._focusIdleId) {
-            GLib.Source.remove(this._focusIdleId);
-            this._focusIdleId = 0;
-        }
-        this._focusIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-            this._focusIdleId = 0;
-            if (this._container && this._isOpen && this._entry)
-                this._entry.clutter_text.grab_key_focus();
-            return GLib.SOURCE_REMOVE;
-        });
+        this.focusInput();
         this._callbacks.onOpenChanged?.(true);
     }
 
@@ -2564,10 +2541,6 @@ export class TranscriptDrawer {
                 GLib.Source.remove(tid);
             this._copyTimers.clear();
         }
-        if (this._pickCancellable) {
-            this._pickCancellable.cancel();
-            this._pickCancellable = null;
-        }
         this._pendingDeleteSessionId = null;
         this._pendingDeleteMessageId = null;
         this._speakingMessageId = null;
@@ -2617,7 +2590,6 @@ export class TranscriptDrawer {
         this._skills = [];
         this._skillMatches = [];
         this._skillSuggestIdx = 0;
-        this._pickCancellable = null;
         this._sendIcon = null;
         this._providerLabel = null;
         this._autoAcceptBtn = null;
@@ -2640,13 +2612,9 @@ export class TranscriptDrawer {
 
     _clearEmptyState() {
         if (this._emptyStateActor) {
-            try {
-                if (this._emptyStateActor.get_parent() === this._messagesBox)
-                    this._messagesBox.remove_child(this._emptyStateActor);
-                this._emptyStateActor.destroy();
-            } catch (_e) {
-                // Ignore if already disposed.
-            }
+            if (this._emptyStateActor.get_parent() === this._messagesBox)
+                this._messagesBox.remove_child(this._emptyStateActor);
+            this._emptyStateActor.destroy();
             this._emptyStateActor = null;
         }
     }
@@ -3117,6 +3085,17 @@ export class TranscriptDrawer {
         group.summaryChevron.icon_name = group.expanded ? 'pan-up-symbolic' : 'pan-down-symbolic';
     }
 
+    _ensureToolGroup(record) {
+        const lastSeg = record.segments[record.segments.length - 1];
+        let targetGroup = lastSeg && lastSeg.type === 'tool_group' ? lastSeg.group : null;
+        if (!targetGroup) {
+            targetGroup = this._createToolGroup();
+            record.contentBox.add_child(targetGroup.container);
+            record.segments.push({type: 'tool_group', group: targetGroup});
+        }
+        return targetGroup;
+    }
+
     _rebuildMessageContent(record) {
         if (!record || !record.contentBox)
             return;
@@ -3150,13 +3129,7 @@ export class TranscriptDrawer {
                 const tool = toolsById.get(part.call_id);
                 if (!tool)
                     continue;
-                const lastSeg = record.segments[record.segments.length - 1];
-                let targetGroup = lastSeg && lastSeg.type === 'tool_group' ? lastSeg.group : null;
-                if (!targetGroup) {
-                    targetGroup = this._createToolGroup();
-                    record.contentBox.add_child(targetGroup.container);
-                    record.segments.push({type: 'tool_group', group: targetGroup});
-                }
+                const targetGroup = this._ensureToolGroup(record);
                 this._appendToolWidget(targetGroup.listBox, tool, targetGroup);
             } else if (part.type === 'attachment') {
                 const chip = new St.BoxLayout({
