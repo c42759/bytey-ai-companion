@@ -113,6 +113,7 @@ files = [
     "prefs/godModePage.js",
     "prefs/httpClient.js",
     "prefs/importExportPage.js",
+    "prefs/mcpSection.js",
     "prefs/skillsPage.js",
     "prefs/visualsPage.js",
     "prefs/voicePage.js",
